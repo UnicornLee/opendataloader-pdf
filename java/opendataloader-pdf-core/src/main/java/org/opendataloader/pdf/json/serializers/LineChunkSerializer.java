@@ -34,6 +34,12 @@ public class LineChunkSerializer extends StdSerializer<LineChunk> {
             throws IOException {
         jsonGenerator.writeStartObject();
         SerializerUtil.writeEssentialInfo(jsonGenerator, lineChunk, JsonName.LINE_CHUNK_TYPE);
+        double[] strokeColor = lineChunk.getStrokeColor();
+        if (strokeColor != null && strokeColor.length == 3) {
+            jsonGenerator.writeNumberField(JsonName.STROKE_COLOR_R, strokeColor[0]);
+            jsonGenerator.writeNumberField(JsonName.STROKE_COLOR_G, strokeColor[1]);
+            jsonGenerator.writeNumberField(JsonName.STROKE_COLOR_B, strokeColor[2]);
+        }
         jsonGenerator.writeEndObject();
     }
 }
