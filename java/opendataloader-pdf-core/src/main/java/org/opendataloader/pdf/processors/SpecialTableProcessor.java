@@ -96,6 +96,6 @@ public class SpecialTableProcessor {
             tableBorderRow.setBoundingBox(box);
             table.getBoundingBox().union(box);
         }
-        return TableBorderProcessor.normalizeAndProcessTableBorder(new ArrayList<>(lines), table, table.getPageNumber());
+        return TableBorderProcessor.normalizeAndProcessTableBorder(new ArrayList<>(lines), table, table.getPageNumber(), null);
     }
 }

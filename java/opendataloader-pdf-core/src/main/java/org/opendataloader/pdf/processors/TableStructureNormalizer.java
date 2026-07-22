@@ -258,6 +258,11 @@ class TableStructureNormalizer {
     private static boolean isReplacementQualityBetter(TableBorder originalTable, TableBorder rebuiltTable) {
         int originalNonEmptyRows = countNonEmptyRows(originalTable);
         int rebuiltNonEmptyRows = countNonEmptyRows(rebuiltTable);
+        float originalEmptyCellRatio = countEmptyCellRadio(originalTable);
+        float rebuiltEmptyCellRatio = countEmptyCellRadio(rebuiltTable);
+        if (rebuiltEmptyCellRatio > originalEmptyCellRatio) {
+            return false;
+        }
         if (rebuiltNonEmptyRows <= originalNonEmptyRows) {
             return false;
         }
@@ -277,6 +282,19 @@ class TableStructureNormalizer {
 
         return rebuiltLineStats.oversizedCellCount < originalLineStats.oversizedCellCount ||
             rebuiltLineStats.maxMeaningfulTextLines < originalLineStats.maxMeaningfulTextLines;
+    }
+
+    private static float countEmptyCellRadio(TableBorder tableBorder) {
+        int count = 0;
+        for (TableBorderRow row : tableBorder.getRows()) {
+            for (TableBorderCell cell : row.getCells()) {
+                if (cell != null && !hasMeaningfulContent(cell.getContents())) {
+                    count++;
+                }
+            }
+        }
+        // 保留四位小数
+        return (float) Math.round(count * 1.0 / (tableBorder.getNumberOfRows() * tableBorder.getNumberOfColumns()) * 10000) / 10000;
     }
 
     private static int countNonEmptyRows(TableBorder tableBorder) {
