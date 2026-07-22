@@ -103,6 +103,7 @@
                 <groupId>org.verapdf</groupId>
                 <artifactId>wcag-algorithms</artifactId>
                 <version>${verapdf.wcag.algs.version}</version>
+                <scope>compile</scope>
                 <exclusions>
                     <exclusion>
                         <groupId>org.jacoco</groupId>

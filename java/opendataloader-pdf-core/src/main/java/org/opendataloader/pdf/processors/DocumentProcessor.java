@@ -46,9 +46,11 @@ import org.verapdf.pd.PDDocument;
 import org.verapdf.tools.StaticResources;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.SemanticTextNode;
+import org.verapdf.wcag.algorithms.entities.content.ImageChunk;
 import org.verapdf.wcag.algorithms.entities.content.LineChunk;
 import org.verapdf.wcag.algorithms.entities.geometry.BoundingBox;
 import org.verapdf.wcag.algorithms.entities.tables.TableBordersCollection;
+import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorder;
 import org.verapdf.wcag.algorithms.semanticalgorithms.consumers.LinesPreprocessingConsumer;
 import org.verapdf.wcag.algorithms.semanticalgorithms.containers.StaticContainers;
 import org.verapdf.xmp.containers.StaticXmpCoreContainers;
@@ -146,7 +148,7 @@ public class DocumentProcessor {
 
             // Phase 2: Output (JSON/MD/HTML/PDF/Text)
             long t0 = System.nanoTime();
-            generateOutputs(inputPdfName, extraction.getContents(), config, extraction.getElementMetadata());
+            generateCustomOutputs(inputPdfName, extraction.getContents(), config, extraction.getElementMetadata());
             long outputNs = System.nanoTime() - t0;
 
             return new ProcessingResult(extraction.getHybridTimings(), extraction.getExtractionNs(), outputNs);
@@ -254,11 +256,15 @@ public class DocumentProcessor {
 
     @SuppressWarnings("unchecked")
     private static List<List<IObject>> processDocument(String inputPdfName, Config config, Set<Integer> pagesToProcess) throws IOException {
+        String absoluteImagesDirectory = StaticLayoutContainers.getImagesDirectory();
         int totalPages = StaticContainers.getDocument().getNumberOfPages();
         List<List<IObject>> contents = new ArrayList<>(Collections.nCopies(totalPages, null));
 
         // Capture ALL ThreadLocal state from main thread for propagation to workers
         final var document = StaticContainers.getDocument();
+        BoundingBox pageBoundingBox = getPageBoundingBox(0);
+        final double height = pageBoundingBox.getHeight();
+        final double width = pageBoundingBox.getWidth();
         final var pdDocument = StaticResources.getDocument();
         final var tableBordersCollection = StaticContainers.getTableBordersCollection();
         final var accumulatedNodeMapper = StaticContainers.getAccumulatedNodeMapper();
@@ -345,7 +351,23 @@ public class DocumentProcessor {
                 new ClusterTableProcessor().processTables(contents);
             }
 
+            new File(config.getOutputFolder()).mkdirs();
+            if (!config.isImageOutputOff() && (config.isGenerateHtml() || config.isGenerateMarkdown() || config.isGenerateJSON())) {
+                String imagesDirectory;
+                if (config.getImageDir() != null && !config.getImageDir().isEmpty()) {
+                    imagesDirectory = config.getImageDir();
+                } else {
+                    String fileName = Paths.get(inputPdfName).getFileName().toString();
+                    imagesDirectory = config.getOutputFolder() + File.separator + FileUtils.getBaseName(fileName) + MarkdownSyntax.IMAGES_DIRECTORY_SUFFIX;
+                }
+                absoluteImagesDirectory = imagesDirectory;
+                StaticLayoutContainers.setImagesDirectory(imagesDirectory);
+                ImagesUtils imagesUtils = new ImagesUtils();
+                imagesUtils.write(contents);
+            }
+
             // Loop 2: TableBorder + TextLine per-page
+            final String finalImagesDirectory = absoluteImagesDirectory;
             pool.submit(() ->
                 IntStream.range(0, totalPages).parallel().forEach(pageNumber -> {
                     if (!shouldProcessPage(pageNumber, pagesToProcess)) {
@@ -355,11 +377,16 @@ public class DocumentProcessor {
                     List<IObject> pageContents = contents.get(pageNumber);
                     if (structured) {
                         TextDecorationProcessor.processStrikethroughAndUnderlinedText(pageContents, pageNumber, config.isDetectStrikethrough());
-                        pageContents = TableBorderProcessor.processTableBorders(pageContents, pageNumber);
+                        pageContents = TableBorderProcessor.processTableBorders(pageContents, pageNumber, finalImagesDirectory);
                         pageContents = pageContents.stream().filter(x -> !(x instanceof LineChunk)).collect(Collectors.toList());
                         pageContents = SpecialTableProcessor.detectSpecialTables(pageContents);
                     }
-                    pageContents = TextLineProcessor.processTextLines(pageContents);
+                    pageContents = TextLineProcessor.processTextLines(pageContents, finalImagesDirectory);
+                    // 对 pageContents 按照每个元素的 bounding box 的 topY 坐标从大到小进行排序，确保从上到下的顺序
+                    pageContents.sort(Comparator.comparingDouble(item -> item.getBoundingBox().getTopY()));
+                    Collections.reverse(pageContents);
+                    // 无线表格识别
+                    pageContents = StreamTableProcessor.processStreamTables(pageContents, pageNumber);
                     contents.set(pageNumber, pageContents);
                 })
             ).get();
@@ -377,7 +404,7 @@ public class DocumentProcessor {
                 // Re-enable once detection precision and target resolution are in
                 // place. (Remaining hardening is tracked in the internal tasks tracker.)
                 // new TableOfContentsProcessor().processTableOfContents(contents);
-                ListProcessor.processLists(contents, false);
+//                ListProcessor.processLists(contents, false);
             }
 
             // Loop 3: Paragraph + Heading per-page (always need ParagraphProcessor for text output)
@@ -388,9 +415,14 @@ public class DocumentProcessor {
                     }
                     propagateState.run();
                     List<IObject> pageContents = contents.get(pageNumber);
-                    pageContents = ParagraphProcessor.processParagraphs(pageContents);
+                    /*pageContents.sort(Comparator.comparingDouble(item -> item.getBoundingBox().getTopY()));
+                    Collections.reverse(pageContents);*/
+                    if (pageNumber == 158) {
+                        int ii = 0;
+                    }
+                    pageContents = ParagraphProcessor.processParagraphs(pageContents, width);
                     if (structured) {
-                        pageContents = ListProcessor.processListsFromTextNodes(pageContents);
+//                        pageContents = ListProcessor.processListsFromTextNodes(pageContents);
                         HeadingProcessor.processHeadings(pageContents, false);
                     }
                     contents.set(pageNumber, pageContents);
@@ -406,13 +438,13 @@ public class DocumentProcessor {
 
             // Caption detection runs after setIDs so that recognizedStructureId is available
             // for linking captions to figures/tables
-            if (structured) {
+            /*if (structured) {
                 for (int pageNumber = 0; pageNumber < totalPages; pageNumber++) {
                     if (shouldProcessPage(pageNumber, pagesToProcess)) {
                         CaptionProcessor.processCaptions(contents.get(pageNumber));
                     }
                 }
-            }
+            }*/
 
             if (structured) {
                 // Cross-page post-processing (must be sequential)
@@ -526,6 +558,12 @@ public class DocumentProcessor {
         return pagesToProcess == null || pagesToProcess.contains(pageNumber);
     }
 
+    public static void generateCustomOutputs(String inputPdfName, List<List<IObject>> contents, Config config,
+                                       Map<Long, ElementMetadata> elementMetadata) throws IOException {
+        JsonWriter.writeToJCustomJson(inputPdfName, config.getOutputFolder(), contents, elementMetadata,
+            null, config.isIncludeHeaderFooter());
+    }
+
     /**
      * Writes the configured output files (JSON/MD/HTML/PDF/Text/images/tagged PDF)
      * from already-extracted contents.
@@ -559,19 +597,6 @@ public class DocumentProcessor {
         }
 
         File inputPDF = new File(inputPdfName);
-        new File(config.getOutputFolder()).mkdirs();
-        if (!config.isImageOutputOff() && (config.isGenerateHtml() || config.isGenerateMarkdown() || config.isGenerateJSON())) {
-            String imagesDirectory;
-            if (config.getImageDir() != null && !config.getImageDir().isEmpty()) {
-                imagesDirectory = config.getImageDir();
-            } else {
-                String fileName = Paths.get(inputPdfName).getFileName().toString();
-                imagesDirectory = config.getOutputFolder() + File.separator + FileUtils.getBaseName(fileName) + MarkdownSyntax.IMAGES_DIRECTORY_SUFFIX;
-            }
-            StaticLayoutContainers.setImagesDirectory(imagesDirectory);
-            ImagesUtils imagesUtils = new ImagesUtils();
-            imagesUtils.write(contents);
-        }
         if (config.isGenerateTaggedPDF()) {
             AutoTaggingProcessor.createTaggedPDF(inputPDF, config.getOutputFolder(),
                 StaticResources.getDocument(), contents);
@@ -656,6 +681,10 @@ public class DocumentProcessor {
         document.parseChunks();
         LinesPreprocessingConsumer linesPreprocessingConsumer = new LinesPreprocessingConsumer();
         linesPreprocessingConsumer.findTableBorders();
+        linesPreprocessingConsumer.getTableBorders().forEach(builders -> builders.forEach(builder -> {
+            TableBorder border = new TableBorder(builder);
+            boolean badTable = border.isBadTable();
+        }));
         StaticContainers.setTableBordersCollection(new TableBordersCollection(linesPreprocessingConsumer.getTableBorders()));
     }
 
@@ -755,7 +784,10 @@ public class DocumentProcessor {
      */
     public static void setIndexesForContentsList(List<IObject> contents) {
         for (int index = 0; index < contents.size(); index++) {
-            contents.get(index).setIndex(index);
+            IObject content = contents.get(index);
+            if (!(content instanceof ImageChunk)) {
+                content.setIndex(index);
+            }
         }
     }
 

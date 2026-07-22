@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>公告解析</title>
+  <script src="https://static.valueonline.cn/static/vue/2.5.22/vue.min.js"></script>
+  <link rel="stylesheet" href="https://static.valueonline.cn/static/stock-ui/1.5.26/theme-chalk/index.css">
+  <link rel="stylesheet" href="./index.css">
+  <script src="https://static.valueonline.cn/static/stock-ui/1.5.26/index.js"></script>
+  <script type="text/javascript" src="Notice_table_2.js"></script>
+  <script type="text/javascript" src="directory.js"></script>
+</head>
+<body>
+<div id="app">
+  <div class="wrapper">
+    <div class="sidebar" id="sidebar">
+      <div class="sidebar-toolbar">
+        <el-row :gutter="10">
+          <el-col :span="18">
+            <el-select v-model="currentPageNumber" placeholder="请选择页码" size="small"
+                       filterable
+                       ref="pageNumber"
+                       @keyup.enter.native="handleEnter"
+                       @change="onChangePageNumber">
+              <el-option v-for="page in pages" :key="page.page_index" :label="page.page_index" :value="page.page_index">
+              </el-option>
+            </el-select>
+          </el-col>
+          <el-col :span="6" v-if="url && url !== ''">
+            <el-button type="primary" size="small" @click="viewPdf">查看源文件</el-button>
+          </el-col>
+        </el-row>
+      </div>
+      <div class="outline">
+        <el-tree :data="bookmarks" @node-click="onNodeClick" @node-contextmenu="onNodeContextMenu" :props="defaultProps">
+        </el-tree>
+      </div>
+    </div>
+    <div class="viewer" id="viewer">
+      <div class="viewer-body">
+        <div class="doc">
+          <div class="page-wrapper" v-for="(item,index) in pages" :key="'pages' + index"
+               :data-number="index + 1">
+            <template v-for="(list,_idx) in item.items">
+              <div class="page-item"
+                   :style="{width: list.item_type ==='image' ? list.width + 'px' : 'auto',
+                 marginLeft: list.x0 + 'px', marginTop: list.margin_top + 'px'}">
+                <template v-if="list.item_type === 'image'">
+                  <img :src="img" v-for="(img, _img) in list.content" :key="'image' + _img">
+                </template>
+                <template v-else-if="list.item_type === 'text'">
+                  <div :style="{fontSize: list.height + 'px'}">{{list.content[0]}}</div>
+                </template>
+                <template v-else-if="list.item_type === 'stream_table' || list.item_type === 'lattice_table'">
+                  <div class="table-overflow">
+                    <div class="table-button">
+                      <el-button type="danger" size="mini" @click="copyTable(index, _idx)">复制</el-button>
+                    </div>
+                    <table :class="list.item_type" :ref="'table' + index + '' + _idx"
+                           :style="{maxWidth: 760 - list.x0 + 'px'}">
+                      <tr v-for="(table, _table) in list.content" :key="'table' + _table + item.page_index + _idx">
+                        <td v-for="(td, _td) in table" :key="'td' + _table + item.page_index + _idx + _td"
+                            :colspan="td.column_len"
+                            :rowspan="td.row_len"
+                            :style="{background: td.bg_color}"
+                            :width="td.width * 1.2"
+                        >
+                          <template v-if="td.cell_type === 'image'">
+                            <img :src="img" v-for="(img, _img) in td.text" :key="_img + 'img'"
+                                 :style="{height:td.height / td.text.length + 'px'}">
+                          </template>
+                          <template v-else>
+                            <div class="cell" v-html="td.text[0]"></div>
+                          </template>
+                        </td>
+                      </tr>
+                    </table>
+                  </div>
+                </template>
+              </div>
+            </template>
+            <div class="footer" :ref="'footer' + (index+1)">
+              {{item.page_index}}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script type="text/javascript">
+var currentUrl = null;
+if(!(typeof(url) === "undefined" || url === null)) {
+  currentUrl = url;
+}
+if (typeof Vue === 'undefined' || typeof STOCK === 'undefined') {
+  alert('网络存在问题，不能够下载依赖的js/css文件');
+} else {
+  new Vue({
+    el: '#app',
+    data: {
+      directory: [],
+      currentPageNumber: 1,
+      pages: data || [],
+      mode: 'all',
+      modes:[
+        'all',
+        'block',
+        'background',
+        'hideTable',
+        'hideFigure'
+      ],
+      treeData:[],
+      bookmarks: bookmarks || [],
+      defaultProps: {
+        label: 'text'
+      },
+      url: currentUrl
+    },
+    mounted: function() {
+      var _this = this;
+      document.getElementById('viewer').addEventListener('scroll', () => {
+        const visiblePages = this.getVisiblePages(document.getElementById('viewer'));
+        for (const page of visiblePages) {
+          //仅仅显示页面
+          page.el.style.display = 'block';
+        }
+        if (visiblePages.length > 0) {
+          _this.currentPageNumber = visiblePages[0].number;
+        }
+      });
+    },
+    computed: {
+      setColspan: function() {
+        return function(index, table) {
+          if (table[index + 1]) {
+            return 0;
+          }
+          var num = 0;
+          for (var i = index; i < table.length - 1; i++) {
+            if (!table[i]) {
+              num++;
+            }
+          }
+          return num;
+        }
+      }
+    },
+    methods: {
+
+      getVisiblePages(el) {
+        function hasOverlap(a, b) {
+          //判断a和b是否有重叠（相交）
+          if (a[2] <= b[0] || a[0] >= b[2] || a[1] >= b[3] || a[3] <= b[1]) {
+            return false;
+          } else {
+            return true;
+          }
+        }
+        const visibleRect = [
+          el.scrollLeft + el.offsetLeft,
+          el.scrollTop + el.offsetTop,
+          el.scrollLeft + el.offsetLeft + el.clientWidth,
+          el.scrollTop + el.offsetTop + el.clientHeight
+        ];
+        //找到当前可见区域最大的页面，就认为是当前的页面
+
+        const visiblePages = [];
+        const pages = document.querySelectorAll('.page-wrapper');
+        for (let page of pages) {
+          //获得page在可见区域的坐标，原点为viewer的左上角
+          const rect = [
+            page.offsetLeft + page.clientLeft,
+            page.offsetTop + page.clientTop,
+            page.offsetLeft + page.clientLeft + page.clientWidth,
+            page.offsetTop + page.clientTop + page.clientHeight
+          ]
+          if (hasOverlap(rect, visibleRect)) {
+            const area = page.clientWidth * page.clientHeight;
+            const x0 = Math.max(rect[0], visibleRect[0]);
+            const x1 = Math.min(rect[2], visibleRect[2]);
+            const y0 = Math.max(rect[1], visibleRect[1]);
+            const y1 = Math.min(rect[3], visibleRect[3]);
+            const overlapArea = (x1 - x0) * (y1 - y0);
+            //精确到.01即可
+            const percent = parseInt(overlapArea / area * 100);
+            visiblePages.push({
+              el: page,
+              number: parseInt(page.dataset.number),
+              percent: percent
+            });
+          }
+        }
+
+        visiblePages.sort((a, b) => {
+          //放宽比较，如：0.8345 == 0.8365
+          const p1 = a.percent;
+          const p2 = b.percent;
+          if (p1 === p2) {
+            return a.number - b.number;
+          } else {
+            //大的排前面
+            return p2 - p1;
+          }
+        });
+        //日志的时候需要复制一个，否则后面会添加新的页面到这个对象中
+        return visiblePages
+      },
+      onChangePageNumber: function(n) {
+        this.showPage(n, true);
+      },
+      showPage: function(number, scroll = false) {
+        const el = document.querySelector(`.page-wrapper[data-number="${number}"]`);
+        el.style.display = 'block';
+        if (scroll) {
+          el.scrollIntoView();
+        }
+      },
+
+      onChangeMode: function(mode){
+        //console.log('mode',mode)
+        const els = document.querySelectorAll('.page');
+        for(const el of els){
+          el.classList.toggle('page-background',mode=='background')
+          el.classList.toggle('page-block',mode=='block')
+          el.classList.toggle('hide-table',mode=='hideTable')
+          el.classList.toggle('hide-figure',mode==='hideFigure')
+        }
+
+      },
+      onNodeClick: function(data, node, comp) {
+        this.showPage(data.page_num, true)
+
+      },
+      gotoElement: function(el) {
+        //因为采用按需显示，就需要先设置display:block
+        const page = el.closest('.page');
+        page.style.display = 'block';
+        el.scrollIntoView({ inline: 'nearest', block: 'start' });
+      },
+      copyTable(index1, index2) {
+        var table = this.$refs['table' + index1 + '' + index2];
+        if (table) {
+          var e = document.body
+            , a = null
+            , s = null;
+          if (document.createRange && window.getSelection) {
+            a = document.createRange(),
+              (s = window.getSelection()).removeAllRanges();
+            try {
+              a.selectNodeContents(table[0]),
+                s.addRange(a)
+            } catch (e) {
+              a.selectNode(table[0]),
+                s.addRange(a)
+            }
+          } else
+            e.createTextRange && ((a = e.createTextRange()).moveToElementText(table[0]),
+              a.select());
+          document.execCommand("Copy", !1, null)
+        }
+      },
+      onNodeContextMenu: function(event,data,node,comp){
+        //本来是想双击事件的，但是没有提供，需要修改element的代码，所以就简单实用右键点击了
+
+        target = data.target
+        console.log('===>',target);
+        if(!target){
+          return
+        }
+
+
+        event.preventDefault();
+        if(target.node){
+          const node = target.node;
+          const el = document.getElementById(`${node.type}-${node.id}-0`);
+          if(el){
+            this.gotoElement(el);
+            return
+          }
+        }
+        //如果没有使用节点的，就显示页面就可以，不滚动到bbox对应的位置了
+        if(target.bbox && target.page_number>=1){
+          this.showPage(target.page_number,true);
+        }
+      },
+      handleEnter() {
+        var page = this.$refs.pageNumber.query;
+        page = parseInt(page);
+        for (var i = 0; i < this.pages.length;i++) {
+          if (page === this.pages[i].page_index) {
+            this.onChangePageNumber(page);
+            this.$refs.pageNumber.blur();
+            break;
+          }
+        }
+      },
+      viewPdf: function() {
+        window.open(this.url);
+      }
+    }
+  })
+  Vue.use(STOCK);
+}
+</script>
+</body>
+</html>

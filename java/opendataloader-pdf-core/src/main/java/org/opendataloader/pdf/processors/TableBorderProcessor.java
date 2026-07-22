@@ -52,6 +52,10 @@ public class TableBorderProcessor {
     private static final ThreadLocal<Integer> currentDepth = ThreadLocal.withInitial(() -> 0);
 
     public static List<IObject> processTableBorders(List<IObject> contents, int pageNumber) {
+        return processTableBorders(contents, pageNumber, null);
+    }
+
+    public static List<IObject> processTableBorders(List<IObject> contents, int pageNumber, String imagesDirectory) {
         // Check if TableBordersCollection exists (may be null if no borders detected during preprocessing)
         if (StaticContainers.getTableBordersCollection() == null) {
             return new ArrayList<>(contents);
@@ -97,7 +101,7 @@ public class TableBorderProcessor {
             Map<TableBorder, TableBorder> normalizedTables = new HashMap<>();
             for (TableBorder border : processedTableBorders) {
                 StaticContainers.getTableBordersCollection().removeTableBorder(border, pageNumber);
-                TableBorder normalizedTable = normalizeAndProcessTableBorder(contents, border, pageNumber);
+                TableBorder normalizedTable = normalizeAndProcessTableBorder(contents, border, pageNumber, imagesDirectory);
                 normalizedTables.put(border, normalizedTable);
                 // Remove the outer table while processing its contents, then restore the page index
                 // with the final instance so later lookups still see the normalized table.
@@ -162,36 +166,36 @@ public class TableBorderProcessor {
     }
 
     public static void processTableBorder(TableBorder tableBorder, int pageNumber) {
-        processTableBorderContents(tableBorder, pageNumber);
+        processTableBorderContents(tableBorder, pageNumber, null);
     }
 
-    static TableBorder normalizeAndProcessTableBorder(List<IObject> rawPageContents, TableBorder tableBorder, int pageNumber) {
+    static TableBorder normalizeAndProcessTableBorder(List<IObject> rawPageContents, TableBorder tableBorder, int pageNumber, String imagesDirectory) {
         TableBorder normalizedTable = TableStructureNormalizer.normalize(rawPageContents, tableBorder);
-        processTableBorderContents(normalizedTable, pageNumber);
+        processTableBorderContents(normalizedTable, pageNumber, imagesDirectory);
         return normalizedTable;
     }
 
-    private static void processTableBorderContents(TableBorder tableBorder, int pageNumber) {
+    private static void processTableBorderContents(TableBorder tableBorder, int pageNumber, String imagesDirectory) {
         for (int rowNumber = 0; rowNumber < tableBorder.getNumberOfRows(); rowNumber++) {
             TableBorderRow row = tableBorder.getRow(rowNumber);
             for (int colNumber = 0; colNumber < tableBorder.getNumberOfColumns(); colNumber++) {
                 TableBorderCell tableBorderCell = row.getCell(colNumber);
                 if (tableBorderCell.getRowNumber() == rowNumber && tableBorderCell.getColNumber() == colNumber) {
-                    tableBorderCell.setContents(processTableCellContent(tableBorderCell.getContents(), pageNumber));
+                    tableBorderCell.setContents(processTableCellContent(tableBorderCell.getContents(), pageNumber, imagesDirectory));
                 }
             }
         }
     }
 
-    private static List<IObject> processTableCellContent(List<IObject> contents, int pageNumber) {
-        List<IObject> newContents = TableBorderProcessor.processTableBorders(contents, pageNumber);
-        newContents = TextLineProcessor.processTextLines(newContents);
+    private static List<IObject> processTableCellContent(List<IObject> contents, int pageNumber, String imagesDirectory) {
+        List<IObject> newContents = TableBorderProcessor.processTableBorders(contents, pageNumber, imagesDirectory);
+        newContents = TextLineProcessor.processTextLines(newContents, imagesDirectory);
         List<List<IObject>> contentsList = new ArrayList<>(1);
         contentsList.add(newContents);
-        ListProcessor.processLists(contentsList, true);
+//        ListProcessor.processLists(contentsList, true);
         newContents = contentsList.get(0);
         newContents = ParagraphProcessor.processParagraphs(newContents);
-        newContents = ListProcessor.processListsFromTextNodes(newContents);
+//        newContents = ListProcessor.processListsFromTextNodes(newContents);
         HeadingProcessor.processHeadings(newContents, true);
         DocumentProcessor.setIDs(newContents);
         CaptionProcessor.processCaptions(newContents);

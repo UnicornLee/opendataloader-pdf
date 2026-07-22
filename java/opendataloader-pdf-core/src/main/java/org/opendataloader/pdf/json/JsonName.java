@@ -69,6 +69,28 @@ public class JsonName {
     public static final String NUMBERING_STYLE = "numbering style";
     public static final String SOURCE = "source";
     public static final String DATA = "data";
+    public static final String ITEMS = "items";
+    public static final String PAGE_INDEX = "page_index";
+    public static final String WIDTH = "width";
+    public static final String HEIGHT = "height";
+    public static final String IS_OCR = "is_ocr";
+    public static final String MARGIN_LEFT = "margin_left";
+    public static final String MARGIN_RIGHT = "margin_right";
+    public static final String MARGIN_TOP = "margin_top";
+    public static final String MARGIN_BOTTOM = "margin_bottom";
+    public static final String ITEM_TYPE = "item_type";
+    public static final String FONT_UNDERLINE_SIZE = "font_size";
+    public static final String IS_THIRD_PARTY = "is_third_party";
+    public static final String X0 = "x0";
+    public static final String X1 = "x1";
+    public static final String Y0 = "y0";
+    public static final String Y1 = "y1";
+    public static final String IS_BOOKMARK = "is_bookmark";
+    public static final String ROW_LENGTH = "row_len";
+    public static final String COLUMN_LENGTH = "column_len";
+    public static final String CELL_RADIO = "cell_radio";
+    public static final String CELL_TYPE = "cell_type";
+    public static final String TEXT = "text";
     public static final String IMAGE_FORMAT = "format";
     public static final String FORMULA_TYPE = "formula";
     public static final String DESCRIPTION = "description";
@@ -78,4 +100,7 @@ public class JsonName {
     public static final String PDFUA_TAG = "pdfua_tag";
     public static final String SOURCE_LABEL = "source label";
     public static final String HYBRID = "hybrid";
+    public static final String STROKE_COLOR_R = "stroke color r";
+    public static final String STROKE_COLOR_G = "stroke color g";
+    public static final String STROKE_COLOR_B = "stroke color b";
 }
