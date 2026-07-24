@@ -383,10 +383,17 @@ public class DocumentProcessor {
                     }
                     pageContents = TextLineProcessor.processTextLines(pageContents, finalImagesDirectory);
                     // 对 pageContents 按照每个元素的 bounding box 的 topY 坐标从大到小进行排序，确保从上到下的顺序
-                    pageContents.sort(Comparator.comparingDouble(item -> item.getBoundingBox().getTopY()));
+                    pageContents.sort(Comparator.comparingDouble(item -> item.getTopY()));
                     Collections.reverse(pageContents);
                     // 无线表格识别
-                    pageContents = StreamTableProcessor.processStreamTables(pageContents, pageNumber);
+                    if (config.getCustomOptions() != null && config.getCustomOptions().containsKey("paddleUrl")) {
+                        String paddleUrl = config.getCustomOptions().get("paddleUrl").toString();
+                        try {
+                            pageContents = StreamTableProcessor.processStreamTables(inputPdfName, pageContents, pageNumber, width, height, paddleUrl);
+                        } catch (IOException e) {
+                            throw new RuntimeException(e);
+                        }
+                    }
                     contents.set(pageNumber, pageContents);
                 })
             ).get();
@@ -415,7 +422,7 @@ public class DocumentProcessor {
                     }
                     propagateState.run();
                     List<IObject> pageContents = contents.get(pageNumber);
-                    /*pageContents.sort(Comparator.comparingDouble(item -> item.getBoundingBox().getTopY()));
+                    /*pageContents.sort(Comparator.comparingDouble(item -> item.getTopY()));
                     Collections.reverse(pageContents);*/
                     if (pageNumber == 158) {
                         int ii = 0;

@@ -76,11 +76,13 @@
         <central-publishing.plugin.version>0.11.0</central-publishing.plugin.version>
         <checkstyle.plugin.version>3.6.0</checkstyle.plugin.version>
         <spotbugs.plugin.version>4.10.3.0</spotbugs.plugin.version>
+        <spring-boot.version>3.4.5</spring-boot.version>
     </properties>
 
     <modules>
         <module>opendataloader-pdf-core</module>
         <module>opendataloader-pdf-cli</module>
+        <module>opendataloader-pdf-server</module>
     </modules>
 
     <dependencyManagement>

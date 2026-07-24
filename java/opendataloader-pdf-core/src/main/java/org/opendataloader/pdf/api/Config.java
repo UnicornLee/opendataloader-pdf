@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -62,6 +63,9 @@ public class Config {
 
     /** Placeholder string for page number in separators. */
     public static final String PAGE_NUMBER_STRING = "%page-number%";
+
+    private Map<String, Object> customOptions;
+
     private String password;
     private boolean isGenerateMarkdown = false;
     private boolean isGenerateHtml = false;
@@ -919,4 +923,11 @@ public class Config {
         }
     }
 
+    public Map<String, Object> getCustomOptions() {
+        return customOptions;
+    }
+
+    public void setCustomOptions(Map<String, Object> customOptions) {
+        this.customOptions = customOptions;
+    }
 }

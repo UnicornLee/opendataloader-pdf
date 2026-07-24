@@ -23,6 +23,8 @@ import com.fasterxml.jackson.core.util.DefaultPrettyPrinter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.custom.constants.GlobalConstant;
+import org.opendataloader.pdf.custom.dto.PageItem;
+import org.opendataloader.pdf.custom.dto.TableSingleItem;
 import org.opendataloader.pdf.custom.entities.Bookmark;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
 import org.opendataloader.pdf.custom.utils.BookmarkUtils;
@@ -406,6 +408,42 @@ public class JsonWriter {
                             imageMap.put(JsonName.CONTENT, Arrays.asList(absolutePath));
                             imageMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - imageChunk.getTopY());
                             jsonGenerator.writeObject(imageMap);
+                        }
+                        if (content instanceof PageItem) {
+                            PageItem pageItem = (PageItem) content;
+                            if ("stream_table".equals(pageItem.getItemType())) {
+                                Map<String, Object> tableMap = new HashMap<>();
+                                tableMap.put(JsonName.ITEM_TYPE, "stream_table");
+                                tableMap.put(JsonName.WIDTH, pageItem.getWidth());
+                                tableMap.put(JsonName.HEIGHT, pageItem.getHeight());
+                                tableMap.put(JsonName.X0, pageItem.getX0());
+                                tableMap.put(JsonName.X1, pageItem.getX1());
+                                tableMap.put(JsonName.Y0, pageItem.getY0());
+                                tableMap.put(JsonName.Y1, pageItem.getY1());
+                                tableMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - pageItem.getTopY());
+                                tableMap.put(JsonName.IS_THIRD_PARTY, true);
+                                List<List<Map<String, Object>>> rowList = new ArrayList<>();
+                                List<List<TableSingleItem>> tableContent = (List<List<TableSingleItem>>) pageItem.getContent();
+                                for (List<TableSingleItem> row : tableContent) {
+                                    List<Map<String, Object>> rowMapList = new ArrayList<>();
+                                    for (TableSingleItem cell : row) {
+                                        Map<String, Object> cellMap = new HashMap<>();
+                                        cellMap.put(JsonName.CELL_RADIO, cell.getCellRadio());
+                                        cellMap.put(JsonName.ROW_LENGTH, cell.getRowLen());
+                                        cellMap.put(JsonName.COLUMN_LENGTH, cell.getColumnLen());
+                                        cellMap.put(JsonName.HEIGHT, cell.getHeight());
+                                        cellMap.put(JsonName.WIDTH, cell.getWidth());
+                                        cellMap.put(JsonName.X0, cell.getX0());
+                                        cellMap.put(JsonName.X1, cell.getX1());
+                                        cellMap.put(JsonName.TEXT, cell.getText());
+                                        cellMap.put(JsonName.CELL_TYPE, "text");
+                                        rowMapList.add(cellMap);
+                                    }
+                                    rowList.add(rowMapList);
+                                }
+                                tableMap.put(JsonName.CONTENT, rowList);
+                                jsonGenerator.writeObject(tableMap);
+                            }
                         }
                         if (content instanceof TableBorder) {
                             TableBorder tableBorder = (TableBorder) content;
