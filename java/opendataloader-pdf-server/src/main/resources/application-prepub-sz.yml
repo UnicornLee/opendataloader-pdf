@@ -1,0 +1,50 @@
+server:
+    port: 8089
+
+log:
+    level: DEBUG
+    appender: stash
+    home:
+    stash:
+        addresses: node01.public.logstash.test:9999,node02.public.logstash.test:9999
+
+consul:
+    # 替换 172.16.20.98
+    host: node02.public.consul.test
+    port: 8500
+    acl-token: '850cbbf8-bf6a-57a8-6ca5-8b3614a70553'
+
+basic:
+    version: 2.0
+    env: test
+    pdf_url_prefix: https://ydannouncementbucket.obs.cn-north-1.myhuaweicloud.com/
+    is_ocr: true
+    complete_display: false
+    parse_stream_table: true
+
+# pulsar监听
+pulsar:
+    servers: pulsar://172.16.20.97:6650,172.16.20.98:6650,172.16.20.99:6650
+    token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwdWxzYXItdXNlciJ9.JKJIHQiiuVyv9TnsFQCLhobUUnycOvehU0bGe3gr5xA
+    receive_topic_name: capital/pdf_parse_common/pdf_parse_increment
+    send_topic_name: capital/pdf_parse_common/pdf_parse_result
+    ocr_send_topic_name: capital/pdf_parse_common/pdf_parse_ocr_image_analysis
+    ocr_receive_topic_name: capital/pdf_parse_common/pdf_parse_ocr_image_analysis_result
+
+oss:
+    template_bucket_name: stock-temp-bucket
+    permanent_bucket_name: common-pdf-bucket
+    endpoint: https://obs.cn-north-1.myhuaweicloud.com
+    access_key: EUD3T68PPED8VI2ZHX2K
+    secret_key: qOe8kcPGpJk0ZTIo1baWqQubShQoiyfOZThbp5dE
+    domain_name: https://common-pdf-bucket.obs.cn-north-1.myhuaweicloud.com/
+
+paddle:
+    url: http://192.168.1.193:8080/layout-parsing
+
+pdf:
+    temp:
+        path: /tmp/pdf_parse
+
+output:
+    path: /tmp/pdf_parse/output

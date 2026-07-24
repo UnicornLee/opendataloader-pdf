@@ -16,6 +16,7 @@
 package org.opendataloader.pdf.json;
 
 import com.fasterxml.jackson.core.Version;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 import org.opendataloader.pdf.entities.SemanticFormula;
@@ -31,6 +32,14 @@ import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorderRow;
 
 public class ObjectMapperHolder {
     private static final ObjectMapper objectMapper = new ObjectMapper();
+    static {
+        // External API responses (e.g. Paddle's layout-parsing) evolve over
+        // time and arrive with fields the local DTO does not model. Failing
+        // on every such addition makes the integration brittle, so we ignore
+        // unknown deserialization fields globally. Serialization strictness
+        // is unaffected.
+        objectMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+    }
 
     static {
 
