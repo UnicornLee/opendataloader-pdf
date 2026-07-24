@@ -393,10 +393,17 @@ public class DocumentProcessor {
                     }
                     pageContents = TextLineProcessor.processTextLines(pageContents, finalImagesDirectory);
                     // 对 pageContents 按照每个元素的 bounding box 的 topY 坐标从大到小进行排序，确保从上到下的顺序
-                    pageContents.sort(Comparator.comparingDouble(item -> item.getBoundingBox().getTopY()));
+                    pageContents.sort(Comparator.comparingDouble(item -> item.getTopY()));
                     Collections.reverse(pageContents);
                     // 无线表格识别
-                    pageContents = StreamTableProcessor.processStreamTables(pageContents, pageNumber);
+                    if (config.getCustomOptions() != null && config.getCustomOptions().containsKey("paddleUrl")) {
+                        String paddleUrl = config.getCustomOptions().get("paddleUrl").toString();
+                        try {
+                            pageContents = StreamTableProcessor.processStreamTables(inputPdfName, pageContents, pageNumber, width, height, paddleUrl);
+                        } catch (IOException e) {
+                            throw new RuntimeException(e);
+                        }
+                    }
                     contents.set(pageNumber, pageContents);
                 })
             ).get();
@@ -425,6 +432,11 @@ public class DocumentProcessor {
                     }
                     propagateState.run();
                     List<IObject> pageContents = contents.get(pageNumber);
+                    /*pageContents.sort(Comparator.comparingDouble(item -> item.getBoundingBox().getTopY()));
+                    Collections.reverse(pageContents);*/
+                    if (pageNumber == 158) {
+                        int ii = 0;
+                    }
                     pageContents = ParagraphProcessor.processParagraphs(pageContents, width);
                     if (structured) {
 //                        pageContents = ListProcessor.processListsFromTextNodes(pageContents);
@@ -602,19 +614,6 @@ public class DocumentProcessor {
         }
 
         File inputPDF = new File(inputPdfName);
-        new File(config.getOutputFolder()).mkdirs();
-        if (!config.isImageOutputOff() && (config.isGenerateHtml() || config.isGenerateMarkdown() || config.isGenerateJSON())) {
-            String imagesDirectory;
-            if (config.getImageDir() != null && !config.getImageDir().isEmpty()) {
-                imagesDirectory = config.getImageDir();
-            } else {
-                String fileName = Paths.get(inputPdfName).getFileName().toString();
-                imagesDirectory = config.getOutputFolder() + File.separator + FileUtils.getBaseName(fileName) + MarkdownSyntax.IMAGES_DIRECTORY_SUFFIX;
-            }
-            StaticLayoutContainers.setImagesDirectory(imagesDirectory);
-            ImagesUtils imagesUtils = new ImagesUtils();
-            imagesUtils.write(contents);
-        }
         if (config.isGenerateTaggedPDF()) {
             AutoTaggingProcessor.createTaggedPDF(inputPDF, config.getOutputFolder(),
                 StaticResources.getDocument(), contents);
@@ -705,6 +704,10 @@ public class DocumentProcessor {
         document.parseChunks();
         LinesPreprocessingConsumer linesPreprocessingConsumer = new LinesPreprocessingConsumer();
         linesPreprocessingConsumer.findTableBorders();
+        linesPreprocessingConsumer.getTableBorders().forEach(builders -> builders.forEach(builder -> {
+            TableBorder border = new TableBorder(builder);
+            boolean badTable = border.isBadTable();
+        }));
         StaticContainers.setTableBordersCollection(new TableBordersCollection(linesPreprocessingConsumer.getTableBorders()));
     }
 

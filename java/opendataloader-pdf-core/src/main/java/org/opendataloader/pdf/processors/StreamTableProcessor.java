@@ -1,5 +1,12 @@
 package org.opendataloader.pdf.processors;
 
+import org.apache.pdfbox.Loader;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.rendering.PDFRenderer;
+import org.opendataloader.pdf.custom.dto.PageItem;
+import org.opendataloader.pdf.custom.dto.PageItemResultDto;
+import org.opendataloader.pdf.custom.dto.TextInOcrAnalysisResultDto;
+import org.opendataloader.pdf.custom.utils.PaddleOcrResultUtils;
 import org.opendataloader.pdf.custom.utils.StrUtils;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.content.ImageChunk;
@@ -7,6 +14,10 @@ import org.verapdf.wcag.algorithms.entities.content.TextChunk;
 import org.verapdf.wcag.algorithms.entities.content.TextLine;
 import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorder;
 
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -15,20 +26,143 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalDouble;
-import java.util.Set;
+import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 public class StreamTableProcessor {
 
-    public static List<IObject> processStreamTables(List<IObject> contents, int pageNumber) {
+    private static final Logger LOGGER = Logger.getLogger(StreamTableProcessor.class.getCanonicalName());
+
+    public static List<IObject> processStreamTables(String pdfPath, List<IObject> contents, int pageNumber, double width, double height, String paddleUrl) throws IOException {
         // 1. 先将文本信息按行进行聚合
         List<List<IObject>> rows = groupByRows(contents);
         // 2. 收集行内文本间的空隙范围
         // 3. 根据空隙范围是否存在无线表格
         boolean isExisted = existStreamTable(rows);
         // 4. 对整页内容进行截图发给大模型进行内容的识别
-        if (isExisted) {}
-        // 5. 根据识别回来的内容替换无线表格的部分
+        if (isExisted) {
+            LOGGER.info("Page " + pageNumber + " of {" + pdfPath + "} contains stream tables.");
+            // 将该页从pdf中提取出来，生成单页pdf
+//            File singlePagePdfFile = extractSinglePagePdf(pdfPath, pageNumber);
+            // 对该页整页截图，生成图片
+            File singlePageImageFile = extractSinglePageImage(pdfPath, pageNumber);
+            // 发送单页pdf到大模型进行内容识别
+            TextInOcrAnalysisResultDto textInOcrAnalysisResultDto = PaddleOcrProcessor.getPaddleResponse(singlePageImageFile, 1, paddleUrl);
+            PageItemResultDto pageItemResultDto = PaddleOcrResultUtils.generateJsonResultByTextInOcrAnalysisResultDto(singlePageImageFile, textInOcrAnalysisResultDto, width, height, pageNumber);
+            singlePageImageFile.delete();
+            // // 5. 根据识别回来的内容替换无线表格的部分
+            return replaceStreamTables(pageItemResultDto, contents);
+        }
+
         return new ArrayList<>(contents);
+    }
+
+    private static List<IObject> replaceStreamTables(PageItemResultDto pageItemResultDto, List<IObject> contents) {
+        // Implementation for replacing stream tables with recognized content
+        if (pageItemResultDto != null && pageItemResultDto.getPageItemList() != null && pageItemResultDto.getPageItemList().size() > 0) {
+            List<PageItem> tables = pageItemResultDto.getPageItemList().stream().filter(pageItem -> "stream_table".equals(pageItem.getItemType())).collect(Collectors.toList());
+            if (tables.size() > 0) {
+                for (PageItem table : tables) {
+                    // 根据 table 的位置和大小，替换 contents 中对应的内容
+                    double tableTopY = table.getTopY();
+                    double tableBottomY = table.getBottomY();
+
+                    // 找到 contents 中在该范围内的内容，并进行替换
+                    List<IObject> toRemove = new ArrayList<>();
+                    boolean hasTable = false;
+                    for (IObject content : contents) {
+                        if (((content.getTopY() + content.getBottomY()) / 2 >= tableBottomY &&
+                            (content.getTopY() + content.getBottomY()) / 2 <= tableTopY) ||
+                            (content.getBottomY() > tableBottomY && content.getBottomY() < tableTopY &&
+                                (tableTopY - content.getBottomY()) / content.getHeight() >= 0.3) ||
+                            (content.getTopY() > tableBottomY && content.getTopY() < tableTopY &&
+                                (content.getTopY() - tableBottomY) / content.getHeight() >= 0.3)) {
+                            if (content instanceof TableBorder) {
+                                hasTable = true;
+                            }
+                            toRemove.add(content);
+                        }
+                    }
+                    if (!hasTable) {
+                        contents.removeAll(toRemove);
+                        // 将识别出来的表格内容添加到 contents 中
+                        contents.add(table);
+                    }
+                }
+            }
+            contents.sort(Comparator.comparingDouble(item -> item.getTopY()));
+            Collections.reverse(contents);
+        }
+
+        return new ArrayList<>(contents);
+    }
+
+    /**
+     * Extracts the {@code pageNumber}-th page (0-based) from {@code pdfPath} into a
+     * standalone single-page PDF written next to the source file. The output file
+     * is named {@code <source-stem>-<pageNumber>.pdf}. If a file already exists at
+     * that path it is overwritten silently. The returned path can be passed
+     * directly to {@link PaddleOcrProcessor#getPaddleResponse}.
+     *
+     * @param pdfPath    absolute path to the source multi-page PDF
+     * @param pageNumber 0-based page index to extract (matches PDFBox's indexing
+     *                   and the index used throughout the call chain in this
+     *                   package)
+     * @return absolute path of the newly written single-page PDF
+     * @throws IOException if loading the source PDF or saving the new one fails
+     */
+    private static File extractSinglePagePdf(String pdfPath, int pageNumber) throws IOException {
+        File source = new File(pdfPath);
+        String baseName = source.getName();
+        int dotIdx = baseName.lastIndexOf('.');
+        String stem = (dotIdx > 0) ? baseName.substring(0, dotIdx) : baseName;
+        File outputFile = new File(source.getParentFile(), stem + "-" + pageNumber + ".pdf");
+
+        try (PDDocument sourceDoc = Loader.loadPDF(source);
+             PDDocument singlePageDoc = new PDDocument()) {
+            // addPage also removes the page from sourceDoc, which is fine since
+            // sourceDoc is closed immediately after.
+            singlePageDoc.addPage(sourceDoc.getPage(pageNumber));
+            singlePageDoc.save(outputFile);
+        }
+        return outputFile;
+    }
+
+    /**
+     * DPI used when rasterising a single page for the Paddle OCR call. 200 DPI
+     * is a common sweet spot for text/table OCR — high enough that glyphs stay
+     * legible to the model, low enough to keep the encoded payload small enough
+     * for the base64 request body without blowing past the server's limit.
+     */
+    private static final float SINGLE_PAGE_IMAGE_DPI = 300.0f;
+
+    /**
+     * Renders the {@code pageNumber}-th page (0-based) of {@code pdfPath} into
+     * a standalone PNG written next to the source file. The output file is named
+     * {@code <source-stem>-<pageNumber>.png}. If a file already exists at that
+     * path it is overwritten silently. The returned path can be passed directly
+     * to {@link PaddleOcrProcessor#getPaddleResponse}.
+     *
+     * @param pdfPath    absolute path to the source multi-page PDF
+     * @param pageNumber 0-based page index to render (matches PDFBox's indexing
+     *                   and the index used throughout the call chain in this
+     *                   package)
+     * @return absolute path of the newly written single-page PNG
+     * @throws IOException if loading the source PDF or writing the image fails
+     */
+    private static File extractSinglePageImage(String pdfPath, int pageNumber) throws IOException {
+        File source = new File(pdfPath);
+        String baseName = source.getName();
+        int dotIdx = baseName.lastIndexOf('.');
+        String stem = (dotIdx > 0) ? baseName.substring(0, dotIdx) : baseName;
+        File outputFile = new File(source.getParentFile(), stem + "-" + pageNumber + ".png");
+
+        try (PDDocument sourceDoc = Loader.loadPDF(source)) {
+            PDFRenderer renderer = new PDFRenderer(sourceDoc);
+            BufferedImage pageImage = renderer.renderImageWithDPI(pageNumber, SINGLE_PAGE_IMAGE_DPI);
+            ImageIO.write(pageImage, "PNG", outputFile);
+        }
+        return outputFile;
     }
 
     private static List<List<IObject>> groupByRows(List<IObject> contents) {
@@ -37,7 +171,7 @@ public class StreamTableProcessor {
         for (IObject content : contents) {
             if (content instanceof TableBorder || content instanceof ImageChunk) {
                 if (currentRow.size() > 0) {
-                    currentRow.sort(Comparator.comparingDouble(item -> item.getBoundingBox().getLeftX()));
+                    currentRow.sort(Comparator.comparingDouble(item -> item.getLeftX()));
                     rows.add(currentRow);
                     currentRow = new ArrayList<>();
                 }
@@ -64,11 +198,11 @@ public class StreamTableProcessor {
                     currentRow.addAll(validChunks);
                 } else {
                     Double maxTopY = currentRow.stream()
-                        .mapToDouble(obj -> obj.getBoundingBox().getTopY())
+                        .mapToDouble(obj -> obj.getTopY())
                         .max()
                         .orElse(0.0);
                     Double minBottomY = currentRow.stream()
-                        .mapToDouble(obj -> obj.getBoundingBox().getBottomY())
+                        .mapToDouble(obj -> obj.getBottomY())
                         .min()
                         .orElse(0.0);
                     double middleY = (content.getTopY() + content.getBottomY()) / 2;
@@ -77,7 +211,7 @@ public class StreamTableProcessor {
                             && ((TextLine) content).getBaseLine() < maxTopY)) {
                         currentRow.addAll(validChunks);
                     } else {
-                        currentRow.sort(Comparator.comparingDouble(item -> item.getBoundingBox().getLeftX()));
+                        currentRow.sort(Comparator.comparingDouble(item -> item.getLeftX()));
                         rows.add(currentRow);
                         currentRow = new ArrayList<>();
                         currentRow.addAll(validChunks);
@@ -86,7 +220,7 @@ public class StreamTableProcessor {
             }
         }
         if (currentRow.size() > 0) {
-            currentRow.sort(Comparator.comparingDouble(item -> item.getBoundingBox().getLeftX()));
+            currentRow.sort(Comparator.comparingDouble(item -> item.getLeftX()));
             rows.add(currentRow);
         }
 
