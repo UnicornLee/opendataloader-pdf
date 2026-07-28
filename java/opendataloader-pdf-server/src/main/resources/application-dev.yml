@@ -44,6 +44,5 @@ paddle:
 pdf:
     temp:
         path: D:\\Downloads\\opendataloader-pdf-cli-2.4.6
-
-output:
-    path: D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\output
+    output:
+        path: D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\output
