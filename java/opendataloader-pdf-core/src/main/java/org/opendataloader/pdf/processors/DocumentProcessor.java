@@ -1162,6 +1162,12 @@ public class DocumentProcessor {
         if (!isLatexExpression(text)) {
             return null;
         }
+        // Normalize LaTeX delimiters: strip any stray $ and wrap with $$...$$
+        text = text.replace("$", "").trim();
+        if (text.isEmpty()) {
+            return null;
+        }
+        text = "$$" + text + "$$";
         return createTextChunk(text, bbox);
     }
 
