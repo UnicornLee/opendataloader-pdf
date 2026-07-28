@@ -90,6 +90,7 @@ public class JsonName {
     public static final String COLUMN_LENGTH = "column_len";
     public static final String CELL_RADIO = "cell_radio";
     public static final String CELL_TYPE = "cell_type";
+    public static final String BACKGROUND_COLOR = "bg_color";
     public static final String TEXT = "text";
     public static final String IMAGE_FORMAT = "format";
     public static final String FORMULA_TYPE = "formula";
@@ -103,4 +104,13 @@ public class JsonName {
     public static final String STROKE_COLOR_R = "stroke color r";
     public static final String STROKE_COLOR_G = "stroke color g";
     public static final String STROKE_COLOR_B = "stroke color b";
+    public static final String SHAPE_CHUNK_TYPE = "shape";
+    public static final String SHAPE_TYPE = "shape_type";
+    public static final String FILL_COLOR_R = "fill color r";
+    public static final String FILL_COLOR_G = "fill color g";
+    public static final String FILL_COLOR_B = "fill color b";
+    public static final String BACKGROUND_COLOR_R = "background color r";
+    public static final String BACKGROUND_COLOR_G = "background color g";
+    public static final String BACKGROUND_COLOR_B = "background color b";
+    public static final String COMPONENT_COUNT = "component count";
 }

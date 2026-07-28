@@ -16,6 +16,7 @@
 package org.opendataloader.pdf.processors;
 
 import org.verapdf.wcag.algorithms.entities.IObject;
+import org.opendataloader.pdf.entities.content.ShapeChunk;
 import org.verapdf.wcag.algorithms.entities.content.LineArtChunk;
 import org.verapdf.wcag.algorithms.entities.content.LineChunk;
 import org.verapdf.wcag.algorithms.entities.content.TextChunk;
@@ -38,6 +39,9 @@ public class TableBorderProcessor {
 
     private static final double LINE_ART_PERCENT = 0.9;
     private static final double NEIGHBOUR_TABLE_EPSILON = 0.2;
+    /** Minimum overlap (relative to the cell area) for a rectangle ShapeChunk to be
+     *  treated as the background color of a table cell. */
+    private static final double CELL_BACKGROUND_OVERLAP_THRESHOLD = 0.5;
 
     /**
      * Maximum depth for nested table processing.
@@ -128,6 +132,11 @@ public class TableBorderProcessor {
         if (StaticContainers.getTableBordersCollection() == null) {
             return null;
         }
+        // Keep extracted vector shapes as top-level items so they are emitted
+        // separately in JSON instead of being swallowed by table cells.
+        if (content instanceof ShapeChunk) {
+            return null;
+        }
         TableBorder tableBorder = StaticContainers.getTableBordersCollection().getTableBorder(content.getBoundingBox());
         if (tableBorder != null) {
             if (content instanceof LineChunk) {
@@ -171,8 +180,68 @@ public class TableBorderProcessor {
 
     static TableBorder normalizeAndProcessTableBorder(List<IObject> rawPageContents, TableBorder tableBorder, int pageNumber, String imagesDirectory) {
         TableBorder normalizedTable = TableStructureNormalizer.normalize(rawPageContents, tableBorder);
+        assignBackgroundColorsFromRectangleShapes(rawPageContents, normalizedTable);
         processTableBorderContents(normalizedTable, pageNumber, imagesDirectory);
         return normalizedTable;
+    }
+
+    /**
+     * Scans the raw page contents for rectangle {@link ShapeChunk}s and, when one
+     * overlaps a table cell by more than {@link #CELL_BACKGROUND_OVERLAP_THRESHOLD},
+     * records the shape color as that cell's background color.
+     *
+     * <p>The original ShapeChunks remain top-level page contents; this method only
+     * annotates the affected cells.</p>
+     */
+    private static void assignBackgroundColorsFromRectangleShapes(List<IObject> rawPageContents, TableBorder tableBorder) {
+        if (tableBorder == null || tableBorder.isTextBlock() || rawPageContents == null || rawPageContents.isEmpty()) {
+            return;
+        }
+        // Track the best matching rectangle shape for each cell to avoid relying on
+        // arbitrary iteration order when multiple shapes overlap the same cell.
+        Map<TableBorderCell, BestShapeMatch> bestMatches = new HashMap<>();
+        for (IObject content : rawPageContents) {
+            if (!(content instanceof ShapeChunk)) {
+                continue;
+            }
+            ShapeChunk shapeChunk = (ShapeChunk) content;
+            if (!ShapeChunk.TYPE_RECTANGLE.equals(shapeChunk.getShapeType())) {
+                continue;
+            }
+            double[] color = shapeChunk.getColor();
+            if (color == null || color.length != 3) {
+                continue;
+            }
+            Set<TableBorderCell> cells = tableBorder.getTableBorderCells(shapeChunk);
+            if (cells == null || cells.isEmpty()) {
+                continue;
+            }
+            for (TableBorderCell cell : cells) {
+                double overlap = cell.getBoundingBox().getIntersectionPercent(shapeChunk.getBoundingBox());
+                if (overlap > CELL_BACKGROUND_OVERLAP_THRESHOLD) {
+                    BestShapeMatch current = bestMatches.get(cell);
+                    if (current == null || overlap > current.overlap) {
+                        bestMatches.put(cell, new BestShapeMatch(color, overlap));
+                    }
+                }
+            }
+        }
+        for (Map.Entry<TableBorderCell, BestShapeMatch> entry : bestMatches.entrySet()) {
+            entry.getKey().setBackgroundColor(entry.getValue().color);
+        }
+    }
+
+    /**
+     * Simple holder for the best rectangle shape match when assigning cell background colors.
+     */
+    private static class BestShapeMatch {
+        final double[] color;
+        final double overlap;
+
+        BestShapeMatch(double[] color, double overlap) {
+            this.color = color;
+            this.overlap = overlap;
+        }
     }
 
     private static void processTableBorderContents(TableBorder tableBorder, int pageNumber, String imagesDirectory) {

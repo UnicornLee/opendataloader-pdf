@@ -28,6 +28,7 @@ import org.opendataloader.pdf.custom.dto.TableSingleItem;
 import org.opendataloader.pdf.custom.entities.Bookmark;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
 import org.opendataloader.pdf.custom.utils.BookmarkUtils;
+import org.opendataloader.pdf.entities.content.ShapeChunk;
 import org.opendataloader.pdf.custom.utils.FileUtils;
 import org.opendataloader.pdf.markdown.MarkdownSyntax;
 import org.opendataloader.pdf.processors.DocumentProcessor;
@@ -348,6 +349,36 @@ public class JsonWriter {
                                 jsonGenerator.writeObject(tocItem);
                             }
                         }
+                        if (content instanceof TextChunk) {
+                            Map<String, Object> paragraphMap = new HashMap<>();
+                            List<Map<String, Object>> paragraphContentList = new ArrayList<>();
+                            TextChunk textChunk = (TextChunk) content;
+                            Map<String, Object> textLineMap = new HashMap<>();
+                            textLineMap.put(JsonName.ITEM_TYPE, "text");
+                            textLineMap.put(JsonName.IS_THIRD_PARTY, true);
+                            textLineMap.put(JsonName.HEIGHT, textChunk.getHeight());
+                            textLineMap.put(JsonName.WIDTH, textChunk.getWidth());
+                            textLineMap.put(JsonName.FONT_UNDERLINE_SIZE, textChunk.getFontSize());
+                            textLineMap.put(JsonName.X0, textChunk.getLeftX());
+                            textLineMap.put(JsonName.X1, textChunk.getRightX());
+                            textLineMap.put(JsonName.Y0, height - textChunk.getTopY());
+                            textLineMap.put(JsonName.Y1, height - textChunk.getBottomY());
+                            textLineMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - textChunk.getTopY());
+                            textLineMap.put(JsonName.CONTENT, Arrays.asList(textChunk.getValue()));
+                            paragraphContentList.add(textLineMap);
+                            paragraphMap.put(JsonName.CONTENT, paragraphContentList);
+                            paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                            paragraphMap.put(JsonName.IS_BOOKMARK, false);
+                            paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, textChunk.getFontSize());
+                            paragraphMap.put(JsonName.X0, textChunk.getLeftX());
+                            paragraphMap.put(JsonName.X1, textChunk.getRightX());
+                            paragraphMap.put(JsonName.Y0, height - textChunk.getTopY());
+                            paragraphMap.put(JsonName.Y1, height - textChunk.getBottomY());
+                            paragraphMap.put(JsonName.WIDTH, textChunk.getWidth());
+                            paragraphMap.put(JsonName.HEIGHT, textChunk.getHeight());
+                            paragraphMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - textChunk.getTopY());
+                            jsonGenerator.writeObject(paragraphMap);
+                        }
                         if (content instanceof CustomSemanticParagraph) {
                             Map<String, Object> paragraphMap = new HashMap<>();
                             List<Map<String, Object>> paragraphContentList = new ArrayList<>();
@@ -505,6 +536,14 @@ public class JsonWriter {
                                     cellMap.put(JsonName.X1, cell.getRightX());
                                     cellMap.put(JsonName.Y0, height - cell.getTopY());
                                     cellMap.put(JsonName.Y1, height - cell.getBottomY());
+                                    double[] backgroundColor = cell.getBackgroundColor();
+                                    if (backgroundColor != null && backgroundColor.length == 3) {
+                                        // convert normalized RGB [0,1] to 0-255 integers, then to hex
+                                        int r = Math.max(0, Math.min(255, (int) Math.round(backgroundColor[0] * 255)));
+                                        int g = Math.max(0, Math.min(255, (int) Math.round(backgroundColor[1] * 255)));
+                                        int b = Math.max(0, Math.min(255, (int) Math.round(backgroundColor[2] * 255)));
+                                        cellMap.put(JsonName.BACKGROUND_COLOR, String.format("#%02x%02x%02x", r, g, b));
+                                    }
                                     String text = "";
                                     List<String> textList = new ArrayList<>();
                                     for (int n = cell.getRowNumber(); n < cell.getRowNumber() + cell.getRowSpan(); n++) {
@@ -558,6 +597,9 @@ public class JsonWriter {
                             }
                             tableMap.put(JsonName.CONTENT, rowList);
                             jsonGenerator.writeObject(tableMap);
+                        }
+                        if (content instanceof ShapeChunk) {
+                            jsonGenerator.writeObject(content);
                         }
                         prevBottomY[0] = content.getBottomY();
                     }

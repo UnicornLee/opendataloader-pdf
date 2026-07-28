@@ -16,6 +16,10 @@
 package org.opendataloader.pdf.processors;
 
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
+import org.opendataloader.pdf.custom.dto.TextInOcrAnalysisResultDto;
+import org.opendataloader.pdf.custom.dto.TextInOcrDetailDto;
+import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
+import org.opendataloader.pdf.entities.content.ShapeChunk;
 import org.opendataloader.pdf.hybrid.ElementMetadata;
 import org.opendataloader.pdf.processors.readingorder.XYCutPlusPlusSorter;
 import org.opendataloader.pdf.json.JsonWriter;
@@ -47,7 +51,9 @@ import org.verapdf.tools.StaticResources;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.SemanticTextNode;
 import org.verapdf.wcag.algorithms.entities.content.ImageChunk;
+import org.verapdf.wcag.algorithms.entities.content.LineArtChunk;
 import org.verapdf.wcag.algorithms.entities.content.LineChunk;
+import org.verapdf.wcag.algorithms.entities.content.TextChunk;
 import org.verapdf.wcag.algorithms.entities.geometry.BoundingBox;
 import org.verapdf.wcag.algorithms.entities.tables.TableBordersCollection;
 import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorder;
@@ -67,6 +73,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.ForkJoinPool;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.logging.Level;
@@ -312,6 +319,13 @@ public class DocumentProcessor {
         int pagesToProcessCount = (pagesToProcess != null) ? pagesToProcess.size() : totalPages;
         LOGGER.log(Level.INFO, "Processing {0} pages with {1} threads", new Object[]{pagesToProcessCount, parallelism});
 
+        String paddleUrl;
+        if (config.getCustomOptions() != null && config.getCustomOptions().containsKey("paddleUrl")) {
+            paddleUrl = config.getCustomOptions().get("paddleUrl").toString();
+        } else {
+            paddleUrl = null;
+        }
+
         try {
             // Loop 1: ContentFilter per-page (largest bottleneck)
             pool.submit(() ->
@@ -382,12 +396,12 @@ public class DocumentProcessor {
                         pageContents = SpecialTableProcessor.detectSpecialTables(pageContents);
                     }
                     pageContents = TextLineProcessor.processTextLines(pageContents, finalImagesDirectory);
+                    // 1. 连续
                     // 对 pageContents 按照每个元素的 bounding box 的 topY 坐标从大到小进行排序，确保从上到下的顺序
                     pageContents.sort(Comparator.comparingDouble(item -> item.getTopY()));
                     Collections.reverse(pageContents);
                     // 无线表格识别
-                    if (config.getCustomOptions() != null && config.getCustomOptions().containsKey("paddleUrl")) {
-                        String paddleUrl = config.getCustomOptions().get("paddleUrl").toString();
+                    if (paddleUrl != null && !"".equals(paddleUrl)) {
                         try {
                             pageContents = StreamTableProcessor.processStreamTables(inputPdfName, pageContents, pageNumber, width, height, paddleUrl);
                         } catch (IOException e) {
@@ -435,6 +449,21 @@ public class DocumentProcessor {
                     contents.set(pageNumber, pageContents);
                 })
             ).get();
+
+            // 循环每一页，先做图表截图，再做公式截图。
+            for (int pageNumber = 0; pageNumber < totalPages; pageNumber++) {
+                List<IObject> pageContents = contents.get(pageNumber);
+                ImagesUtils imagesUtils = new ImagesUtils();
+                List<IObject> shapeChunks = pageContents.stream()
+                        .filter(ShapeChunk.class::isInstance)
+                        .collect(Collectors.toList());
+                // 对 pageContents 中的 ShapeChunk 做分组，将有交集的分成一组
+                List<List<IObject>> groupedShapeChunks = ShapeRecognizer.groupShapes(shapeChunks);
+                if (groupedShapeChunks != null && !groupedShapeChunks.isEmpty()) {
+                    processBarChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
+                }
+                processLineArtGroups(pageContents, pageNumber, imagesUtils, paddleUrl);
+            }
 
             // Sequential ID assignment (must be in page order, before CaptionProcessor)
             for (int pageNumber = 0; pageNumber < totalPages; pageNumber++) {
@@ -686,12 +715,13 @@ public class DocumentProcessor {
         StaticStorages.setIsIgnoreMCIDs(!StaticLayoutContainers.isUseStructTree());
         StaticStorages.setIsAddSpacesBetweenTextPieces(true);
         document.parseChunks();
+        ShapeRecognizer.recognize(document);
         LinesPreprocessingConsumer linesPreprocessingConsumer = new LinesPreprocessingConsumer();
         linesPreprocessingConsumer.findTableBorders();
-        linesPreprocessingConsumer.getTableBorders().forEach(builders -> builders.forEach(builder -> {
+        /*linesPreprocessingConsumer.getTableBorders().forEach(builders -> builders.forEach(builder -> {
             TableBorder border = new TableBorder(builder);
             boolean badTable = border.isBadTable();
-        }));
+        }));*/
         StaticContainers.setTableBordersCollection(new TableBordersCollection(linesPreprocessingConsumer.getTableBorders()));
     }
 
@@ -842,6 +872,231 @@ public class DocumentProcessor {
                 textNode.getFontSize(), Arrays.toString(TextNodeUtils.getTextColorOrDefault(textNode)),
                 textNode.getValue().length() > 15 ? textNode.getValue().substring(0, 15) + "..." : textNode.getValue());
     }
+
+    /**
+     * Processes shape groups that contain bar charts: renders the group's
+     * bounding box as a screenshot, removes all page contents inside that area,
+     * and adds the screenshot as an {@link ImageChunk}.
+     */
+    private static void processBarChartGroups(List<IObject> pageContents, List<List<IObject>> groupedShapeChunks,
+                                              ImagesUtils imagesUtils, int pageNumber) {
+        if (pageContents == null || imagesUtils == null || groupedShapeChunks == null) {
+            return;
+        }
+        for (List<IObject> group : groupedShapeChunks) {
+            if (group == null || group.isEmpty() || !containsBarChart(group)) {
+                continue;
+            }
+            BoundingBox groupBBox = unionBoundingBoxes(group, pageNumber);
+            if (groupBBox == null || groupBBox.isEmpty()) {
+                continue;
+            }
+            pageContents.removeIf(content -> isVerticallyMostlyInside(groupBBox, content.getBoundingBox()));
+            ImageChunk imageChunk = new ImageChunk(groupBBox);
+            imagesUtils.saveImageChunk(imageChunk);
+            pageContents.add(imageChunk);
+        }
+    }
+
+    private static boolean containsBarChart(List<IObject> group) {
+        for (IObject obj : group) {
+            if (obj instanceof ShapeChunk && ShapeChunk.TYPE_BAR_CHART.equals(((ShapeChunk) obj).getShapeType())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static BoundingBox unionBoundingBoxes(List<IObject> group, int pageNumber) {
+        BoundingBox union = new BoundingBox(pageNumber);
+        boolean hasValid = false;
+        for (IObject obj : group) {
+            BoundingBox bbox = obj.getBoundingBox();
+            if (bbox != null && !bbox.isEmpty()) {
+                union.union(bbox);
+                hasValid = true;
+            }
+        }
+        return hasValid ? union : null;
+    }
+
+    private static boolean isVerticallyMostlyInside(BoundingBox outer, BoundingBox inner) {
+        if (inner == null || inner.isEmpty()) {
+            return false;
+        }
+        double overlapPercent = inner.getVerticalIntersectionPercent(outer);
+        return overlapPercent > 0.5;
+    }
+
+    /** Minimum overlap ratio to treat a neighboring element as intersecting a LineArtChunk. */
+    private static final double MIN_LINE_ART_OVERLAP_PERCENT = 0.05;
+
+    /**
+     * Merges LineArtChunks with their significantly overlapping neighbors,
+     * renders the merged area as an image, and replaces the merged elements
+     * with a single {@link ImageChunk}.
+     */
+    private static void processLineArtGroups(List<IObject> pageContents, int pageNumber,
+                                             ImagesUtils imagesUtils, String paddleUrl) {
+        if (pageContents == null || pageContents.isEmpty() || imagesUtils == null) {
+            return;
+        }
+        List<IObject> result = new ArrayList<>(pageContents.size());
+        for (int i = 0; i < pageContents.size(); i++) {
+            IObject current = pageContents.get(i);
+            if (!(current instanceof LineArtChunk)) {
+                result.add(current);
+                continue;
+            }
+
+            BoundingBox lineArtBox = new BoundingBox(current.getBoundingBox());
+            List<IObject> group = new ArrayList<>();
+            group.add(current);
+
+            // Pull overlapping elements already added to result (the "before" neighbors).
+            for (int j = result.size() - 1; j >= 0; j--) {
+                IObject candidate = result.get(j);
+                if (hasSignificantOverlap(candidate.getBoundingBox(), lineArtBox)) {
+                    group.add(0, candidate);
+                    result.remove(j);
+                    lineArtBox = lineArtBox.union(candidate.getBoundingBox());
+                } else {
+                    break;
+                }
+            }
+
+            // Collect overlapping "after" neighbors from the original list.
+            int forwardCount = 0;
+            for (int j = i + 1; j < pageContents.size(); j++) {
+                IObject candidate = pageContents.get(j);
+                if (hasSignificantOverlap(candidate.getBoundingBox(), lineArtBox)) {
+                    group.add(candidate);
+                    forwardCount++;
+                    lineArtBox = lineArtBox.union(candidate.getBoundingBox());
+                } else {
+                    break;
+                }
+            }
+            i += forwardCount;
+
+            if (group.size() > 1) {
+                BoundingBox union = unionBoundingBoxes(group, pageNumber);
+                if (union != null && !union.isEmpty()) {
+                    ImageChunk imageChunk = new ImageChunk(union);
+                    imagesUtils.saveImageChunk(imageChunk);
+                    IObject replacement = imageChunk;
+                    if (paddleUrl != null && !"".equals(paddleUrl)) {
+                        String imageFileName = String.format(MarkdownSyntax.IMAGE_FILE_NAME_FORMAT,
+                            StaticLayoutContainers.getImagesDirectory(), File.separator,
+                            imageChunk.getIndex(), StaticLayoutContainers.getImageFormat());
+                        try {
+                            TextInOcrAnalysisResultDto textInOcrAnalysisResultDto = PaddleOcrProcessor.getPaddleResponse(
+                                new File(imageFileName), 1, paddleUrl);
+                            LOGGER.log(Level.INFO, "Text in ocr analysis result: {}", textInOcrAnalysisResultDto);
+                            TextChunk formulaChunk = tryCreateFormulaTextChunk(textInOcrAnalysisResultDto, union);
+                            if (formulaChunk != null) {
+                                Double fontSize = 12.0;
+                                List<Double> fontSizes = new ArrayList<>();
+                                for (IObject item : group) {
+                                    if (item instanceof CustomSemanticParagraph) {
+                                        CustomSemanticParagraph customSemanticParagraph = (CustomSemanticParagraph) item;
+                                        fontSizes.add(customSemanticParagraph.getFontSize());
+                                    }
+                                }
+                                if (fontSizes.size() > 0) {
+                                    fontSize = Collections.max(fontSizes);
+                                }
+                                formulaChunk.setFontSize(fontSize);
+                                replacement = formulaChunk;
+
+                            }
+                        } catch (IOException e) {
+                            LOGGER.log(Level.WARNING, "Failed to call Paddle OCR for image chunk: " + imageFileName, e);
+                        }
+                    }
+                    result.add(replacement);
+                    continue;
+                }
+            }
+            result.add(current);
+        }
+        pageContents.clear();
+        pageContents.addAll(result);
+    }
+
+    private static boolean hasSignificantOverlap(BoundingBox candidateBox, BoundingBox lineArtBox) {
+        if (candidateBox == null || candidateBox.isEmpty() || lineArtBox == null || lineArtBox.isEmpty()) {
+            return false;
+        }
+        double candidateOverlap = candidateBox.getVerticalIntersectionPercent(lineArtBox);
+        double lineArtOverlap = lineArtBox.getVerticalIntersectionPercent(candidateBox);
+        return Math.max(candidateOverlap, lineArtOverlap) > MIN_LINE_ART_OVERLAP_PERCENT;
+    }
+
+    /**
+     * Tries to create a {@link TextChunk} from the first OCR detail entry if it
+     * looks like a LaTeX formula. Returns {@code null} if the OCR result is
+     * missing, not a paragraph, or does not contain LaTeX markers.
+     */
+    private static TextChunk tryCreateFormulaTextChunk(TextInOcrAnalysisResultDto resultDto, BoundingBox bbox) {
+        if (resultDto == null || resultDto.getDetail() == null || resultDto.getDetail().isEmpty()) {
+            return null;
+        }
+        TextInOcrDetailDto detail = resultDto.getDetail().get(0);
+        if (!"paragraph".equals(detail.getType())) {
+            return null;
+        }
+        String text = detail.getText();
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        if (!isLatexExpression(text)) {
+            return null;
+        }
+        return createTextChunk(text, bbox);
+    }
+
+    private static TextChunk createTextChunk(String text, BoundingBox bbox) {
+        TextChunk textChunk = new TextChunk(text);
+        textChunk.setBoundingBox(new BoundingBox(bbox));
+        textChunk.setFontSize(bbox.getHeight());
+        textChunk.setBaseLine(bbox.getCenterY());
+        return textChunk;
+    }
+
+    /**
+     * Heuristic LaTeX formula detector. Recognizes:
+     * <ul>
+     *   <li>Inline/display math delimiters ({@code $...$}, {@code $$...$$})</li>
+     *   <li>Backslash commands (e.g., {@code \frac}, {@code \sum})</li>
+     *   <li>Subscript/superscript with braces (e.g., {@code x_{i}}, {@code y^{2}})</li>
+     *   <li>Simple subscript/superscript without braces (e.g., {@code x^2}, {@code a_i})</li>
+     * </ul>
+     * Adjust the patterns if your OCR output uses different conventions.
+     */
+    private static boolean isLatexExpression(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        String trimmed = text.trim();
+        if (trimmed.startsWith("$") || trimmed.endsWith("$") || trimmed.contains("$$")) {
+            return true;
+        }
+        if (LATEX_COMMAND_PATTERN.matcher(trimmed).find()) {
+            return true;
+        }
+        if (LATEX_SUBSUP_PATTERN.matcher(trimmed).find()) {
+            return true;
+        }
+        if (LATEX_SIMPLE_SUBSUP_PATTERN.matcher(trimmed).find()) {
+            return true;
+        }
+        return false;
+    }
+
+    private static final Pattern LATEX_COMMAND_PATTERN = Pattern.compile("\\\\[a-zA-Z]+");
+    private static final Pattern LATEX_SUBSUP_PATTERN = Pattern.compile("[a-zA-Z0-9]\\s*[_^]\\s*\\{");
+    private static final Pattern LATEX_SIMPLE_SUBSUP_PATTERN = Pattern.compile("[a-zA-Z0-9]\\s*[_^]\\s*[a-zA-Z0-9]");
 
     /**
      * Gets the bounding box for a page.

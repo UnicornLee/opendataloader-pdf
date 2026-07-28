@@ -112,6 +112,15 @@ public class ImagesUtils {
         createImageFile(chunk.getBoundingBox(), fileName, imageFormat, streamInfo != null ? streamInfo.getXImageObjectKey() : null);
     }
 
+    /**
+     * Public entry point for saving an arbitrary {@link ImageChunk} to disk (or
+     * the embedded image cache). The chunk's index is assigned and its bounding
+     * box is rendered from the source PDF.
+     */
+    public void saveImageChunk(ImageChunk chunk) {
+        writeImage(chunk);
+    }
+
     protected void writePicture(SemanticPicture picture) {
         int pictureIndex = picture.getPictureIndex();
         ensureImagesDirectoryInitialized();

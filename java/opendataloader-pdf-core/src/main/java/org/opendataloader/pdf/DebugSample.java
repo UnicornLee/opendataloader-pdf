@@ -17,7 +17,9 @@ public class DebugSample {
 
 //        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202302281677505819604328-272.pdf", config);
 //        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202303181679059838994480-452.pdf", config);
-        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\file-5(无线表格).pdf", config);
+        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202303181679059838994480-252(公式).pdf", config);
+//        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202303181679059838994480-314(公式).pdf", config);
+//        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202304191681815910199312-95(图表).pdf", config);
 //        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202303181679059838994480-31.pdf", config);
 //        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202303181679059838994480_1-13.pdf", config);
         OpenDataLoaderPDF.shutdown();
