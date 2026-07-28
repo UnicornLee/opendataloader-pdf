@@ -43,6 +43,12 @@ public class TableCellSerializer extends StdSerializer<TableBorderCell> {
         if (cell.isHeaderCell()) {
             jsonGenerator.writeBooleanField(JsonName.IS_HEADER, true);
         }
+        double[] backgroundColor = cell.getBackgroundColor();
+        if (backgroundColor != null && backgroundColor.length == 3) {
+            jsonGenerator.writeNumberField(JsonName.BACKGROUND_COLOR_R, backgroundColor[0]);
+            jsonGenerator.writeNumberField(JsonName.BACKGROUND_COLOR_G, backgroundColor[1]);
+            jsonGenerator.writeNumberField(JsonName.BACKGROUND_COLOR_B, backgroundColor[2]);
+        }
         jsonGenerator.writeArrayFieldStart(JsonName.KIDS);
         for (IObject content : cell.getContents()) {
             if (!(content instanceof LineArtChunk)) {

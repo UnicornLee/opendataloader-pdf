@@ -21,6 +21,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 import org.opendataloader.pdf.entities.SemanticFormula;
 import org.opendataloader.pdf.entities.SemanticPicture;
+import org.opendataloader.pdf.entities.content.ShapeChunk;
 import org.opendataloader.pdf.json.serializers.*;
 import org.verapdf.wcag.algorithms.entities.*;
 import org.verapdf.wcag.algorithms.entities.content.*;
@@ -75,6 +76,9 @@ public class ObjectMapperHolder {
 
         LineChunkSerializer lineChunkSerializer = new LineChunkSerializer(LineChunk.class);
         module.addSerializer(LineChunk.class, lineChunkSerializer);
+
+        ShapeChunkSerializer shapeChunkSerializer = new ShapeChunkSerializer(ShapeChunk.class);
+        module.addSerializer(ShapeChunk.class, shapeChunkSerializer);
 
         SemanticTextNodeSerializer semanticTextNodeSerializer = new SemanticTextNodeSerializer(SemanticTextNode.class);
         module.addSerializer(SemanticTextNode.class, semanticTextNodeSerializer);

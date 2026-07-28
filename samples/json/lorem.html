@@ -4,15 +4,13 @@
   <meta charset="UTF-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>公告解析</title>
+  <title>lorem</title>
   <script src="https://static.valueonline.cn/static/vue/2.5.22/vue.min.js"></script>
   <link rel="stylesheet" href="https://static.valueonline.cn/static/stock-ui/1.5.26/theme-chalk/index.css">
   <link rel="stylesheet" href="./index.css">
   <script src="https://static.valueonline.cn/static/stock-ui/1.5.26/index.js"></script>
-  <script type="text/javascript" src="Notice_table_2.js"></script>
+  <script type="text/javascript" src= "lorem.js"></script>
   <script type="text/javascript" src="directory.js"></script>
-  <!-- 引入MathJax -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/3.2.0/es5/tex-mml-chtml.js"></script>
 </head>
 <body>
 <div id="app">
@@ -44,37 +42,81 @@
       <div class="viewer-body">
         <div class="doc">
           <div class="page-wrapper" v-for="(item,index) in pages" :key="'pages' + index"
+               :style="{width:item.width + 'pt'}"
                :data-number="index + 1">
             <template v-for="(list,_idx) in item.items">
               <div class="page-item"
-                   :style="{width: list.item_type ==='image' ? list.width + 'px' : 'auto',
-                 marginLeft: list.x0 + 'px', marginTop: list.margin_top + 'px'}">
+                   :style="{width: list.item_type === 'text' && !list.paragraph ? 'auto' : list.width + 10 + 'pt',
+                 marginLeft: list.x0 + 'pt', paddingTop: list.margin_top + 'pt'}">
                 <template v-if="list.item_type === 'image'">
                   <img :src="img" v-for="(img, _img) in list.content" :key="'image' + _img">
                 </template>
                 <template v-else-if="list.item_type === 'text'">
-                  <div :style="{fontSize: list.height + 'px'}">{{list.content[0]}}</div>
+                  <div class="page-item__text">
+                    <div v-for="(_text, _textIndex) in list.content" :key="'text' + index + _idx + _textIndex"
+                         :style="{textIndent: _text.x0 - list.x0 + 'pt'}"
+                         :class="_textIndex !== 0 && _textIndex !== list.content.length - 1 && 'justify'">
+
+                      <div v-html="_text.content[0]" :style="{fontSize: _text.font_size + 'pt', fontWeight: _text.is_bold && 'bold'}"></div>
+                    </div>
+                  </div>
                 </template>
                 <template v-else-if="list.item_type === 'stream_table' || list.item_type === 'lattice_table'">
                   <div class="table-overflow">
                     <div class="table-button">
                       <el-button type="danger" size="mini" @click="copyTable(index, _idx)">复制</el-button>
                     </div>
-                    <table :class="list.item_type" :ref="'table' + index + '' + _idx"
-                           :style="{maxWidth: 760 - list.x0 + 'px'}">
+                    <table :class="list.item_type" :ref="'table' + index + '' + _idx">
                       <tr v-for="(table, _table) in list.content" :key="'table' + _table + item.page_index + _idx">
                         <td v-for="(td, _td) in table" :key="'td' + _table + item.page_index + _idx + _td"
                             :colspan="td.column_len"
                             :rowspan="td.row_len"
                             :style="{background: td.bg_color}"
-                            :width="td.width * 1.2"
+                            :width="td.cell_radio * 100 + '%'"
+                            :class="td.split_type?td.split_type === 'backslash' ? 'table_td_split_backslash':'table_td_split':''"
                         >
                           <template v-if="td.cell_type === 'image'">
-                            <img :src="img" v-for="(img, _img) in td.text" :key="_img + 'img'"
-                                 :style="{height:td.height / td.text.length + 'px'}">
+                            <div v-html="td.text[0]"  :style="{height:td.height / td.text.length + 'pt'}"></div>
                           </template>
                           <template v-else>
-                            <div class="cell" v-html="td.text[0]"></div>
+                            <div class="cell" v-if="!td.split_type">
+                              <div v-for="(tdText, _tdText) in td.text" :key="'tdText' + item.page_index + _tdText">
+                                <div  v-html="tdText" :style="{fontSize: td.font_size + 'pt'}"></div>
+                              </div>
+                            </div>
+                            <div class="cell" :style="{fontSize: td.font_size + 'pt'}"
+                                 v-else>
+                              <div v-if="td.split_type === 'backslash'">
+                                <span class="table_td_split_left">
+                                 <div v-for="(_split_right_td, _split_right_td_index) in td.text"
+                                      :key="'td' + _table + item.page_index + _idx + _td + 'left' + _split_right_td_index"
+                                      v-html="_split_right_td"
+                                      :class="_split_right_td_index >= td.split_index ? '':'td_split_hidden'">
+                              </div>
+                              </span>
+                                <span class="table_td_split_right">
+                                <div v-for="(_split_left_td, _split_left_td_index) in td.text.slice(0, td.split_index)"
+                                     :key="'td' + _table + item.page_index + _idx + _td + 'left' + _split_left_td_index"
+                                     v-html="_split_left_td">
+                              </div>
+                              </span>
+                              </div>
+                              <div v-else>
+                                <span class="table_td_split_left">
+                                <div v-for="(_split_left_td, _split_left_td_index) in td.text.slice(0, td.split_index)"
+                                     :key="'td' + _table + item.page_index + _idx + _td + 'left' + _split_left_td_index"
+                                     v-html="_split_left_td">
+                              </div>
+                              </span>
+                                <span class="table_td_split_right">
+                                 <div v-for="(_split_right_td, _split_right_td_index) in td.text"
+                                      :key="'td' + _table + item.page_index + _idx + _td + 'left' + _split_right_td_index"
+                                      v-html="_split_right_td"
+                                      :class="_split_right_td_index >= td.split_index ? '':'td_split_hidden'">
+                              </div>
+                              </span>
+                              </div>
+                            </div>
                           </template>
                         </td>
                       </tr>
@@ -107,6 +149,7 @@ if (typeof Vue === 'undefined' || typeof STOCK === 'undefined') {
       currentPageNumber: 1,
       pages: data || [],
       mode: 'all',
+      bookmarks: bookmarks || [],
       modes:[
         'all',
         'block',
@@ -115,7 +158,6 @@ if (typeof Vue === 'undefined' || typeof STOCK === 'undefined') {
         'hideFigure'
       ],
       treeData:[],
-      bookmarks: bookmarks || [],
       defaultProps: {
         label: 'text'
       },
@@ -234,7 +276,6 @@ if (typeof Vue === 'undefined' || typeof STOCK === 'undefined') {
       },
       onNodeClick: function(data, node, comp) {
         this.showPage(data.page_num, true)
-
       },
       gotoElement: function(el) {
         //因为采用按需显示，就需要先设置display:block

@@ -46,3 +46,5 @@ paddle:
 pdf:
     temp:
         path: /tmp/pdf_parse
+    output:
+        path: /tmp/pdf_parse/output
