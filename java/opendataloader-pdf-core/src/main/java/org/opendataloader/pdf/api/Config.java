@@ -95,6 +95,11 @@ public class Config {
     private boolean includeHeaderFooter = false;
     private boolean detectStrikethrough = false;
 
+    /** Catalog bookmark detection: minimum TOC-like lines per page. */
+    private int catalogBookmarkMinTocLines = 3;
+    /** Catalog bookmark detection: minimum ratio of TOC-like lines per page. */
+    private double catalogBookmarkMinTocRatio = 0.4;
+
     /** Table detection method: default (border-based detection). */
     public static final String TABLE_METHOD_DEFAULT = "default";
     /** Table detection method: cluster-based detection (includes border-based). */
@@ -873,6 +878,54 @@ public class Config {
 
     public void setDetectStrikethrough(boolean detectStrikethrough) {
         this.detectStrikethrough = detectStrikethrough;
+    }
+
+    /**
+     * Gets the minimum number of TOC-like lines required for a page to be
+     * considered a catalog/table-of-contents page.
+     *
+     * @return minimum TOC lines per page
+     */
+    public int getCatalogBookmarkMinTocLines() {
+        return catalogBookmarkMinTocLines;
+    }
+
+    /**
+     * Sets the minimum number of TOC-like lines required per page.
+     *
+     * @param catalogBookmarkMinTocLines minimum TOC lines, must be >= 1
+     * @throws IllegalArgumentException if the value is less than 1
+     */
+    public void setCatalogBookmarkMinTocLines(int catalogBookmarkMinTocLines) {
+        if (catalogBookmarkMinTocLines < 1) {
+            throw new IllegalArgumentException(
+                    "catalogBookmarkMinTocLines must be >= 1, got " + catalogBookmarkMinTocLines);
+        }
+        this.catalogBookmarkMinTocLines = catalogBookmarkMinTocLines;
+    }
+
+    /**
+     * Gets the minimum ratio of TOC-like lines to non-empty text lines for a
+     * page to be considered a catalog/table-of-contents page.
+     *
+     * @return minimum TOC line ratio, in range [0, 1]
+     */
+    public double getCatalogBookmarkMinTocRatio() {
+        return catalogBookmarkMinTocRatio;
+    }
+
+    /**
+     * Sets the minimum ratio of TOC-like lines per page.
+     *
+     * @param catalogBookmarkMinTocRatio minimum ratio, must be between 0 and 1
+     * @throws IllegalArgumentException if the value is outside [0, 1]
+     */
+    public void setCatalogBookmarkMinTocRatio(double catalogBookmarkMinTocRatio) {
+        if (catalogBookmarkMinTocRatio < 0.0 || catalogBookmarkMinTocRatio > 1.0) {
+            throw new IllegalArgumentException(
+                    "catalogBookmarkMinTocRatio must be in [0, 1], got " + catalogBookmarkMinTocRatio);
+        }
+        this.catalogBookmarkMinTocRatio = catalogBookmarkMinTocRatio;
     }
 
     private boolean outputStdout = false;

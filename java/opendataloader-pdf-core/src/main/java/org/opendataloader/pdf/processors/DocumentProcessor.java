@@ -17,6 +17,7 @@ package org.opendataloader.pdf.processors;
 
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.custom.dto.TextInOcrAnalysisResultDto;
+import org.opendataloader.pdf.custom.utils.BookmarkUtils;
 import org.opendataloader.pdf.custom.dto.TextInOcrDetailDto;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
 import org.opendataloader.pdf.entities.content.ShapeChunk;
@@ -29,6 +30,8 @@ import org.opendataloader.pdf.markdown.MarkdownSyntax;
 import org.opendataloader.pdf.html.HtmlGenerator;
 import org.opendataloader.pdf.html.HtmlGeneratorFactory;
 import org.opendataloader.pdf.pdf.PDFWriter;
+import org.apache.pdfbox.Loader;
+import org.apache.pdfbox.rendering.PDFRenderer;
 import org.opendataloader.pdf.api.Config;
 import org.opendataloader.pdf.text.TextGenerator;
 import org.opendataloader.pdf.utils.ContentSanitizer;
@@ -54,6 +57,7 @@ import org.verapdf.wcag.algorithms.entities.content.ImageChunk;
 import org.verapdf.wcag.algorithms.entities.content.LineArtChunk;
 import org.verapdf.wcag.algorithms.entities.content.LineChunk;
 import org.verapdf.wcag.algorithms.entities.content.TextChunk;
+import org.verapdf.wcag.algorithms.entities.content.TextLine;
 import org.verapdf.wcag.algorithms.entities.geometry.BoundingBox;
 import org.verapdf.wcag.algorithms.entities.tables.TableBordersCollection;
 import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorder;
@@ -63,8 +67,10 @@ import org.verapdf.xmp.containers.StaticXmpCoreContainers;
 
 import org.opendataloader.pdf.exceptions.InvalidPdfFileException;
 
+import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
+import javax.imageio.ImageIO;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
@@ -286,6 +292,7 @@ public class DocumentProcessor {
         final long contentId = StaticLayoutContainers.getCurrentContentId();
         final boolean useStructTree = StaticLayoutContainers.isUseStructTree();
         final var embeddedImageBytesMap = StaticLayoutContainers.getEmbeddedImageBytesMap();
+        final var replacementCharRatiosMap = StaticLayoutContainers.getReplacementCharRatiosMap();
 
         // Runnable that propagates ThreadLocal state to the current (worker) thread
         final Runnable propagateState = () -> {
@@ -306,6 +313,7 @@ public class DocumentProcessor {
             StaticLayoutContainers.setCurrentContentId(contentId);
             StaticLayoutContainers.setIsUseStructTree(useStructTree);
             StaticLayoutContainers.setEmbeddedImageBytesMap(embeddedImageBytesMap);
+            StaticLayoutContainers.setReplacementCharRatiosMap(replacementCharRatiosMap);
         };
 
         // Pre-fetch all page artifacts on main thread (document access is ThreadLocal)
@@ -324,6 +332,10 @@ public class DocumentProcessor {
             paddleUrl = config.getCustomOptions().get("paddleUrl").toString();
         } else {
             paddleUrl = null;
+        }
+        boolean isImmediateOcr = false;
+        if (config.getCustomOptions() != null && config.getCustomOptions().containsKey("is_immediate_ocr")) {
+            isImmediateOcr = Boolean.valueOf(config.getCustomOptions().get("is_immediate_ocr").toString());
         }
 
         try {
@@ -344,6 +356,33 @@ public class DocumentProcessor {
                     }
                 })
             ).get();
+
+            // Fallback OCR: if initial text extraction is mostly garbage (e.g., broken ToUnicode / FakeFont),
+            // render the page and replace contents with Paddle OCR results.
+            Set<Integer> ocrFallbackPages = new HashSet<>();
+            if (paddleUrl != null && !"".equals(paddleUrl)) {
+                for (int pageNumber = 0; pageNumber < totalPages; pageNumber++) {
+                    if (!shouldProcessPage(pageNumber, pagesToProcess)) {
+                        continue;
+                    }
+                    List<IObject> pageContents = contents.get(pageNumber);
+                    double replacementRatio = StaticLayoutContainers.getReplacementCharRatio(pageNumber);
+                    if (shouldUseOcrFallback(pageContents, width, height) || replacementRatio >= 0.1) {
+                        LOGGER.log(Level.WARNING, "Page {0} text extraction is mostly garbled or image-dominant; falling back to full-page OCR.", pageNumber);
+                        if (isImmediateOcr) {
+                            List<IObject> ocrContents = fallbackOcrPage(inputPdfName, pageNumber, width, height, paddleUrl);
+                            if (!ocrContents.isEmpty()) {
+                                contents.set(pageNumber, ocrContents);
+                                ocrFallbackPages.add(pageNumber);
+                            }
+                        } else {
+                            ImageChunk imageChunk = new ImageChunk(new BoundingBox(pageNumber, 0, 0, width, height));
+                            contents.set(pageNumber, new ArrayList<>(Collections.singletonList(imageChunk)));
+                            ocrFallbackPages.add(pageNumber);
+                        }
+                    }
+                }
+            }
 
             // Hidden text detection: sequential post-processing (requires ContrastRatioConsumer
             // which renders PDF pages — not safe to parallelize due to per-thread PDF file I/O)
@@ -400,8 +439,8 @@ public class DocumentProcessor {
                     // 对 pageContents 按照每个元素的 bounding box 的 topY 坐标从大到小进行排序，确保从上到下的顺序
                     pageContents.sort(Comparator.comparingDouble(item -> item.getTopY()));
                     Collections.reverse(pageContents);
-                    // 无线表格识别
-                    if (paddleUrl != null && !"".equals(paddleUrl)) {
+                    // 无线表格识别 (skip for pages already replaced by fallback OCR to avoid double OCR)
+                    if (paddleUrl != null && !"".equals(paddleUrl) && !ocrFallbackPages.contains(pageNumber)) {
                         try {
                             pageContents = StreamTableProcessor.processStreamTables(inputPdfName, pageContents, pageNumber, width, height, paddleUrl);
                         } catch (IOException e) {
@@ -415,6 +454,10 @@ public class DocumentProcessor {
             if (structured) {
                 // Cross-page operations (must be sequential)
                 HeaderFooterProcessor.processHeadersAndFooters(contents, false);
+                // Extract TOC pages as catalog bookmarks without mutating the
+                // original contents. The extracted bookmarks are stored in a
+                // thread-local container and emitted later by JsonWriter.
+                StaticLayoutContainers.setCatalogBookmarks(BookmarkUtils.getCatalogBookmarks(contents, config));
                 // TOC detection is temporarily disabled. It is not yet complete:
                 //  - the heuristic has heavy false positives (any line ending in a
                 //    bare number is treated as a TOC item), so it can restructure
@@ -425,7 +468,7 @@ public class DocumentProcessor {
                 // Re-enable once detection precision and target resolution are in
                 // place. (Remaining hardening is tracked in the internal tasks tracker.)
                 // new TableOfContentsProcessor().processTableOfContents(contents);
-//                ListProcessor.processLists(contents, false);
+                // ListProcessor.processLists(contents, false);
             }
 
             // Loop 3: Paragraph + Heading per-page (always need ParagraphProcessor for text output)
@@ -436,11 +479,6 @@ public class DocumentProcessor {
                     }
                     propagateState.run();
                     List<IObject> pageContents = contents.get(pageNumber);
-                    /*pageContents.sort(Comparator.comparingDouble(item -> item.getTopY()));
-                    Collections.reverse(pageContents);*/
-                    if (pageNumber == 158) {
-                        int ii = 0;
-                    }
                     pageContents = ParagraphProcessor.processParagraphs(pageContents, width);
                     if (structured) {
 //                        pageContents = ListProcessor.processListsFromTextNodes(pageContents);
@@ -470,6 +508,13 @@ public class DocumentProcessor {
                 if (shouldProcessPage(pageNumber, pagesToProcess)) {
                     setIDs(contents.get(pageNumber));
                 }
+            }
+
+            // Extract page bookmarks from CustomSemanticParagraph contents after
+            // paragraphs and headings have been detected. The extracted bookmarks
+            // are stored in a thread-local container and emitted later by JsonWriter.
+            if (structured) {
+                StaticLayoutContainers.setPageBookmarks(BookmarkUtils.getPageBookmarks(contents));
             }
 
             // Caption detection runs after setIDs so that recognizedStructureId is available
@@ -931,6 +976,11 @@ public class DocumentProcessor {
     /** Minimum overlap ratio to treat a neighboring element as intersecting a LineArtChunk. */
     private static final double MIN_LINE_ART_OVERLAP_PERCENT = 0.05;
 
+    /** Garbage text ratio that triggers full-page OCR fallback for a page. */
+    private static final double OCR_FALLBACK_GARBAGE_RATIO_THRESHOLD = 0.5;
+    /** DPI used when rendering a page image for fallback OCR. */
+    private static final float OCR_FALLBACK_RENDER_DPI = 300.0f;
+
     /**
      * Merges LineArtChunks with their significantly overlapping neighbors,
      * renders the merged area as an image, and replaces the merged elements
@@ -1031,6 +1081,186 @@ public class DocumentProcessor {
         double candidateOverlap = candidateBox.getVerticalIntersectionPercent(lineArtBox);
         double lineArtOverlap = lineArtBox.getVerticalIntersectionPercent(candidateBox);
         return Math.max(candidateOverlap, lineArtOverlap) > MIN_LINE_ART_OVERLAP_PERCENT;
+    }
+
+    /**
+     * Checks whether a page needs fallback OCR because either:
+     * <ul>
+     *   <li>the extracted text is mostly garbage (e.g., missing ToUnicode mappings
+     *       yielding {@code (cid:*)} placeholders or Unicode replacement characters);</li>
+     *   <li>or images dominate the page (cover more than 80% of the page area), e.g.,
+     *       a scanned page with a full-page image and little or no extractable text.</li>
+     * </ul>
+     */
+    private static boolean shouldUseOcrFallback(List<IObject> pageContents, double pageWidth, double pageHeight) {
+        if (pageContents == null || pageContents.isEmpty()) {
+            return false;
+        }
+        if (isImageDominantPage(pageContents, pageWidth, pageHeight)) {
+            return true;
+        }
+        int totalChars = 0;
+        int garbageChars = 0;
+        for (IObject content : pageContents) {
+            int[] counts = countTextAndGarbage(content);
+            totalChars += counts[0];
+            garbageChars += counts[1];
+        }
+        if (totalChars == 0) {
+            return false;
+        }
+        return (double) garbageChars / totalChars >= OCR_FALLBACK_GARBAGE_RATIO_THRESHOLD;
+    }
+
+    private static boolean isImageDominantPage(List<IObject> pageContents, double pageWidth, double pageHeight) {
+        if (pageWidth <= 0 || pageHeight <= 0) {
+            return false;
+        }
+        double pageArea = pageWidth * pageHeight;
+        double imageArea = 0.0;
+        for (IObject content : pageContents) {
+            if (content instanceof ImageChunk) {
+                BoundingBox bbox = content.getBoundingBox();
+                if (bbox != null && !bbox.isEmpty()) {
+                    imageArea += bbox.getWidth() * bbox.getHeight();
+                }
+            }
+        }
+        return imageArea / pageArea > 0.8;
+    }
+
+    private static int[] countTextAndGarbage(IObject content) {
+        int total = 0;
+        int garbage = 0;
+        if (content instanceof TextChunk) {
+            TextChunk textChunk = (TextChunk) content;
+            String value = textChunk.getValue().trim();
+            if (value != null) {
+                total += value.length();
+                if (isGarbageText(value)) {
+                    garbage += value.length();
+                }
+            }
+        } else if (content instanceof TextLine) {
+            for (TextChunk textChunk : ((TextLine) content).getTextChunks()) {
+                int[] counts = countTextAndGarbage(textChunk);
+                total += counts[0];
+                garbage += counts[1];
+            }
+        }
+        return new int[]{total, garbage};
+    }
+
+    private static boolean isGarbageText(String value) {
+        return value.contains("(cid:") || value.contains("\uFFFD");
+    }
+
+    /**
+     * Renders a single PDF page to a temporary PNG and OCRs it via Paddle.
+     * Returns OCR-generated {@link TextChunk} objects that replace the page's
+     * original extracted contents. If OCR fails, returns an empty list so the
+     * caller can keep the original contents.
+     */
+    private static List<IObject> fallbackOcrPage(String pdfPath, int pageNumber, double sourceWidth,
+                                                 double sourceHeight, String paddleUrl) {
+        RenderedPage rendered;
+        try {
+            rendered = renderPageToImage(pdfPath, pageNumber);
+        } catch (IOException e) {
+            LOGGER.log(Level.WARNING, "Failed to render page " + pageNumber + " for fallback OCR: " + pdfPath, e);
+            return Collections.emptyList();
+        }
+        try {
+            TextInOcrAnalysisResultDto resultDto = PaddleOcrProcessor.getPaddleResponse(rendered.imageFile, 1, paddleUrl);
+            return convertOcrResultToPageContents(resultDto, pageNumber, sourceWidth, sourceHeight,
+                rendered.imageWidth, rendered.imageHeight);
+        } catch (IOException e) {
+            LOGGER.log(Level.WARNING, "Fallback OCR failed for page " + pageNumber + " of " + pdfPath, e);
+            return Collections.emptyList();
+        } finally {
+            rendered.imageFile.delete();
+        }
+    }
+
+    private static RenderedPage renderPageToImage(String pdfPath, int pageNumber) throws IOException {
+        File source = new File(pdfPath);
+        File outputFile = new File(System.getProperty("java.io.tmpdir"),
+            source.getName().replaceAll("\\.pdf$", "") + "-page-" + pageNumber + "-fallback.png");
+        try (org.apache.pdfbox.pdmodel.PDDocument sourceDoc = Loader.loadPDF(source)) {
+            PDFRenderer renderer = new PDFRenderer(sourceDoc);
+            BufferedImage pageImage = renderer.renderImageWithDPI(pageNumber, OCR_FALLBACK_RENDER_DPI);
+            ImageIO.write(pageImage, "PNG", outputFile);
+            return new RenderedPage(outputFile, pageImage.getWidth(), pageImage.getHeight());
+        }
+    }
+
+    private static List<IObject> convertOcrResultToPageContents(TextInOcrAnalysisResultDto resultDto,
+                                                                int pageNumber, double sourceWidth,
+                                                                double sourceHeight, int imageWidth,
+                                                                int imageHeight) {
+        List<IObject> contents = new ArrayList<>();
+        if (resultDto == null || resultDto.getDetail() == null || resultDto.getDetail().isEmpty()) {
+            return contents;
+        }
+        for (TextInOcrDetailDto detail : resultDto.getDetail()) {
+            if (!"paragraph".equals(detail.getType())) {
+                continue;
+            }
+            String text = detail.getText();
+            if (text == null || text.isBlank()) {
+                continue;
+            }
+            List<Double> position = detail.getPosition();
+            if (position == null || position.size() < 8) {
+                continue;
+            }
+            BoundingBox bbox = ocrPositionToBoundingBox(position, pageNumber, sourceWidth, sourceHeight,
+                imageWidth, imageHeight);
+            TextChunk textChunk = new TextChunk(text);
+            textChunk.setBoundingBox(new BoundingBox(bbox));
+            textChunk.setFontSize(resolveOcrFontSize(detail.getOutlineLevel()));
+            textChunk.setBaseLine(bbox.getBottomY());
+            contents.add(textChunk);
+        }
+        contents.sort(Comparator.comparingDouble(IObject::getTopY).reversed());
+        return contents;
+    }
+
+    private static BoundingBox ocrPositionToBoundingBox(List<Double> position, int pageNumber, double sourceWidth,
+                                                      double sourceHeight, int imageWidth, int imageHeight) {
+        double widthRatio = sourceWidth / imageWidth;
+        double heightRatio = sourceHeight / imageHeight;
+
+        double leftX0 = position.get(0) * widthRatio;
+        double leftY0 = position.get(1) * heightRatio;
+        double leftX1 = position.get(2) * widthRatio;
+        double rightY1 = position.get(7) * heightRatio;
+
+        return new BoundingBox(pageNumber, leftX0, sourceHeight - rightY1, leftX1, sourceHeight - leftY0);
+    }
+
+    private static double resolveOcrFontSize(Integer outlineLevel) {
+        if (outlineLevel == null) {
+            return 10D;
+        }
+        switch (outlineLevel) {
+            case 0: return 13D;
+            case 1: return 12D;
+            case 2: return 11D;
+            default: return 10D;
+        }
+    }
+
+    private static class RenderedPage {
+        final File imageFile;
+        final int imageWidth;
+        final int imageHeight;
+
+        RenderedPage(File imageFile, int imageWidth, int imageHeight) {
+            this.imageFile = imageFile;
+            this.imageWidth = imageWidth;
+            this.imageHeight = imageHeight;
+        }
     }
 
     /**
