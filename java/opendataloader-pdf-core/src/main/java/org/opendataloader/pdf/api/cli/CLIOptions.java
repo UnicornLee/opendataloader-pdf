@@ -196,6 +196,16 @@ public class CLIOptions {
     private static final String TO_STDOUT_LONG_OPTION = "to-stdout";
     private static final String TO_STDOUT_DESC = "Write output to stdout instead of file (single format only)";
 
+    // ===== Catalog Bookmark Options =====
+    private static final String CATALOG_BOOKMARK_MIN_LINES_LONG_OPTION = "catalog-bookmark-min-lines";
+    private static final String CATALOG_BOOKMARK_MIN_LINES_DESC =
+            "Minimum number of TOC-like lines per page for catalog bookmark detection. Default: 3";
+
+    private static final String CATALOG_BOOKMARK_MIN_RATIO_LONG_OPTION = "catalog-bookmark-min-ratio";
+    private static final String CATALOG_BOOKMARK_MIN_RATIO_DESC =
+            "Minimum ratio of TOC-like lines to non-empty text lines per page for catalog bookmark detection. "
+                    + "Default: 0.4";
+
     // ===== Threads =====
     private static final String THREADS_LONG_OPTION = "threads";
     private static final String THREADS_DESC = "Number of worker threads for per-page processing. "
@@ -260,6 +270,8 @@ public class CLIOptions {
             new OptionDefinition(HYBRID_FALLBACK_LONG_OPTION, null, "boolean", false, HYBRID_FALLBACK_DESC, true),
             new OptionDefinition(TO_STDOUT_LONG_OPTION, null, "boolean", false, TO_STDOUT_DESC, true),
             new OptionDefinition(THREADS_LONG_OPTION, null, "string", "1", THREADS_DESC, true),
+            new OptionDefinition(CATALOG_BOOKMARK_MIN_LINES_LONG_OPTION, null, "string", "3", CATALOG_BOOKMARK_MIN_LINES_DESC, true),
+            new OptionDefinition(CATALOG_BOOKMARK_MIN_RATIO_LONG_OPTION, null, "string", "0.4", CATALOG_BOOKMARK_MIN_RATIO_DESC, true),
             new OptionDefinition(IMAGE_RESOLUTION_LONG_OPTION, null, "string", null, IMAGE_RESOLUTION_DESC, true),
             new OptionDefinition(EXPORT_OPTIONS_LONG_OPTION, null, "boolean", null, null, false),
             new OptionDefinition(SPACE_RATIO_LONG_OPTION, null, "string", null, SPACE_RATIO_DESC, true),
@@ -387,6 +399,7 @@ public class CLIOptions {
         applyPagesOption(config, commandLine);
         applyHybridOptions(config, commandLine);
         applyThreadsOption(config, commandLine);
+        applyCatalogBookmarkOptions(config, commandLine);
         config.normalize();
     }
 
@@ -412,6 +425,31 @@ public class CLIOptions {
             System.err.println(String.format(
                     "Warning: --threads=%d exceeds available CPU cores; capped to %d.",
                     requested, applied));
+        }
+    }
+
+    private static void applyCatalogBookmarkOptions(Config config, CommandLine commandLine) {
+        if (commandLine.hasOption(CATALOG_BOOKMARK_MIN_LINES_LONG_OPTION)) {
+            String value = commandLine.getOptionValue(CATALOG_BOOKMARK_MIN_LINES_LONG_OPTION);
+            int requested;
+            try {
+                requested = Integer.parseInt(value.trim());
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                        String.format("Option --catalog-bookmark-min-lines requires an integer >= 1, got '%s'", value));
+            }
+            config.setCatalogBookmarkMinTocLines(requested);
+        }
+        if (commandLine.hasOption(CATALOG_BOOKMARK_MIN_RATIO_LONG_OPTION)) {
+            String value = commandLine.getOptionValue(CATALOG_BOOKMARK_MIN_RATIO_LONG_OPTION);
+            double requested;
+            try {
+                requested = Double.parseDouble(value.trim());
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                        String.format("Option --catalog-bookmark-min-ratio requires a number in [0, 1], got '%s'", value));
+            }
+            config.setCatalogBookmarkMinTocRatio(requested);
         }
     }
 

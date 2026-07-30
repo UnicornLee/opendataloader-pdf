@@ -16,6 +16,7 @@
 package org.opendataloader.pdf.containers;
 
 import org.opendataloader.pdf.api.Config;
+import org.opendataloader.pdf.custom.entities.Bookmark;
 import org.verapdf.wcag.algorithms.entities.SemanticHeading;
 
 import java.io.File;
@@ -25,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
+
 
 public class StaticLayoutContainers {
     protected static final Logger LOGGER = Logger.getLogger(StaticLayoutContainers.class.getCanonicalName());
@@ -38,6 +40,8 @@ public class StaticLayoutContainers {
     private static final ThreadLocal<String> imageFormat = new ThreadLocal<>();
     private static final ThreadLocal<Map<Integer, Double>> replacementCharRatios = ThreadLocal.withInitial(ConcurrentHashMap::new);
     private static final ThreadLocal<Map<String, byte[]>> embeddedImageBytes = ThreadLocal.withInitial(ConcurrentHashMap::new);
+    private static final ThreadLocal<List<Bookmark>> catalogBookmarks = ThreadLocal.withInitial(LinkedList::new);
+    private static final ThreadLocal<List<Bookmark>> pageBookmarks = ThreadLocal.withInitial(LinkedList::new);
 
     public static void clearContainers() {
         currentContentId.set(1L);
@@ -49,6 +53,8 @@ public class StaticLayoutContainers {
         imageFormat.set(Config.IMAGE_FORMAT_PNG);
         replacementCharRatios.get().clear();
         embeddedImageBytes.get().clear();
+        catalogBookmarks.get().clear();
+        pageBookmarks.get().clear();
     }
 
     public static long getCurrentContentId() {
@@ -84,6 +90,30 @@ public class StaticLayoutContainers {
 
     public static void setHeadings(List<SemanticHeading> headings) {
         StaticLayoutContainers.headings.set(headings);
+    }
+
+    public static List<Bookmark> getCatalogBookmarks() {
+        return catalogBookmarks.get();
+    }
+
+    public static void setCatalogBookmarks(List<Bookmark> bookmarks) {
+        List<Bookmark> current = catalogBookmarks.get();
+        current.clear();
+        if (bookmarks != null) {
+            current.addAll(bookmarks);
+        }
+    }
+
+    public static List<Bookmark> getPageBookmarks() {
+        return pageBookmarks.get();
+    }
+
+    public static void setPageBookmarks(List<Bookmark> bookmarks) {
+        List<Bookmark> current = pageBookmarks.get();
+        current.clear();
+        if (bookmarks != null) {
+            current.addAll(bookmarks);
+        }
     }
 
     public static Boolean isUseStructTree() {
@@ -151,6 +181,17 @@ public class StaticLayoutContainers {
 
     public static void setEmbeddedImageBytesMap(Map<String, byte[]> map) {
         embeddedImageBytes.set(map);
+    }
+
+    // Map-level accessors for replacementCharRatios so worker threads and the main thread
+    // share the same per-document map. Without this, ContentFilterProcessor sets ratios on
+    // worker threads but the main thread (fallback OCR / TriageProcessor) reads an empty map.
+    public static Map<Integer, Double> getReplacementCharRatiosMap() {
+        return replacementCharRatios.get();
+    }
+
+    public static void setReplacementCharRatiosMap(Map<Integer, Double> map) {
+        replacementCharRatios.set(map);
     }
 
     // Image paths flow through String.format with File.separator (cache write side) and
