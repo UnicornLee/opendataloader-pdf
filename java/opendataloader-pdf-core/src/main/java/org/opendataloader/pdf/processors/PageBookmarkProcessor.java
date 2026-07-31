@@ -16,9 +16,13 @@
 package org.opendataloader.pdf.processors;
 
 import org.opendataloader.pdf.custom.constants.BookmarkConstant;
+import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.custom.entities.Bookmark;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
 import org.verapdf.wcag.algorithms.entities.IObject;
+import org.verapdf.wcag.algorithms.entities.SemanticHeading;
+import org.verapdf.wcag.algorithms.entities.content.TextBlock;
+import org.verapdf.wcag.algorithms.entities.content.TextColumn;
 import org.verapdf.wcag.algorithms.entities.content.TextLine;
 
 import java.util.ArrayList;
@@ -28,6 +32,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.logging.Logger;
 
 /**
  * Extracts page bookmarks from {@link CustomSemanticParagraph} contents.
@@ -43,6 +48,8 @@ import java.util.Objects;
  * level), then arranged into a parent-child tree in document reading order.</p>
  */
 public class PageBookmarkProcessor {
+
+    private static final Logger LOGGER = Logger.getLogger(PageBookmarkProcessor.class.getCanonicalName());
 
     private static final String TEMPLATE_NUMBER = "#";
     private static final String TEMPLATE_CHAPTER = "第#章";
@@ -270,21 +277,25 @@ public class PageBookmarkProcessor {
 
     private static List<Candidate> collectCandidates(List<List<IObject>> contents) {
         List<Candidate> candidates = new ArrayList<>();
+        // When a catalog (table-of-contents) page range was detected by
+        // CatalogBookmarkProcessor, skip those pages here: the same heading
+        // text ("第一节 释义", "(一) ..." etc.) appears on both catalog and body
+        // pages. Catalog entries are already emitted as catalog_bookmarks, so
+        // collecting them as page_bookmarks candidates would create duplicates
+        // and break the strict consecutive-number validation in isValidGroup.
+        int catalogStart = StaticLayoutContainers.getCatalogBookmarkStartPage();
+        int catalogEnd = StaticLayoutContainers.getCatalogBookmarkEndPage();
+        boolean skipCatalogPages = catalogStart >= 0 && catalogEnd >= catalogStart;
         for (int pageIndex = 0; pageIndex < contents.size(); pageIndex++) {
+            if (skipCatalogPages && pageIndex >= catalogStart && pageIndex <= catalogEnd) {
+                continue;
+            }
             List<IObject> pageContents = contents.get(pageIndex);
             if (pageContents == null) {
                 continue;
             }
             for (IObject content : pageContents) {
-                if (!(content instanceof CustomSemanticParagraph)) {
-                    continue;
-                }
-                CustomSemanticParagraph paragraph = (CustomSemanticParagraph) content;
-                List<TextLine> textLines = paragraph.getTextLines();
-                if (textLines.isEmpty()) {
-                    continue;
-                }
-                String firstLineText = textLines.get(0).getValue();
+                String firstLineText = extractFirstText(content);
                 if (firstLineText == null) {
                     continue;
                 }
@@ -293,18 +304,58 @@ public class PageBookmarkProcessor {
                 if (match == null) {
                     continue;
                 }
+                // SemanticTextNode and its subclasses expose font size; CustomSemanticParagraph
+                // and SemanticHeading both descend from it, so this cast is safe for both.
+                double fontSize = content instanceof org.verapdf.wcag.algorithms.entities.SemanticTextNode
+                        ? ((org.verapdf.wcag.algorithms.entities.SemanticTextNode) content).getFontSize()
+                        : 0.0;
                 candidates.add(new Candidate(
                         pageIndex,
                         trimmed,
                         new TemplateKey(match.template, match.numberSystem),
                         match.value,
-                        paragraph.getFontSize(),
-                        paragraph.getLeftX(),
-                        paragraph.getTopY()
+                        fontSize,
+                        content.getLeftX(),
+                        content.getTopY()
                 ));
             }
         }
+        LOGGER.log(java.util.logging.Level.INFO,
+                "[PageBookmark] collected {0} candidates (catalog pages skipped: {1}-{2})",
+                new Object[]{candidates.size(),
+                        skipCatalogPages ? catalogStart : -1,
+                        skipCatalogPages ? catalogEnd : -1});
         return candidates;
+    }
+
+    /**
+     * Extracts the first text line from a paragraph or heading element.
+     * <p>
+     * After {@link HeadingProcessor#processHeadings} runs, what started life as a
+     * {@link CustomSemanticParagraph} may have been re-wrapped as a
+     * {@link SemanticHeading}. Both share the {@link org.verapdf.wcag.algorithms.entities.SemanticTextNode}
+     * base class and expose the heading text through its first line; this helper
+     * abstracts the difference between {@code getTextLines().get(0)} on a paragraph
+     * and {@code getFirstLine()} on a heading so the bookmark candidate scan sees
+     * both.
+     *
+     * @return the first line text, trimmed; {@code null} when the element is not a
+     *         paragraph/heading or has no text
+     */
+    private static String extractFirstText(IObject content) {
+        if (content instanceof CustomSemanticParagraph) {
+            List<TextLine> textLines = ((CustomSemanticParagraph) content).getTextLines();
+            if (textLines.isEmpty()) {
+                return null;
+            }
+            TextLine firstLine = textLines.get(0);
+            return firstLine != null ? firstLine.getValue() : null;
+        }
+        if (content instanceof SemanticHeading) {
+            TextLine firstLine = ((SemanticHeading) content).getFirstLine();
+            return firstLine != null ? firstLine.getValue() : null;
+        }
+        return null;
     }
 
     private static ConstantPattern matchPrefix(String text) {

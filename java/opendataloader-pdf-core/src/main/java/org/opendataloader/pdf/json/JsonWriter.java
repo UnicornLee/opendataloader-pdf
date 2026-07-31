@@ -121,6 +121,17 @@ public class JsonWriter {
             }
             jsonGenerator.writeEndArray();
 
+            // When CatalogBookmarkProcessor detected a table-of-contents page
+            // range, record it as 1-indexed page numbers so consumers can identify
+            // which pages were consumed by the catalog and exclude them when
+            // walking the page stream. Skipped when no catalog was detected.
+            int catalogStartPage = StaticLayoutContainers.getCatalogBookmarkStartPage();
+            int catalogEndPage = StaticLayoutContainers.getCatalogBookmarkEndPage();
+            if (catalogStartPage >= 0 && catalogEndPage >= catalogStartPage) {
+                jsonGenerator.writeNumberField("catalog_page_range_start", catalogStartPage + 1);
+                jsonGenerator.writeNumberField("catalog_page_range_end", catalogEndPage + 1);
+            }
+
             jsonGenerator.writeArrayFieldStart("page_bookmarks");
             for (Bookmark bookmark : StaticLayoutContainers.getPageBookmarks()) {
                 jsonGenerator.writePOJO(bookmark);

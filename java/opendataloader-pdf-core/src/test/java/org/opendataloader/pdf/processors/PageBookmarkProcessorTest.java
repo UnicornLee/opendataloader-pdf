@@ -15,15 +15,20 @@
  */
 package org.opendataloader.pdf.processors;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.custom.entities.Bookmark;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
 import org.verapdf.wcag.algorithms.entities.IObject;
+import org.verapdf.wcag.algorithms.entities.SemanticHeading;
 import org.verapdf.wcag.algorithms.entities.content.TextBlock;
 import org.verapdf.wcag.algorithms.entities.content.TextChunk;
 import org.verapdf.wcag.algorithms.entities.content.TextLine;
 import org.verapdf.wcag.algorithms.entities.geometry.BoundingBox;
+import org.verapdf.wcag.algorithms.entities.enums.SemanticType;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -46,6 +51,36 @@ public class PageBookmarkProcessorTest {
         }
         contents.add(page);
         return contents;
+    }
+
+    /**
+     * Builds a multi-page content list. The argument list alternates (pageIndex, text,
+     * fontSize, topY) tuples. Unreferenced page slots remain empty. Page indices are
+     * 0-based, matching the convention used by DocumentProcessor and PageBookmarkProcessor.
+     */
+    private static List<List<IObject>> multiPage(Object... entries) {
+        List<List<IObject>> contents = new ArrayList<>();
+        for (int i = 0; i < entries.length; i += 4) {
+            int pageIndex = (Integer) entries[i];
+            String text = (String) entries[i + 1];
+            float fontSize = (Float) entries[i + 2];
+            double topY = (Double) entries[i + 3];
+            while (contents.size() <= pageIndex) {
+                contents.add(new ArrayList<>());
+            }
+            contents.get(pageIndex).add(createParagraph(text, pageIndex, 50, topY, topY - 10, fontSize));
+        }
+        return contents;
+    }
+
+    @BeforeEach
+    public void setUp() {
+        StaticLayoutContainers.clearContainers();
+    }
+
+    @AfterEach
+    public void tearDown() {
+        StaticLayoutContainers.clearContainers();
     }
 
     @Test
@@ -188,6 +223,71 @@ public class PageBookmarkProcessorTest {
         Assertions.assertEquals(2, bookmarks.size());
         Assertions.assertEquals("第1条 条款一", bookmarks.get(0).getText());
         Assertions.assertEquals("第2条 条款二", bookmarks.get(1).getText());
+    }
+
+    /**
+     * Builds a {@link SemanticHeading} wrapping a single-line text block. After
+     * {@link HeadingProcessor#processHeadings} wraps headings in
+     * {@link SemanticHeading} instead of {@link CustomSemanticParagraph}, these
+     * remain valid candidates for page bookmarks.
+     */
+    private static SemanticHeading createHeading(String text, int pageIndex, double leftX,
+                                                 double topY, double bottomY, float fontSize) {
+        TextLine line = new TextLine(new TextChunk(
+                new BoundingBox(pageIndex, leftX, bottomY, leftX + 200, topY), text, fontSize, (topY + bottomY) / 2));
+        TextBlock block = new TextBlock(line);
+        CustomSemanticParagraph paragraph = ParagraphProcessor.createParagraphFromTextBlock(block);
+        paragraph.setSemanticType(SemanticType.HEADING);
+        return new SemanticHeading(paragraph);
+    }
+
+    @Test
+    public void testSemanticsHeadingIsPickedUp() {
+        // HeadingProcessor wraps heading-style paragraphs as SemanticHeading; verify
+        // these still flow through to page bookmarks.
+        List<IObject> page = new ArrayList<>();
+        page.add(createHeading("第一节 释义", 0, 50, 700, 680, 16));
+        page.add(createHeading("第二节 概览", 0, 50, 600, 580, 16));
+        page.add(createHeading("第三节 本次发行概况", 0, 50, 500, 480, 16));
+        List<List<IObject>> contents = new ArrayList<>();
+        contents.add(page);
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(3, bookmarks.size());
+        Assertions.assertEquals("第一节 释义", bookmarks.get(0).getText());
+        Assertions.assertEquals("第二节 概览", bookmarks.get(1).getText());
+        Assertions.assertEquals("第三节 本次发行概况", bookmarks.get(2).getText());
+    }
+
+    @Test
+    public void testSkipsCatalogPageRange() {
+        // Catalog (TOC) pages 0-1 contain TOC-style section entries that use the
+        // same headings as the body sections on page 2+. Without the skip, the
+        // SECTION group would have duplicate values [1, 1, 2, 2, 3, 3] and
+        // isValidGroup would reject it. After skipping catalog pages 0-1, the
+        // body values [1, 2, 3] form a valid consecutive group.
+        List<List<IObject>> contents = multiPage(
+                // Catalog page 0: TOC-style entries
+                0, "第一节 释义 .... 1", 12.0f, 700.0,
+                0, "第二节 概览 .... 1", 12.0f, 680.0,
+                0, "第三节 本次发行概况 .... 1", 12.0f, 660.0,
+                // Catalog page 1: more TOC-style entries
+                1, "第一节 释义 .... 2", 12.0f, 700.0,
+                1, "第二节 概览 .... 2", 12.0f, 680.0,
+                1, "第三节 本次发行概况 .... 2", 12.0f, 660.0,
+                // Body page 2: actual section headings
+                2, "第一节 释义", 16.0f, 700.0,
+                2, "第二节 概览", 16.0f, 650.0,
+                2, "第三节 本次发行概况", 16.0f, 600.0);
+
+        StaticLayoutContainers.setCatalogBookmarkPageRange(0, 1);
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(3, bookmarks.size(), "Catalog pages should be skipped");
+        Assertions.assertEquals("第一节 释义", bookmarks.get(0).getText());
+        Assertions.assertEquals(3, bookmarks.get(0).getPageNum(), "First body section is on page 3 (1-indexed)");
+        Assertions.assertEquals("第二节 概览", bookmarks.get(1).getText());
+        Assertions.assertEquals("第三节 本次发行概况", bookmarks.get(2).getText());
     }
 
     @Test

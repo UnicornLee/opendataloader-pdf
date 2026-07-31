@@ -16,6 +16,7 @@
 package org.opendataloader.pdf.processors;
 
 import org.opendataloader.pdf.api.Config;
+import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.custom.entities.Bookmark;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.content.TextLine;
@@ -93,6 +94,8 @@ public class CatalogBookmarkProcessor {
                 "[CatalogBookmark] detected catalog page range: {0}-{1} ({2} pages, {3} toc lines)",
                 new Object[]{bestRange.startPage + 1, bestRange.endPage + 1,
                         bestRange.pageCount(), bestRange.totalTocLines});
+
+        StaticLayoutContainers.setCatalogBookmarkPageRange(bestRange.startPage, bestRange.endPage);
 
         List<Bookmark> roots = extractBookmarks(contents, bestRange, pageLabels);
         int total = countAllBookmarks(roots);

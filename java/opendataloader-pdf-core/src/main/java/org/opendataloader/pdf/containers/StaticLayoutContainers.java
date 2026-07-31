@@ -42,6 +42,8 @@ public class StaticLayoutContainers {
     private static final ThreadLocal<Map<String, byte[]>> embeddedImageBytes = ThreadLocal.withInitial(ConcurrentHashMap::new);
     private static final ThreadLocal<List<Bookmark>> catalogBookmarks = ThreadLocal.withInitial(LinkedList::new);
     private static final ThreadLocal<List<Bookmark>> pageBookmarks = ThreadLocal.withInitial(LinkedList::new);
+    private static final ThreadLocal<Integer> catalogBookmarkStartPage = new ThreadLocal<>();
+    private static final ThreadLocal<Integer> catalogBookmarkEndPage = new ThreadLocal<>();
 
     public static void clearContainers() {
         currentContentId.set(1L);
@@ -55,6 +57,8 @@ public class StaticLayoutContainers {
         embeddedImageBytes.get().clear();
         catalogBookmarks.get().clear();
         pageBookmarks.get().clear();
+        catalogBookmarkStartPage.set(-1);
+        catalogBookmarkEndPage.set(-1);
     }
 
     public static long getCurrentContentId() {
@@ -114,6 +118,21 @@ public class StaticLayoutContainers {
         if (bookmarks != null) {
             current.addAll(bookmarks);
         }
+    }
+
+    public static void setCatalogBookmarkPageRange(int startPage, int endPage) {
+        catalogBookmarkStartPage.set(startPage);
+        catalogBookmarkEndPage.set(endPage);
+    }
+
+    public static int getCatalogBookmarkStartPage() {
+        Integer value = catalogBookmarkStartPage.get();
+        return value != null ? value : -1;
+    }
+
+    public static int getCatalogBookmarkEndPage() {
+        Integer value = catalogBookmarkEndPage.get();
+        return value != null ? value : -1;
     }
 
     public static Boolean isUseStructTree() {
