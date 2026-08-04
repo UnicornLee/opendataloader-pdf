@@ -68,6 +68,8 @@ public class PageBookmarkProcessor {
     private static final char CHINESE_COMMA_HALF_WIDTH = '\uFF64';
     private static final char CHINESE_COMMA_FULL_WIDTH = '\u3001';
 
+    private static final char FULL_WIDTH_DOT = '．';
+
     private enum NumberSystem {
         ARABIC, CHINESE
     }
@@ -223,18 +225,22 @@ public class PageBookmarkProcessor {
         }
 
         // Rank groups by visual hierarchy: larger font and smaller left indentation
-        // indicate higher level. A section group that is the rightmost group is a
-        // document-specific top-level pattern used by some PDFs.
+        // indicate higher level. A 第*章/第*节/第*条 group whose left edge is to the
+        // right of every other group is a top-level heading pattern used by some
+        // PDFs. When several of them coexist, only the highest-priority one
+        // (章 > 节 > 条) is eligible for this promotion, so normally indented
+        // 章>节>条 hierarchies keep their font/indent-based ranking.
         double rightmostLeftX = validGroups.stream()
             .mapToDouble(group -> group.averageLeftX)
             .max().orElse(Double.NEGATIVE_INFINITY);
+        String promotableTemplate = findPromotableChapterTemplate(validGroups);
         validGroups.sort((a, b) -> {
-            boolean aRightmostSection = TEMPLATE_SECTION.equals(a.templateKey.template)
+            boolean aRightmostChapter = a.templateKey.template.equals(promotableTemplate)
                 && Math.abs(a.averageLeftX - rightmostLeftX) < 0.001;
-            boolean bRightmostSection = TEMPLATE_SECTION.equals(b.templateKey.template)
+            boolean bRightmostChapter = b.templateKey.template.equals(promotableTemplate)
                 && Math.abs(b.averageLeftX - rightmostLeftX) < 0.001;
-            if (aRightmostSection != bRightmostSection) {
-                return aRightmostSection ? -1 : 1;
+            if (aRightmostChapter != bRightmostChapter) {
+                return aRightmostChapter ? -1 : 1;
             }
             int fontCmp = Double.compare(b.averageFontSize, a.averageFontSize);
             if (fontCmp != 0) {
@@ -257,22 +263,30 @@ public class PageBookmarkProcessor {
             levelByTemplate.put(validGroups.get(i).templateKey, i + 1);
         }
 
+        // Only candidates that survived mergeContiguousGroups should be emitted;
+        // strays and out-of-chain duplicates discarded by the merge must not
+        // become bookmarks.
+        List<Candidate> mergedCandidates = new ArrayList<>();
+        for (Group group : validGroups) {
+            mergedCandidates.addAll(group.candidates);
+        }
+
         // Sort candidates in reading order: page by page, top to bottom.
-        candidates.sort(Comparator
+        mergedCandidates.sort(Comparator
             .comparingInt((Candidate c) -> c.pageIndex)
             .thenComparing((Candidate c) -> -c.topY));
 
         TemplateKey level1Template = validGroups.get(0).templateKey;
-        boolean skipCandidatesBeforeLevel1 = TEMPLATE_SECTION.equals(level1Template.template);
         boolean level1Seen = false;
 
         List<Bookmark> rootBookmarks = new ArrayList<>();
         Bookmark currentLevel1 = null;
         Bookmark currentLevel2 = null;
 
-        for (Candidate candidate : candidates) {
-            if (skipCandidatesBeforeLevel1 && !level1Seen
-                && !level1Template.equals(candidate.templateKey)) {
+        for (Candidate candidate : mergedCandidates) {
+            // A level can only have one marker style, so anything collected before
+            // the first level-1 heading has no parent to attach to and is dropped.
+            if (!level1Seen && !level1Template.equals(candidate.templateKey)) {
                 continue;
             }
             Integer level = levelByTemplate.get(candidate.templateKey);
@@ -304,6 +318,34 @@ public class PageBookmarkProcessor {
         }
 
         return rootBookmarks;
+    }
+
+    /**
+     * Returns the chapter-like template (第*章/第*节/第*条) eligible for the
+     * "rightmost group is a top-level heading" promotion. When several of them
+     * are present, only the highest-priority one (章 > 节 > 条) is eligible;
+     * returns {@code null} when no chapter-like group exists.
+     */
+    private static String findPromotableChapterTemplate(List<Group> groups) {
+        boolean hasChapter = false;
+        boolean hasSection = false;
+        boolean hasArticle = false;
+        for (Group group : groups) {
+            if (TEMPLATE_CHAPTER.equals(group.templateKey.template)) {
+                hasChapter = true;
+            } else if (TEMPLATE_SECTION.equals(group.templateKey.template)) {
+                hasSection = true;
+            } else if (TEMPLATE_ARTICLE.equals(group.templateKey.template)) {
+                hasArticle = true;
+            }
+        }
+        if (hasChapter) {
+            return TEMPLATE_CHAPTER;
+        }
+        if (hasSection) {
+            return TEMPLATE_SECTION;
+        }
+        return hasArticle ? TEMPLATE_ARTICLE : null;
     }
 
     private static List<Candidate> collectCandidates(List<List<IObject>> contents) {
@@ -416,11 +458,15 @@ public class PageBookmarkProcessor {
             return false;
         }
         char suffix = text.charAt(suffixIndex);
-        if (!(Character.isWhitespace(suffix) || suffix == '.'
+        // Full-width and half-width dots are treated as the same type.
+        boolean isDot = suffix == '.' || suffix == FULL_WIDTH_DOT;
+        if (!(Character.isWhitespace(suffix) || isDot
             || suffix == CHINESE_COMMA_FULL_WIDTH || suffix == CHINESE_COMMA_HALF_WIDTH)) {
             return false;
         }
-        return suffix != '.' || suffixIndex + 1 >= text.length()
+        // A dot right after the number cannot be followed by another digit
+        // ("1.5" is a decimal, not a bookmark).
+        return !isDot || suffixIndex + 1 >= text.length()
             || !Character.isDigit(text.charAt(suffixIndex + 1));
     }
 
@@ -526,7 +572,7 @@ public class PageBookmarkProcessor {
         byLatestPage.sort(Comparator
             .comparingInt((Candidate c) -> c.pageIndex)
             .reversed()
-            .thenComparing((Candidate c) -> -c.topY));
+            .thenComparing((Candidate c) -> c.topY));
         Set<Integer> used = new HashSet<>();
         Map<Integer, Candidate> latestByValue = new LinkedHashMap<>();
         for (Candidate c : byLatestPage) {
