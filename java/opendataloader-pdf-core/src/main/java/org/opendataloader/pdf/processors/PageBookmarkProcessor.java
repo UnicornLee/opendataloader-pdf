@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright 2025-2026 Hancom Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -29,9 +29,13 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.logging.Logger;
 
 /**
@@ -59,6 +63,10 @@ public class PageBookmarkProcessor {
     private static final String TEMPLATE_ASCII_PAREN = "(#)";
     private static final String TEMPLATE_CLOSE_PAREN = "#）";
     private static final String TEMPLATE_CLOSE_ASCII_PAREN = "#)";
+    private static final String TEMPLATE_CHINESE_COMMA = "、";
+    private static final String TEMPLATE_CHINESE_COMMA_CANONICAL = "#\u3001";
+    private static final char CHINESE_COMMA_HALF_WIDTH = '\uFF64';
+    private static final char CHINESE_COMMA_FULL_WIDTH = '\u3001';
 
     private enum NumberSystem {
         ARABIC, CHINESE
@@ -84,9 +92,11 @@ public class PageBookmarkProcessor {
         List<ConstantPattern> patterns = new ArrayList<>();
         for (int i = 0; i < BookmarkConstant.NUMBERS_1_TO_100.size(); i++) {
             patterns.add(new ConstantPattern(String.valueOf(BookmarkConstant.NUMBERS_1_TO_100.get(i)),
-                    TEMPLATE_NUMBER, NumberSystem.ARABIC, i + 1));
+                TEMPLATE_NUMBER, NumberSystem.ARABIC, i + 1));
         }
         addPatternList(patterns, BookmarkConstant.CHINESE_NUMBERS_1_TO_100, TEMPLATE_NUMBER, NumberSystem.CHINESE);
+        addPatternList(patterns, BookmarkConstant.CHINESE_NUMBERS_WITH_COMMA_1_TO_100, TEMPLATE_CHINESE_COMMA_CANONICAL, NumberSystem.CHINESE);
+        addPatternList(patterns, BookmarkConstant.CHINESE_NUMBERS_WITH_HALF_WIDTH_COMMA_1_TO_100, TEMPLATE_CHINESE_COMMA_CANONICAL, NumberSystem.CHINESE);
         addPatternList(patterns, BookmarkConstant.NUMBER_CHAPTERS_1_TO_100, TEMPLATE_CHAPTER, NumberSystem.ARABIC);
         addPatternList(patterns, BookmarkConstant.CHINESE_NUMBER_CHAPTERS_1_TO_100, TEMPLATE_CHAPTER, NumberSystem.CHINESE);
         addPatternList(patterns, BookmarkConstant.NUMBER_SECTIONS_1_TO_100, TEMPLATE_SECTION, NumberSystem.ARABIC);
@@ -99,7 +109,7 @@ public class PageBookmarkProcessor {
         addPatternList(patterns, BookmarkConstant.CHINESE_NUMBERS_IN_ASCII_PARENS_1_TO_100, TEMPLATE_ASCII_PAREN, NumberSystem.CHINESE);
         addPatternList(patterns, BookmarkConstant.NUMBERS_WITH_CLOSE_PAREN_1_TO_100, TEMPLATE_CLOSE_PAREN, NumberSystem.ARABIC);
         addPatternList(patterns, BookmarkConstant.NUMBERS_WITH_CLOSE_ASCII_PAREN_1_TO_100, TEMPLATE_CLOSE_ASCII_PAREN, NumberSystem.ARABIC);
-        // Longest first so that "10" is preferred over "1" and "第100章" over "第1章".
+        // Longest first so that "10" is preferred over "1" and "第10章" over "第1章".
         patterns.sort(Comparator.comparingInt((ConstantPattern p) -> p.constant.length()).reversed());
         return patterns;
     }
@@ -176,9 +186,9 @@ public class PageBookmarkProcessor {
             averageLeftX = candidates.stream().mapToDouble(c -> c.leftX).average().orElse(0.0);
             firstPageIndex = candidates.stream().mapToInt(c -> c.pageIndex).min().orElse(0);
             firstTopY = candidates.stream()
-                    .filter(c -> c.pageIndex == firstPageIndex)
-                    .mapToDouble(c -> c.topY)
-                    .max().orElse(0.0);
+                .filter(c -> c.pageIndex == firstPageIndex)
+                .mapToDouble(c -> c.topY)
+                .max().orElse(0.0);
         }
     }
 
@@ -206,14 +216,26 @@ public class PageBookmarkProcessor {
                 validGroups.add(group);
             }
         }
+        mergeContiguousGroups(validGroups);
 
         if (validGroups.isEmpty()) {
             return Collections.emptyList();
         }
 
         // Rank groups by visual hierarchy: larger font and smaller left indentation
-        // indicate higher level. Earlier appearance is used as a stable tie-breaker.
+        // indicate higher level. A section group that is the rightmost group is a
+        // document-specific top-level pattern used by some PDFs.
+        double rightmostLeftX = validGroups.stream()
+            .mapToDouble(group -> group.averageLeftX)
+            .max().orElse(Double.NEGATIVE_INFINITY);
         validGroups.sort((a, b) -> {
+            boolean aRightmostSection = TEMPLATE_SECTION.equals(a.templateKey.template)
+                && Math.abs(a.averageLeftX - rightmostLeftX) < 0.001;
+            boolean bRightmostSection = TEMPLATE_SECTION.equals(b.templateKey.template)
+                && Math.abs(b.averageLeftX - rightmostLeftX) < 0.001;
+            if (aRightmostSection != bRightmostSection) {
+                return aRightmostSection ? -1 : 1;
+            }
             int fontCmp = Double.compare(b.averageFontSize, a.averageFontSize);
             if (fontCmp != 0) {
                 return fontCmp;
@@ -237,20 +259,29 @@ public class PageBookmarkProcessor {
 
         // Sort candidates in reading order: page by page, top to bottom.
         candidates.sort(Comparator
-                .comparingInt((Candidate c) -> c.pageIndex)
-                .thenComparing((Candidate c) -> -c.topY));
+            .comparingInt((Candidate c) -> c.pageIndex)
+            .thenComparing((Candidate c) -> -c.topY));
+
+        TemplateKey level1Template = validGroups.get(0).templateKey;
+        boolean skipCandidatesBeforeLevel1 = TEMPLATE_SECTION.equals(level1Template.template);
+        boolean level1Seen = false;
 
         List<Bookmark> rootBookmarks = new ArrayList<>();
         Bookmark currentLevel1 = null;
         Bookmark currentLevel2 = null;
 
         for (Candidate candidate : candidates) {
+            if (skipCandidatesBeforeLevel1 && !level1Seen
+                && !level1Template.equals(candidate.templateKey)) {
+                continue;
+            }
             Integer level = levelByTemplate.get(candidate.templateKey);
             if (level == null) {
                 continue;
             }
             Bookmark bookmark = createBookmark(candidate);
             if (level == 1) {
+                level1Seen = true;
                 rootBookmarks.add(bookmark);
                 currentLevel1 = bookmark;
                 currentLevel2 = null;
@@ -279,7 +310,7 @@ public class PageBookmarkProcessor {
         List<Candidate> candidates = new ArrayList<>();
         // When a catalog (table-of-contents) page range was detected by
         // CatalogBookmarkProcessor, skip those pages here: the same heading
-        // text ("第一节 释义", "(一) ..." etc.) appears on both catalog and body
+        // text ("绗竴鑺?閲婁箟", "(涓€) ..." etc.) appears on both catalog and body
         // pages. Catalog entries are already emitted as catalog_bookmarks, so
         // collecting them as page_bookmarks candidates would create duplicates
         // and break the strict consecutive-number validation in isValidGroup.
@@ -307,24 +338,24 @@ public class PageBookmarkProcessor {
                 // SemanticTextNode and its subclasses expose font size; CustomSemanticParagraph
                 // and SemanticHeading both descend from it, so this cast is safe for both.
                 double fontSize = content instanceof org.verapdf.wcag.algorithms.entities.SemanticTextNode
-                        ? ((org.verapdf.wcag.algorithms.entities.SemanticTextNode) content).getFontSize()
-                        : 0.0;
+                    ? ((org.verapdf.wcag.algorithms.entities.SemanticTextNode) content).getFontSize()
+                    : 0.0;
                 candidates.add(new Candidate(
-                        pageIndex,
-                        trimmed,
-                        new TemplateKey(match.template, match.numberSystem),
-                        match.value,
-                        fontSize,
-                        content.getLeftX(),
-                        content.getTopY()
+                    pageIndex,
+                    trimmed,
+                    new TemplateKey(match.template, match.numberSystem),
+                    match.value,
+                    fontSize,
+                    content.getLeftX(),
+                    content.getTopY()
                 ));
             }
         }
         LOGGER.log(java.util.logging.Level.INFO,
-                "[PageBookmark] collected {0} candidates (catalog pages skipped: {1}-{2})",
-                new Object[]{candidates.size(),
-                        skipCatalogPages ? catalogStart : -1,
-                        skipCatalogPages ? catalogEnd : -1});
+            "[PageBookmark] collected {0} candidates (catalog pages skipped: {1}-{2})",
+            new Object[]{candidates.size(),
+                skipCatalogPages ? catalogStart : -1,
+                skipCatalogPages ? catalogEnd : -1});
         return candidates;
     }
 
@@ -358,14 +389,15 @@ public class PageBookmarkProcessor {
         return null;
     }
 
+    public static boolean isBookmarkCandidate(String text) {
+        return text != null && matchPrefix(text.trim()) != null;
+    }
+
     private static ConstantPattern matchPrefix(String text) {
         for (ConstantPattern pattern : PATTERNS) {
             if (text.startsWith(pattern.constant)) {
-                if (TEMPLATE_NUMBER.equals(pattern.template)) {
-                    int nextIndex = pattern.constant.length();
-                    if (nextIndex < text.length() && isDigitLike(text.charAt(nextIndex))) {
-                        continue;
-                    }
+                if (!hasValidBookmarkSuffix(text, pattern)) {
+                    continue;
                 }
                 return pattern;
             }
@@ -373,10 +405,245 @@ public class PageBookmarkProcessor {
         return null;
     }
 
-    private static boolean isDigitLike(char c) {
-        return (c >= '0' && c <= '9')
-                || c == '一' || c == '二' || c == '三' || c == '四' || c == '五'
-                || c == '六' || c == '七' || c == '八' || c == '九' || c == '十' || c == '百';
+    private static boolean hasValidBookmarkSuffix(String text, ConstantPattern pattern) {
+        char last = pattern.constant.charAt(pattern.constant.length() - 1);
+        if (last == ')' || last == '）'
+            || last == CHINESE_COMMA_FULL_WIDTH || last == CHINESE_COMMA_HALF_WIDTH) {
+            return true;
+        }
+        int suffixIndex = pattern.constant.length();
+        if (suffixIndex >= text.length()) {
+            return false;
+        }
+        char suffix = text.charAt(suffixIndex);
+        if (!(Character.isWhitespace(suffix) || suffix == '.'
+            || suffix == CHINESE_COMMA_FULL_WIDTH || suffix == CHINESE_COMMA_HALF_WIDTH)) {
+            return false;
+        }
+        return suffix != '.' || suffixIndex + 1 >= text.length()
+            || !Character.isDigit(text.charAt(suffixIndex + 1));
+    }
+
+    /**
+     * Merges groups of the same template that together form a contiguous sequence
+     * of numbers, and drops groups that cannot be merged into the union. Without
+     * this pass, a section like "绗簲鑺? may collect disjoint sub-ranges
+     * (e.g. {1,2,3}, {5}, {4,5,6,7,8,9,10,11}); the disconnected {5} must be
+     * dropped and {1,2,3} combined with {4,5,6,...} into a single range.
+     */
+    /**
+     * For each template, walks the per-page groups in reading order and finds the
+     * longest contiguous "from-1" sequence. The selected span is merged into one
+     * group; the leftover singletons (e.g. a stray "5," that does not fit the
+     * chosen sequence) are discarded so they do not surface as standalone
+     * bookmarks.
+     */
+    /**
+     * For each template, partitions candidates by "value=1" chapter markers
+     * (each chapter restarts at 涓€銆? and keeps the chapter whose values form
+     * the longest contiguous "from-1" sequence. Ties are resolved by the
+     * chapter whose first candidate is closest to the parent directory
+     * (smallest pageIndex, then largest topY). Inside the chosen chapter,
+     * duplicate values are deduplicated by keeping the latest-occurring
+     * occurrence; stray values outside the contiguous range are dropped.
+     */
+    private static void mergeContiguousGroups(List<Group> groups) {
+        Map<TemplateKey, List<Group>> byTemplate = new HashMap<>();
+        for (Group group : groups) {
+            byTemplate.computeIfAbsent(group.templateKey, k -> new ArrayList<>()).add(group);
+        }
+        List<Group> merged = new ArrayList<>();
+        for (Map.Entry<TemplateKey, List<Group>> entry : byTemplate.entrySet()) {
+            List<Candidate> allCandidates = new ArrayList<>();
+            for (Group g : entry.getValue()) {
+                allCandidates.addAll(g.candidates);
+            }
+            if (allCandidates.isEmpty()) {
+                continue;
+            }
+            allCandidates.sort(Comparator
+                .comparingInt((Candidate c) -> c.pageIndex)
+                .thenComparing((Candidate c) -> -c.topY));
+            List<List<Candidate>> sections = splitByValueOne(allCandidates);
+            List<Candidate> bestSection = pickLongestContiguousSection(sections);
+            if (bestSection == null || bestSection.isEmpty()) {
+                continue;
+            }
+            Group combined = new Group(entry.getKey());
+            combined.candidates.addAll(bestSection);
+            combined.computeStatistics();
+            merged.add(combined);
+        }
+        groups.clear();
+        groups.addAll(merged);
+    }
+
+    private static List<List<Candidate>> splitByValueOne(List<Candidate> sorted) {
+        List<List<Candidate>> sections = new ArrayList<>();
+        List<Candidate> current = new ArrayList<>();
+        for (Candidate c : sorted) {
+            if (c.value == 1 && !current.isEmpty()) {
+                sections.add(current);
+                current = new ArrayList<>();
+            }
+            current.add(c);
+        }
+        if (!current.isEmpty()) {
+            sections.add(current);
+        }
+        return sections;
+    }
+
+    private static int sectionIndexForLog = 0;
+
+    private static List<Candidate> pickLongestContiguousSection(List<List<Candidate>> sections) {
+        sectionIndexForLog = 0;
+        List<Candidate> best = null;
+        int bestLength = 0;
+        int bestFirstIndex = Integer.MAX_VALUE;
+        double bestFirstTopY = Double.NEGATIVE_INFINITY;
+        for (List<Candidate> section : sections) {
+            int length = contiguousFromOneLength(section);
+            if (length == 0) {
+                continue;
+            }
+            int firstIndex = section.get(0).pageIndex;
+            double firstTopY = section.get(0).topY;
+            if (length > bestLength
+                || (length == bestLength
+                && (firstIndex < bestFirstIndex
+                || (firstIndex == bestFirstIndex && firstTopY > bestFirstTopY)))) {
+                best = section;
+                bestLength = length;
+                bestFirstIndex = firstIndex;
+                bestFirstTopY = firstTopY;
+            }
+        }
+        if (best == null) {
+            return null;
+        }
+        List<Candidate> byLatestPage = new ArrayList<>(best);
+        byLatestPage.sort(Comparator
+            .comparingInt((Candidate c) -> c.pageIndex)
+            .reversed()
+            .thenComparing((Candidate c) -> -c.topY));
+        Set<Integer> used = new HashSet<>();
+        Map<Integer, Candidate> latestByValue = new LinkedHashMap<>();
+        for (Candidate c : byLatestPage) {
+            if (c.value >= 1 && c.value <= bestLength && used.add(c.value)) {
+                latestByValue.put(c.value, c);
+            }
+        }
+        List<Candidate> trimmed = new ArrayList<>(latestByValue.values());
+        trimmed.sort(Comparator
+            .comparingInt((Candidate c) -> c.value));
+        return trimmed;
+    }
+
+    private static int contiguousFromOneLength(List<Candidate> section) {
+        Set<Integer> present = new HashSet<>();
+        for (Candidate c : section) {
+            present.add(c.value);
+        }
+        int length = 0;
+        for (int v = 1; v <= 100; v++) {
+            if (present.contains(v)) {
+                length = v;
+            } else {
+                break;
+            }
+        }
+        return length;
+    }
+
+    /**
+     * Walks the groups in reading order and tracks the longest "from-1" run
+     * seen so far. A run starts when a group contains value 1, and continues
+     * with subsequent groups whose value equals the next expected integer.
+     * The longest run wins; ties are broken by picking the run whose first
+     * group is closest to the parent directory (smallest pageIndex, then
+     * largest topY).
+     */
+    private static Group pickBestContiguousSpan(List<Group> orderedGroups) {
+        List<Group> bestRun = null;
+        List<Group> current = new ArrayList<>();
+        int expectedNext = 1;
+        for (Group group : orderedGroups) {
+            Set<Integer> values = new TreeSet<>();
+            for (Candidate c : group.candidates) {
+                values.add(c.value);
+            }
+            if (values.isEmpty()) {
+                continue;
+            }
+            int smallest = values.iterator().next();
+            if (current.isEmpty()) {
+                if (smallest == 1) {
+                    current.add(group);
+                    expectedNext = 2;
+                }
+                continue;
+            }
+            if (smallest == expectedNext) {
+                current.add(group);
+                expectedNext++;
+            } else {
+                bestRun = chooseBetterRun(bestRun, current);
+                current = new ArrayList<>();
+                expectedNext = 1;
+                if (smallest == 1) {
+                    current.add(group);
+                    expectedNext = 2;
+                }
+            }
+        }
+        bestRun = chooseBetterRun(bestRun, current);
+        if (bestRun == null || bestRun.isEmpty()) {
+            return null;
+        }
+        Group combined = new Group(bestRun.get(0).templateKey);
+        for (Group g : bestRun) {
+            combined.candidates.addAll(g.candidates);
+        }
+        combined.computeStatistics();
+        return combined;
+    }
+
+    private static List<Group> chooseBetterRun(List<Group> bestRun, List<Group> candidate) {
+        if (candidate == null || candidate.isEmpty()) {
+            return bestRun;
+        }
+        if (bestRun == null) {
+            return candidate;
+        }
+        if (candidate.size() > bestRun.size()) {
+            return candidate;
+        }
+        if (candidate.size() < bestRun.size()) {
+            return bestRun;
+        }
+        int candidateFirstIndex = candidate.get(0).firstPageIndex;
+        int bestFirstIndex = bestRun.get(0).firstPageIndex;
+        if (candidateFirstIndex != bestFirstIndex) {
+            return candidateFirstIndex < bestFirstIndex ? candidate : bestRun;
+        }
+        double candidateFirstTopY = candidate.get(0).firstTopY;
+        double bestFirstTopY = bestRun.get(0).firstTopY;
+        return candidateFirstTopY > bestFirstTopY ? candidate : bestRun;
+    }
+
+    private static boolean isContiguousFromOne(Set<Integer> values) {
+        if (values.isEmpty() || values.iterator().next() != 1) {
+            return false;
+        }
+        int expected = 1;
+        for (Integer value : values) {
+            if (value != expected) {
+                return false;
+            }
+            expected++;
+        }
+        return true;
     }
 
     private static Map<TemplateKey, Group> groupByTemplate(List<Candidate> candidates) {
@@ -397,16 +664,28 @@ public class PageBookmarkProcessor {
         }
         values.sort(Integer::compareTo);
 
+        if (TEMPLATE_SECTION.equals(group.templateKey.template) && values.get(0) == 1) {
+            return true;
+        }
         if (values.size() == 1) {
             return values.get(0) == 1;
         }
 
-        for (int i = 0; i < values.size(); i++) {
-            if (values.get(i) != i + 1) {
+        int previous = 0;
+        int distinct = 0;
+        for (Integer value : values) {
+            if (value < 1) {
                 return false;
             }
+            if (value != previous) {
+                if (previous != 0 && value > previous + 1) {
+                    return false;
+                }
+                distinct++;
+                previous = value;
+            }
         }
-        return true;
+        return distinct >= 2;
     }
 
     private static Bookmark createBookmark(Candidate candidate) {

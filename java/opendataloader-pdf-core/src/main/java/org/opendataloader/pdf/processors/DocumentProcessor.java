@@ -480,13 +480,20 @@ public class DocumentProcessor {
                     propagateState.run();
                     List<IObject> pageContents = contents.get(pageNumber);
                     pageContents = ParagraphProcessor.processParagraphs(pageContents, width);
-                    if (structured) {
-//                        pageContents = ListProcessor.processListsFromTextNodes(pageContents);
-                        HeadingProcessor.processHeadings(pageContents, false);
-                    }
                     contents.set(pageNumber, pageContents);
                 })
             ).get();
+
+            if (structured) {
+                CatalogBookmarkProcessor.writeCollectedCatalogMarkdown(contents, inputPdfName, config);
+                pool.submit(() ->
+                    IntStream.range(0, totalPages).parallel().forEach(pageNumber -> {
+                        if (!shouldProcessPage(pageNumber, pagesToProcess)) return;
+                        propagateState.run();
+                        HeadingProcessor.processHeadings(contents.get(pageNumber), false);
+                    })
+                ).get();
+            }
 
             // 循环每一页，先做图表截图，再做公式截图。
             for (int pageNumber = 0; pageNumber < totalPages; pageNumber++) {
