@@ -18,6 +18,14 @@ public class BookmarkConstant {
             .mapToObj(BookmarkConstant::toChineseNumber)
             .collect(Collectors.toUnmodifiableList());
 
+    public static final List<String> CHINESE_NUMBERS_WITH_COMMA_1_TO_100 = CHINESE_NUMBERS_1_TO_100.stream()
+            .map(s -> s + "、")
+            .collect(Collectors.toUnmodifiableList());
+
+    public static final List<String> CHINESE_NUMBERS_WITH_HALF_WIDTH_COMMA_1_TO_100 = CHINESE_NUMBERS_1_TO_100.stream()
+            .map(s -> s + "､")
+            .collect(Collectors.toUnmodifiableList());
+
     public static final List<String> NUMBER_CHAPTERS_1_TO_100 = NUMBERS_1_TO_100.stream()
             .map(n -> "第" + n + "章")
             .collect(Collectors.toUnmodifiableList());

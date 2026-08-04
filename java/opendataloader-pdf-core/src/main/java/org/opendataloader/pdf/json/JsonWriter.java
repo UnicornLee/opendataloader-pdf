@@ -197,7 +197,9 @@ public class JsonWriter {
                     jsonGenerator.writeNumberField(JsonName.MARGIN_BOTTOM, marginBottom);
                     jsonGenerator.writeArrayFieldStart(JsonName.ITEMS);
                     final double[] prevBottomY = {pageContents.get(0).getTopY()};
+                    int textId = 1;
                     for (IObject content : pageContents) {
+                        final int finalTextId = textId;
                         if (content instanceof LineArtChunk) {
                             continue;
                         }
@@ -212,6 +214,7 @@ public class JsonWriter {
                                 column.getBlocks().forEach(block -> {
                                     Map<String, Object> paragraphMap = new HashMap<>();
                                     paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                                    paragraphMap.put(JsonName.ID, finalTextId);
                                     paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, block.getFontSize());
                                     paragraphMap.put(JsonName.X0, block.getLeftX());
                                     paragraphMap.put(JsonName.X1, block.getRightX());
@@ -260,6 +263,7 @@ public class JsonWriter {
                             pdfList.getListItems().forEach(listItem -> {
                                 Map<String, Object> paragraphMap = new HashMap<>();
                                 paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                                paragraphMap.put(JsonName.ID, finalTextId);
                                 paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, listItem.getFontSize());
                                 paragraphMap.put(JsonName.X0, listItem.getLeftX());
                                 paragraphMap.put(JsonName.X1, listItem.getRightX());
@@ -308,6 +312,7 @@ public class JsonWriter {
                                 column.getBlocks().forEach(block -> {
                                     Map<String, Object> paragraphMap = new HashMap<>();
                                     paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                                    paragraphMap.put(JsonName.ID, finalTextId);
                                     paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, block.getFontSize());
                                     paragraphMap.put(JsonName.X0, block.getLeftX());
                                     paragraphMap.put(JsonName.X1, block.getRightX());
@@ -359,6 +364,7 @@ public class JsonWriter {
                                     semanticTOCI.getLines().forEach(line -> {
                                         Map<String, Object> paragraphMap = new HashMap<>();
                                         paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                                        paragraphMap.put(JsonName.ID, finalTextId);
                                         paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, line.getFontSize());
                                         paragraphMap.put(JsonName.X0, line.getLeftX());
                                         paragraphMap.put(JsonName.X1, line.getRightX());
@@ -415,6 +421,7 @@ public class JsonWriter {
                             paragraphContentList.add(textLineMap);
                             paragraphMap.put(JsonName.CONTENT, paragraphContentList);
                             paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                            paragraphMap.put(JsonName.ID, finalTextId);
                             paragraphMap.put(JsonName.IS_BOOKMARK, false);
                             paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, textChunk.getFontSize());
                             paragraphMap.put(JsonName.X0, textChunk.getLeftX());
@@ -457,6 +464,7 @@ public class JsonWriter {
                             });
                             paragraphMap.put(JsonName.CONTENT, paragraphContentList);
                             paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                            paragraphMap.put(JsonName.ID, finalTextId);
                             paragraphMap.put(JsonName.IS_BOOKMARK, false);
                             paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, customSemanticParagraph.getFontSize());
                             paragraphMap.put(JsonName.X0, customSemanticParagraph.getLeftX());
@@ -492,6 +500,7 @@ public class JsonWriter {
                             if ("stream_table".equals(pageItem.getItemType())) {
                                 Map<String, Object> tableMap = new HashMap<>();
                                 tableMap.put(JsonName.ITEM_TYPE, "stream_table");
+                                tableMap.put(JsonName.ID, finalTextId);
                                 tableMap.put(JsonName.WIDTH, pageItem.getWidth());
                                 tableMap.put(JsonName.HEIGHT, pageItem.getHeight());
                                 tableMap.put(JsonName.X0, pageItem.getX0());
@@ -527,6 +536,7 @@ public class JsonWriter {
                             TableBorder tableBorder = (TableBorder) content;
                             Map<String, Object> tableMap = new HashMap<>();
                             tableMap.put(JsonName.ITEM_TYPE, "lattice_table");
+                            tableMap.put(JsonName.ID, finalTextId);
                             tableMap.put(JsonName.WIDTH, tableBorder.getWidth());
                             tableMap.put(JsonName.HEIGHT, tableBorder.getHeight());
                             tableMap.put(JsonName.X0, tableBorder.getLeftX());
@@ -648,6 +658,7 @@ public class JsonWriter {
                         /*if (content instanceof ShapeChunk) {
                             jsonGenerator.writeObject(content);
                         }*/
+                        textId++;
                         prevBottomY[0] = content.getBottomY();
                     }
 
@@ -677,7 +688,7 @@ public class JsonWriter {
         String jsFileName = outputFolder + File.separator + inputPDF.getName().substring(0, inputPDF.getName().length() - 3) + "js";
         String jsFileContent = "var url = " + mapper.writeValueAsString(inputPdfName) + ";";
         jsFileContent += "\n\n";
-        jsFileContent += "var bookmarks = " + mapper.writeValueAsString(map.get("catalog_bookmarks")) + ";";
+        jsFileContent += "var bookmarks = " + mapper.writeValueAsString(map.get("page_bookmarks")) + ";";
         jsFileContent += "\n\n";
         jsFileContent += "var data = " + mapper.writeValueAsString(map.get(JsonName.DATA)) + ";";
         FileUtils.writeToFile(jsFileName, jsFileContent);

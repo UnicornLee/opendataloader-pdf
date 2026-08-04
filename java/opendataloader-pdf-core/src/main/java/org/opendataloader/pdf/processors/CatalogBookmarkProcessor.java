@@ -18,6 +18,7 @@ package org.opendataloader.pdf.processors;
 import org.opendataloader.pdf.api.Config;
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.custom.entities.Bookmark;
+import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.content.TextLine;
 import org.verapdf.wcag.algorithms.semanticalgorithms.containers.StaticContainers;
@@ -35,6 +36,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 /**
  * Detects table-of-contents (TOC) pages in a document and extracts catalog
@@ -498,6 +503,58 @@ public class CatalogBookmarkProcessor {
     /**
      * Recursively counts all bookmarks including children.
      */
+    /** Writes catalog paragraphs immediately after paragraph collection and before heading processing. */
+    public static void writeCollectedCatalogMarkdown(List<List<IObject>> contents, String inputPdfName,
+                                                      Config config) {
+        Path outputFolder = Path.of(config.getOutputFolder());
+        String inputName = Path.of(inputPdfName).getFileName().toString();
+        String stem = inputName.toLowerCase(Locale.ROOT).endsWith(".pdf")
+                ? inputName.substring(0, inputName.length() - 4) : inputName;
+        Path output = outputFolder.resolve(stem + "_catalog_collected.md");
+        StringBuilder markdown = new StringBuilder("# 收集到的页面目录候选（CustomSemanticParagraph）\n\n");
+        markdown.append("| 所在页码 | 目录内容 |\n|---:|---|\n");
+        int count = 0;
+        int catalogStart = StaticLayoutContainers.getCatalogBookmarkStartPage();
+        int catalogEnd = StaticLayoutContainers.getCatalogBookmarkEndPage();
+        for (int page = 0; page < contents.size(); page++) {
+            if (catalogStart >= 0 && catalogEnd >= catalogStart
+                    && page >= catalogStart && page <= catalogEnd) {
+                continue;
+            }
+            List<IObject> pageContents = contents.get(page);
+            if (pageContents == null) continue;
+            for (IObject object : pageContents) {
+                if (!(object instanceof CustomSemanticParagraph)) continue;
+                CustomSemanticParagraph paragraph = (CustomSemanticParagraph) object;
+                List<TextLine> textLines = paragraph.getTextLines();
+                if (textLines.isEmpty() || textLines.get(0) == null
+                        || !PageBookmarkProcessor.isBookmarkCandidate(textLines.get(0).getValue())) {
+                    continue;
+                }
+                StringBuilder text = new StringBuilder();
+                for (TextLine line : textLines) {
+                    if (line != null && line.getValue() != null) {
+                        if (text.length() > 0) text.append(' ');
+                        text.append(line.getValue().trim());
+                    }
+                }
+                String value = text.toString().trim();
+                if (value.isEmpty()) continue;
+                markdown.append('|').append(page + 1).append('|')
+                        .append(value.replace("|", "\\|")).append('|').append('\n');
+                count++;
+            }
+        }
+        markdown.insert(0, "<!-- entries: " + count + " -->\n");
+        try {
+            Files.createDirectories(outputFolder);
+            Files.writeString(output, markdown.toString(), StandardCharsets.UTF_8);
+            LOGGER.log(Level.INFO, "[CatalogBookmark] wrote CustomSemanticParagraph catalog: {0}", output);
+        } catch (IOException e) {
+            LOGGER.log(Level.WARNING, "[CatalogBookmark] unable to write collected catalog: " + output, e);
+        }
+    }
+
     private static int countAllBookmarks(List<Bookmark> bookmarks) {
         int count = 0;
         for (Bookmark bookmark : bookmarks) {
