@@ -510,7 +510,7 @@ public class CatalogBookmarkProcessor {
         String inputName = Path.of(inputPdfName).getFileName().toString();
         String stem = inputName.toLowerCase(Locale.ROOT).endsWith(".pdf")
                 ? inputName.substring(0, inputName.length() - 4) : inputName;
-        Path output = outputFolder.resolve(stem + "_catalog_collected.md");
+        Path output = outputFolder.resolve(stem + "_page_bookmarks_collected.md");
         StringBuilder markdown = new StringBuilder("# 收集到的页面目录候选（CustomSemanticParagraph）\n\n");
         markdown.append("| 所在页码 | 目录内容 |\n|---:|---|\n");
         int count = 0;
