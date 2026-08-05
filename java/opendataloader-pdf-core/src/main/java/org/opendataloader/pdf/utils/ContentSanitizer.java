@@ -1,7 +1,12 @@
 package org.opendataloader.pdf.utils;
 
+import org.opendataloader.pdf.custom.dto.PageItem;
+import org.opendataloader.pdf.custom.dto.TableSingleItem;
+import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.SemanticHeaderOrFooter;
+import org.verapdf.wcag.algorithms.entities.SemanticTOC;
+import org.verapdf.wcag.algorithms.entities.SemanticTOCI;
 import org.verapdf.wcag.algorithms.entities.SemanticTextNode;
 import org.verapdf.wcag.algorithms.entities.content.TextBlock;
 import org.verapdf.wcag.algorithms.entities.content.TextChunk;
@@ -25,26 +30,33 @@ public class ContentSanitizer {
     private static final Logger LOGGER = Logger.getLogger(ContentSanitizer.class.getName());
     private final List<SanitizationRule> rules;
     private final boolean contentSafetyEnabled;
+    private final boolean halfWidthToFullWidth;
 
     public ContentSanitizer(List<SanitizationRule> rules) {
-        this.rules = rules;
-        this.contentSafetyEnabled = true;
+        this(rules, true, false);
     }
 
     public ContentSanitizer(List<SanitizationRule> rules, boolean contentSafetyEnabled) {
+        this(rules, contentSafetyEnabled, false);
+    }
+
+    public ContentSanitizer(List<SanitizationRule> rules, boolean contentSafetyEnabled, boolean halfWidthToFullWidth) {
         this.rules = rules;
         this.contentSafetyEnabled = contentSafetyEnabled;
+        this.halfWidthToFullWidth = halfWidthToFullWidth;
     }
 
     public void sanitizeContents(List<List<IObject>> contents) {
-        if (!contentSafetyEnabled) {
-            return;
+        if (contentSafetyEnabled) {
+            for (List<IObject> pageContents : contents) {
+                for (IObject obj : pageContents) {
+                    processObject(obj);
+                }
+            }
         }
 
-        for (List<IObject> pageContents : contents) {
-            for (IObject obj : pageContents) {
-                processObject(obj);
-            }
+        if (halfWidthToFullWidth) {
+            convertHalfWidthToFullWidth(contents);
         }
     }
 
@@ -318,5 +330,99 @@ public class ContentSanitizer {
         }
 
         return infos;
+    }
+
+    private void convertHalfWidthToFullWidth(List<List<IObject>> contents) {
+        for (List<IObject> pageContents : contents) {
+            for (IObject obj : pageContents) {
+                convertObject(obj);
+            }
+        }
+    }
+
+    private void convertObject(IObject obj) {
+        if (obj == null) {
+            return;
+        }
+        if (obj instanceof TextChunk) {
+            TextChunk chunk = (TextChunk) obj;
+            chunk.setValue(HalfWidthToFullWidthConverter.convert(chunk.getValue()));
+        } else if (obj instanceof TextLine) {
+            for (TextChunk textChunk : ((TextLine) obj).getTextChunks()) {
+                convertObject(textChunk);
+            }
+        } else if (obj instanceof SemanticTextNode) {
+            for (TextColumn textColumn : ((SemanticTextNode) obj).getColumns()) {
+                for (TextBlock textBlock : textColumn.getBlocks()) {
+                    for (TextLine textLine : textBlock.getLines()) {
+                        convertObject(textLine);
+                    }
+                }
+            }
+        } else if (obj instanceof CustomSemanticParagraph) {
+            for (TextLine textLine : ((CustomSemanticParagraph) obj).getTextLines()) {
+                convertObject(textLine);
+            }
+        } else if (obj instanceof SemanticHeaderOrFooter) {
+            for (IObject child : ((SemanticHeaderOrFooter) obj).getContents()) {
+                convertObject(child);
+            }
+        } else if (obj instanceof PDFList) {
+            for (ListItem listItem : ((PDFList) obj).getListItems()) {
+                for (TextLine textLine : listItem.getLines()) {
+                    convertObject(textLine);
+                }
+                for (IObject child : listItem.getContents()) {
+                    convertObject(child);
+                }
+            }
+        } else if (obj instanceof TableBorder) {
+            for (TableBorderRow row : ((TableBorder) obj).getRows()) {
+                for (TableBorderCell cell : row.getCells()) {
+                    for (IObject child : cell.getContents()) {
+                        convertObject(child);
+                    }
+                }
+            }
+        } else if (obj instanceof SemanticTOC) {
+            for (IObject child : ((SemanticTOC) obj).getTOCItems()) {
+                convertObject(child);
+            }
+        } else if (obj instanceof SemanticTOCI) {
+            SemanticTOCI tocItem = (SemanticTOCI) obj;
+            for (TextLine textLine : tocItem.getLines()) {
+                convertObject(textLine);
+            }
+            for (IObject child : tocItem.getContents()) {
+                convertObject(child);
+            }
+        } else if (obj instanceof PageItem) {
+            convertPageItem((PageItem) obj);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void convertPageItem(PageItem pageItem) {
+        Object content = pageItem.getContent();
+        if (!(content instanceof List)) {
+            return;
+        }
+        for (Object row : (List<?>) content) {
+            if (!(row instanceof List)) {
+                continue;
+            }
+            for (Object cell : (List<?>) row) {
+                if (cell instanceof TableSingleItem) {
+                    TableSingleItem item = (TableSingleItem) cell;
+                    if (item.getText() != null) {
+                        List<String> converted = new ArrayList<>();
+                        for (String text : item.getText()) {
+                            converted.add(HalfWidthToFullWidthConverter.convert(text));
+                        }
+                        item.setText(converted);
+                    }
+                }
+            }
+        }
     }
 }

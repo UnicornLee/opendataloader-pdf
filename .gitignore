@@ -1,4 +1,6 @@
 *.class
+tmp_output
+.agents
 
 # OS specific files
 .DS_Store

@@ -213,7 +213,8 @@ public class DocumentProcessor {
         }
         sortContents(contents, config);
         ContentSanitizer contentSanitizer = new ContentSanitizer(config.getFilterConfig().getFilterRules(),
-            config.getFilterConfig().isFilterSensitiveData());
+            config.getFilterConfig().isFilterSensitiveData(),
+            config.isHalfWidthToFullWidth());
         contentSanitizer.sanitizeContents(contents);
         long extractionNs = System.nanoTime() - t0;
 
@@ -402,6 +403,11 @@ public class DocumentProcessor {
                         contents.set(pageNumber, pageContents);
                     }
                 }
+            }
+
+            if (config.isHalfWidthToFullWidth()) {
+                ContentSanitizer halfWidthConverter = new ContentSanitizer(new ArrayList<>(), false, true);
+                halfWidthConverter.sanitizeContents(contents);
             }
 
             // Structured processing is always enabled — auto-tagging needs headings,
