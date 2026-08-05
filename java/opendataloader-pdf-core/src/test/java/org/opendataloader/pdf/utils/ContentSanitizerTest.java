@@ -3,6 +3,7 @@ package org.opendataloader.pdf.utils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.opendataloader.pdf.api.FilterConfig;
+import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.content.TextChunk;
 import org.verapdf.wcag.algorithms.entities.content.TextLine;
 import org.verapdf.wcag.algorithms.entities.geometry.BoundingBox;
@@ -13,6 +14,7 @@ import java.util.Collections;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class ContentSanitizerTest {
     private ContentSanitizer sanitizer;
@@ -110,5 +112,67 @@ class ContentSanitizerTest {
             originalChunks, replacements);
 
         assertChunksContainValues(result, "User: ", "email@example.com", ". Hi!", " Hello!");
+    }
+
+    @Test
+    void testHalfWidthIdeographicCommaConversionDisabledByDefault() {
+        TextChunk chunk = createTextChunk("a､b､c", 0f, 40f, 100f, 20f);
+        List<List<IObject>> contents = Collections.singletonList(
+            Collections.singletonList((IObject) chunk));
+
+        sanitizer.sanitizeContents(contents);
+
+        assertEquals("a､b､c", chunk.getValue(), "Conversion should be disabled by default");
+    }
+
+    @Test
+    void testHalfWidthIdeographicCommaConversionInTextChunk() {
+        FilterConfig filterConfig = new FilterConfig();
+        filterConfig.setHalfWidthToFullWidth(true);
+        ContentSanitizer converter = new ContentSanitizer(filterConfig.getFilterRules(),
+            filterConfig.isFilterSensitiveData(), true);
+
+        TextChunk chunk = createTextChunk("a､b､c", 0f, 40f, 100f, 20f);
+        List<List<IObject>> contents = Collections.singletonList(
+            Collections.singletonList((IObject) chunk));
+
+        converter.sanitizeContents(contents);
+
+        assertEquals("a、b、c", chunk.getValue());
+    }
+
+    @Test
+    void testHalfWidthIdeographicCommaConversionInTextLine() {
+        FilterConfig filterConfig = new FilterConfig();
+        filterConfig.setHalfWidthToFullWidth(true);
+        ContentSanitizer converter = new ContentSanitizer(filterConfig.getFilterRules(),
+            filterConfig.isFilterSensitiveData(), true);
+
+        TextChunk chunk = createTextChunk("foo､bar", 0f, 40f, 100f, 20f);
+        TextLine line = new TextLine();
+        line.add(chunk);
+        List<List<IObject>> contents = Collections.singletonList(
+            Collections.singletonList((IObject) line));
+
+        converter.sanitizeContents(contents);
+
+        assertEquals("foo、bar", line.getValue());
+        assertEquals("foo、bar", chunk.getValue());
+    }
+
+    @Test
+    void testHalfWidthIdeographicCommaConversionLeavesFullWidthUntouched() {
+        FilterConfig filterConfig = new FilterConfig();
+        filterConfig.setHalfWidthToFullWidth(true);
+        ContentSanitizer converter = new ContentSanitizer(filterConfig.getFilterRules(),
+            filterConfig.isFilterSensitiveData(), true);
+
+        TextChunk chunk = createTextChunk("a、b、c,d", 0f, 40f, 100f, 20f);
+        List<List<IObject>> contents = Collections.singletonList(
+            Collections.singletonList((IObject) chunk));
+
+        converter.sanitizeContents(contents);
+
+        assertEquals("a、b、c,d", chunk.getValue(), "Only U+FF64 should be converted");
     }
 }

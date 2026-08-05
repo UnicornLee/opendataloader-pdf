@@ -17,6 +17,8 @@ export interface ConvertOptions {
   contentSafetyOff?: string | string[];
   /** Enable sensitive data sanitization. Replaces emails, phone numbers, IPs, credit cards, and URLs with placeholders */
   sanitize?: boolean;
+  /** Convert half-width ideographic comma (?, U+FF64) to full-width ideographic comma (、, U+3001) in extracted text */
+  convertHalfWidthIdeographicComma?: boolean;
   /** Preserve original line breaks in extracted text */
   keepLineBreaks?: boolean;
   /** Replacement character for invalid/unrecognized characters. Default: space */
@@ -67,6 +69,10 @@ export interface ConvertOptions {
   toStdout?: boolean;
   /** Number of worker threads for per-page processing. Default: 1 (sequential, stable). Values >1 (experimental) run pages in parallel for faster throughput; output may vary slightly on some PDFs. Capped at the number of available CPU cores. Applies to the native Java pipeline only; ignored in --hybrid mode */
   threads?: string;
+  /** Minimum number of TOC-like lines per page for catalog bookmark detection. Default: 3 */
+  catalogBookmarkMinLines?: string;
+  /** Minimum ratio of TOC-like lines to non-empty text lines per page for catalog bookmark detection. Default: 0.4 */
+  catalogBookmarkMinRatio?: string;
 }
 
 /**
@@ -79,6 +85,7 @@ export interface CliOptions {
   quiet?: boolean;
   contentSafetyOff?: string;
   sanitize?: boolean;
+  convertHalfWidthIdeographicComma?: boolean;
   keepLineBreaks?: boolean;
   replaceInvalidChars?: string;
   useStructTree?: boolean;
@@ -104,6 +111,8 @@ export interface CliOptions {
   hybridHancomAiImageCache?: string;
   toStdout?: boolean;
   threads?: string;
+  catalogBookmarkMinLines?: string;
+  catalogBookmarkMinRatio?: string;
 }
 
 /**
@@ -129,6 +138,9 @@ export function buildConvertOptions(cliOptions: CliOptions): ConvertOptions {
   }
   if (cliOptions.sanitize) {
     convertOptions.sanitize = true;
+  }
+  if (cliOptions.convertHalfWidthIdeographicComma) {
+    convertOptions.convertHalfWidthIdeographicComma = true;
   }
   if (cliOptions.keepLineBreaks) {
     convertOptions.keepLineBreaks = true;
@@ -205,6 +217,12 @@ export function buildConvertOptions(cliOptions: CliOptions): ConvertOptions {
   if (cliOptions.threads) {
     convertOptions.threads = cliOptions.threads;
   }
+  if (cliOptions.catalogBookmarkMinLines) {
+    convertOptions.catalogBookmarkMinLines = cliOptions.catalogBookmarkMinLines;
+  }
+  if (cliOptions.catalogBookmarkMinRatio) {
+    convertOptions.catalogBookmarkMinRatio = cliOptions.catalogBookmarkMinRatio;
+  }
 
   return convertOptions;
 }
@@ -244,6 +262,9 @@ export function buildArgs(options: ConvertOptions): string[] {
   }
   if (options.sanitize) {
     args.push('--sanitize');
+  }
+  if (options.convertHalfWidthIdeographicComma) {
+    args.push('--convert-half-width-ideographic-comma');
   }
   if (options.keepLineBreaks) {
     args.push('--keep-line-breaks');
@@ -319,6 +340,12 @@ export function buildArgs(options: ConvertOptions): string[] {
   }
   if (options.threads) {
     args.push('--threads', options.threads);
+  }
+  if (options.catalogBookmarkMinLines) {
+    args.push('--catalog-bookmark-min-lines', options.catalogBookmarkMinLines);
+  }
+  if (options.catalogBookmarkMinRatio) {
+    args.push('--catalog-bookmark-min-ratio', options.catalogBookmarkMinRatio);
   }
 
   return args;

@@ -150,6 +150,15 @@ public class Config {
     }
 
     /**
+     * Checks if half-width ideographic comma should be converted to full-width.
+     *
+     * @return true if conversion is enabled, false otherwise.
+     */
+    public boolean isHalfWidthToFullWidth() {
+        return filterConfig.isHalfWidthToFullWidth();
+    }
+
+    /**
      * Default constructor initializing the configuration with default values.
      */
     public Config() {

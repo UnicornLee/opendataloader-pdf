@@ -64,6 +64,15 @@ CLI_OPTIONS: List[Dict[str, Any]] = [
         "description": "Enable sensitive data sanitization. Replaces emails, phone numbers, IPs, credit cards, and URLs with placeholders",
     },
     {
+        "name": "convert-half-width-ideographic-comma",
+        "python_name": "convert_half_width_ideographic_comma",
+        "short_name": None,
+        "type": "boolean",
+        "required": False,
+        "default": False,
+        "description": "Convert half-width ideographic comma (?, U+FF64) to full-width ideographic comma (、, U+3001) in extracted text",
+    },
+    {
         "name": "keep-line-breaks",
         "python_name": "keep_line_breaks",
         "short_name": None,
@@ -287,6 +296,24 @@ CLI_OPTIONS: List[Dict[str, Any]] = [
         "required": False,
         "default": "1",
         "description": "Number of worker threads for per-page processing. Default: 1 (sequential, stable). Values >1 (experimental) run pages in parallel for faster throughput; output may vary slightly on some PDFs. Capped at the number of available CPU cores. Applies to the native Java pipeline only; ignored in --hybrid mode",
+    },
+    {
+        "name": "catalog-bookmark-min-lines",
+        "python_name": "catalog_bookmark_min_lines",
+        "short_name": None,
+        "type": "string",
+        "required": False,
+        "default": "3",
+        "description": "Minimum number of TOC-like lines per page for catalog bookmark detection. Default: 3",
+    },
+    {
+        "name": "catalog-bookmark-min-ratio",
+        "python_name": "catalog_bookmark_min_ratio",
+        "short_name": None,
+        "type": "string",
+        "required": False,
+        "default": "0.4",
+        "description": "Minimum ratio of TOC-like lines to non-empty text lines per page for catalog bookmark detection. Default: 0.4",
     },
 ]
 

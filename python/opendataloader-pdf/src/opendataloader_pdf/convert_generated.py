@@ -17,6 +17,7 @@ def convert(
     quiet: bool = False,
     content_safety_off: Optional[Union[str, List[str]]] = None,
     sanitize: bool = False,
+    convert_half_width_ideographic_comma: bool = False,
     keep_line_breaks: bool = False,
     replace_invalid_chars: Optional[str] = None,
     use_struct_tree: bool = False,
@@ -42,6 +43,8 @@ def convert(
     hybrid_hancom_ai_image_cache: Optional[str] = None,
     to_stdout: bool = False,
     threads: Optional[str] = None,
+    catalog_bookmark_min_lines: Optional[str] = None,
+    catalog_bookmark_min_ratio: Optional[str] = None,
 ) -> None:
     """
     Convert PDF(s) into the requested output format(s).
@@ -54,6 +57,7 @@ def convert(
         quiet: Suppress console logging output
         content_safety_off: Disable content safety filters. Values: all, hidden-text, off-page, tiny, hidden-ocg
         sanitize: Enable sensitive data sanitization. Replaces emails, phone numbers, IPs, credit cards, and URLs with placeholders
+        convert_half_width_ideographic_comma: Convert half-width ideographic comma (?, U+FF64) to full-width ideographic comma (、, U+3001) in extracted text
         keep_line_breaks: Preserve original line breaks in extracted text
         replace_invalid_chars: Replacement character for invalid/unrecognized characters. Default: space
         use_struct_tree: Use PDF structure tree (tagged PDF) for reading order and semantic structure. Output quality depends on tag quality. Takes precedence over --hybrid: when both are set on a tagged PDF, the structure tree is used and the hybrid backend is not called
@@ -79,6 +83,8 @@ def convert(
         hybrid_hancom_ai_image_cache: Page image cache backing. Requires --hybrid=hancom-ai. Values: memory (default), disk
         to_stdout: Write output to stdout instead of file (single format only)
         threads: Number of worker threads for per-page processing. Default: 1 (sequential, stable). Values >1 (experimental) run pages in parallel for faster throughput; output may vary slightly on some PDFs. Capped at the number of available CPU cores. Applies to the native Java pipeline only; ignored in --hybrid mode
+        catalog_bookmark_min_lines: Minimum number of TOC-like lines per page for catalog bookmark detection. Default: 3
+        catalog_bookmark_min_ratio: Minimum ratio of TOC-like lines to non-empty text lines per page for catalog bookmark detection. Default: 0.4
     """
     args: List[str] = []
 
@@ -108,6 +114,8 @@ def convert(
             args.extend(["--content-safety-off", content_safety_off])
     if sanitize:
         args.append("--sanitize")
+    if convert_half_width_ideographic_comma:
+        args.append("--convert-half-width-ideographic-comma")
     if keep_line_breaks:
         args.append("--keep-line-breaks")
     if replace_invalid_chars:
@@ -158,5 +166,9 @@ def convert(
         args.append("--to-stdout")
     if threads:
         args.extend(["--threads", threads])
+    if catalog_bookmark_min_lines:
+        args.extend(["--catalog-bookmark-min-lines", catalog_bookmark_min_lines])
+    if catalog_bookmark_min_ratio:
+        args.extend(["--catalog-bookmark-min-ratio", catalog_bookmark_min_ratio])
 
     run_jar(args, quiet)

@@ -31,6 +31,7 @@ public class FilterConfig {
     private boolean filterTinyText = true;
     private boolean filterHiddenOCG = true;
     private boolean filterSensitiveData = false;
+    private boolean halfWidthToFullWidth = false;
     private final List<SanitizationRule> filterRules;
 
     /** Default rules */
@@ -173,6 +174,24 @@ public class FilterConfig {
      */
     public void setFilterSensitiveData(boolean filterSensitiveData) {
         this.filterSensitiveData = filterSensitiveData;
+    }
+
+    /**
+     * Checks if half-width ideographic comma should be converted to full-width.
+     *
+     * @return true if conversion is enabled, false otherwise.
+     */
+    public boolean isHalfWidthToFullWidth() {
+        return halfWidthToFullWidth;
+    }
+
+    /**
+     * Enables or disables conversion of half-width ideographic comma to full-width.
+     *
+     * @param halfWidthToFullWidth true to enable conversion, false to disable.
+     */
+    public void setHalfWidthToFullWidth(boolean halfWidthToFullWidth) {
+        this.halfWidthToFullWidth = halfWidthToFullWidth;
     }
 
     /**

@@ -31,6 +31,7 @@ import org.verapdf.wcag.algorithms.entities.geometry.BoundingBox;
 import org.verapdf.wcag.algorithms.entities.enums.SemanticType;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 public class PageBookmarkProcessorTest {
@@ -288,6 +289,76 @@ public class PageBookmarkProcessorTest {
         Assertions.assertEquals(3, bookmarks.get(0).getPageNum(), "First body section is on page 3 (1-indexed)");
         Assertions.assertEquals("第二节 概览", bookmarks.get(1).getText());
         Assertions.assertEquals("第三节 本次发行概况", bookmarks.get(2).getText());
+    }
+
+    /**
+     * Level-2 items should be preserved for every parent section. Within a
+     * section, a stray duplicate value that sits between two contiguous runs
+     * must be discarded and the two runs merged into a single contiguous
+     * sequence.
+     */
+    @Test
+    public void testStrayDuplicateBetweenRuns_isDropped() {
+        // Sections 1-4 have short level-2 runs; section 5 "发行人基本情况"
+        // uses full-width commas. In page order the values in section 5 are
+        // 1,2,3,5,4,5,6,7,8,9,10,11. The first 5 (page 59) is a stray duplicate
+        // between runs {1,2,3} and {4,5,6,7,8,9,10,11} and must be discarded.
+        // (Half-width commas are converted to full-width before bookmark
+        // extraction by DocumentProcessor.)
+        List<List<IObject>> contents = multiPage(
+                15, "第一节 释义", 15.96f, 900.0,
+                15, "一、一般释义", 14.04f, 880.0,
+                15, "二、行业专用释义", 14.04f, 860.0,
+                21, "第二节 概览", 15.96f, 840.0,
+                21, "一、发行人及本次发行", 14.04f, 820.0,
+                21, "二、本次发行概况", 14.04f, 800.0,
+                28, "第三节 本次发行概况", 15.96f, 780.0,
+                28, "一、本次发行基本情况", 14.04f, 760.0,
+                28, "二、本次发行的有关当事人", 14.04f, 740.0,
+                32, "第四节 风险因素", 15.96f, 720.0,
+                32, "一、创新风险", 14.04f, 700.0,
+                32, "二、市场风险", 14.04f, 680.0,
+                38, "第五节 发行人基本情况", 15.96f, 720.0,
+                38, "一、基本情况", 14.04f, 700.0,
+                38, "二、发行人的设立", 14.04f, 650.0,
+                55, "三、报告期内的重大资产重组", 14.04f, 600.0,
+                58, "五、发行人提交首发申请前一个会计年度", 12.0f, 550.0,
+                63, "四、在其他证券市场的挂牌情况", 14.04f, 500.0,
+                77, "五、发行人的股权结构", 14.04f, 450.0,
+                77, "六、发行人控股子公司", 14.04f, 400.0,
+                81, "七、持有发行人5%以上股份", 14.04f, 350.0,
+                91, "八、公司股本情况", 14.04f, 300.0,
+                96, "九、董事监事高管", 14.04f, 250.0,
+                107, "十、股权激励", 14.04f, 200.0,
+                107, "十一、发行人员工", 14.04f, 150.0);
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(5, bookmarks.size(), "Section headings should be top-level");
+
+        Bookmark section1 = bookmarks.get(0);
+        Assertions.assertEquals("第一节 释义", section1.getText());
+        Assertions.assertEquals(2, section1.getChildren().size(), "Section 1 level-2 items preserved");
+
+        Bookmark section5 = bookmarks.get(4);
+        Assertions.assertEquals("第五节 发行人基本情况", section5.getText());
+        List<Bookmark> children = section5.getChildren();
+        List<String> texts = new ArrayList<>();
+        for (Bookmark child : children) {
+            texts.add(child.getText());
+        }
+        Assertions.assertEquals(Arrays.asList(
+                "一、基本情况",
+                "二、发行人的设立",
+                "三、报告期内的重大资产重组",
+                "四、在其他证券市场的挂牌情况",
+                "五、发行人的股权结构",
+                "六、发行人控股子公司",
+                "七、持有发行人5%以上股份",
+                "八、公司股本情况",
+                "九、董事监事高管",
+                "十、股权激励",
+                "十一、发行人员工"), texts,
+                "Stray duplicate '五' on page 59 must be discarded");
     }
 
     @Test

@@ -13,6 +13,7 @@ export function registerCliOptions(program: Command): void {
   program.option('-q, --quiet', 'Suppress console logging output');
   program.option('--content-safety-off <value>', 'Disable content safety filters. Values: all, hidden-text, off-page, tiny, hidden-ocg');
   program.option('--sanitize', 'Enable sensitive data sanitization. Replaces emails, phone numbers, IPs, credit cards, and URLs with placeholders');
+  program.option('--convert-half-width-ideographic-comma', 'Convert half-width ideographic comma (?, U+FF64) to full-width ideographic comma (、, U+3001) in extracted text');
   program.option('--keep-line-breaks', 'Preserve original line breaks in extracted text');
   program.option('--replace-invalid-chars <value>', 'Replacement character for invalid/unrecognized characters. Default: space');
   program.option('--use-struct-tree', 'Use PDF structure tree (tagged PDF) for reading order and semantic structure. Output quality depends on tag quality. Takes precedence over --hybrid: when both are set on a tagged PDF, the structure tree is used and the hybrid backend is not called');
@@ -38,4 +39,6 @@ export function registerCliOptions(program: Command): void {
   program.option('--hybrid-hancom-ai-image-cache <value>', 'Page image cache backing. Requires --hybrid=hancom-ai. Values: memory (default), disk');
   program.option('--to-stdout', 'Write output to stdout instead of file (single format only)');
   program.option('--threads <value>', 'Number of worker threads for per-page processing. Default: 1 (sequential, stable). Values >1 (experimental) run pages in parallel for faster throughput; output may vary slightly on some PDFs. Capped at the number of available CPU cores. Applies to the native Java pipeline only; ignored in --hybrid mode');
+  program.option('--catalog-bookmark-min-lines <value>', 'Minimum number of TOC-like lines per page for catalog bookmark detection. Default: 3');
+  program.option('--catalog-bookmark-min-ratio <value>', 'Minimum ratio of TOC-like lines to non-empty text lines per page for catalog bookmark detection. Default: 0.4');
 }

@@ -96,6 +96,11 @@ public class CLIOptions {
     private static final String SANITIZE_DESC = "Enable sensitive data sanitization. "
             + "Replaces emails, phone numbers, IPs, credit cards, and URLs with placeholders";
 
+    // ===== Convert Half-Width Ideographic Comma =====
+    private static final String CONVERT_HALF_WIDTH_IDEOGRAPHIC_COMMA_LONG_OPTION = "convert-half-width-ideographic-comma";
+    private static final String CONVERT_HALF_WIDTH_IDEOGRAPHIC_COMMA_DESC = "Convert half-width ideographic comma "
+            + "(､, U+FF64) to full-width ideographic comma (、, U+3001) in extracted text";
+
     // ===== Keep Line Breaks =====
     private static final String KEEP_LINE_BREAKS_LONG_OPTION = "keep-line-breaks";
     private static final String KEEP_LINE_BREAKS_DESC = "Preserve original line breaks in extracted text";
@@ -251,6 +256,8 @@ public class CLIOptions {
             new OptionDefinition(QUIET_LONG_OPTION, QUIET_OPTION, "boolean", false, QUIET_DESC, true),
             new OptionDefinition(CONTENT_SAFETY_OFF_LONG_OPTION, null, "string", null, CONTENT_SAFETY_OFF_DESC, true),
             new OptionDefinition(SANITIZE_LONG_OPTION, null, "boolean", false, SANITIZE_DESC, true),
+            new OptionDefinition(CONVERT_HALF_WIDTH_IDEOGRAPHIC_COMMA_LONG_OPTION, null, "boolean", false,
+                    CONVERT_HALF_WIDTH_IDEOGRAPHIC_COMMA_DESC, true),
             new OptionDefinition(KEEP_LINE_BREAKS_LONG_OPTION, null, "boolean", false, KEEP_LINE_BREAKS_DESC, true),
             new OptionDefinition(REPLACE_INVALID_CHARS_LONG_OPTION, null, "string", " ", REPLACE_INVALID_CHARS_DESC,
                     true),
@@ -398,6 +405,7 @@ public class CLIOptions {
         }
         applyContentSafetyOption(config, commandLine);
         applySanitizeOption(config, commandLine);
+        applyConvertHalfWidthOption(config, commandLine);
         applyFormatOption(config, commandLine);
         applyTableMethodOption(config, commandLine);
         applyImageOptions(config, commandLine);
@@ -569,6 +577,12 @@ public class CLIOptions {
     private static void applySanitizeOption(Config config, CommandLine commandLine) {
         if (commandLine.hasOption(SANITIZE_LONG_OPTION)) {
             config.getFilterConfig().setFilterSensitiveData(true);
+        }
+    }
+
+    private static void applyConvertHalfWidthOption(Config config, CommandLine commandLine) {
+        if (commandLine.hasOption(CONVERT_HALF_WIDTH_IDEOGRAPHIC_COMMA_LONG_OPTION)) {
+            config.getFilterConfig().setHalfWidthToFullWidth(true);
         }
     }
 
