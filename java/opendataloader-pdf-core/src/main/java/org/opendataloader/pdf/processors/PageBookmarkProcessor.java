@@ -65,7 +65,6 @@ public class PageBookmarkProcessor {
     private static final String TEMPLATE_CLOSE_ASCII_PAREN = "#)";
     private static final String TEMPLATE_CHINESE_COMMA = "、";
     private static final String TEMPLATE_CHINESE_COMMA_CANONICAL = "#\u3001";
-    private static final char CHINESE_COMMA_HALF_WIDTH = '\uFF64';
     private static final char CHINESE_COMMA_FULL_WIDTH = '\u3001';
 
     private static final char FULL_WIDTH_DOT = '．';
@@ -98,7 +97,6 @@ public class PageBookmarkProcessor {
         }
         addPatternList(patterns, BookmarkConstant.CHINESE_NUMBERS_1_TO_100, TEMPLATE_NUMBER, NumberSystem.CHINESE);
         addPatternList(patterns, BookmarkConstant.CHINESE_NUMBERS_WITH_COMMA_1_TO_100, TEMPLATE_CHINESE_COMMA_CANONICAL, NumberSystem.CHINESE);
-        addPatternList(patterns, BookmarkConstant.CHINESE_NUMBERS_WITH_HALF_WIDTH_COMMA_1_TO_100, TEMPLATE_CHINESE_COMMA_CANONICAL, NumberSystem.CHINESE);
         addPatternList(patterns, BookmarkConstant.NUMBER_CHAPTERS_1_TO_100, TEMPLATE_CHAPTER, NumberSystem.ARABIC);
         addPatternList(patterns, BookmarkConstant.CHINESE_NUMBER_CHAPTERS_1_TO_100, TEMPLATE_CHAPTER, NumberSystem.CHINESE);
         addPatternList(patterns, BookmarkConstant.NUMBER_SECTIONS_1_TO_100, TEMPLATE_SECTION, NumberSystem.ARABIC);
@@ -450,7 +448,7 @@ public class PageBookmarkProcessor {
     private static boolean hasValidBookmarkSuffix(String text, ConstantPattern pattern) {
         char last = pattern.constant.charAt(pattern.constant.length() - 1);
         if (last == ')' || last == '）'
-            || last == CHINESE_COMMA_FULL_WIDTH || last == CHINESE_COMMA_HALF_WIDTH) {
+            || last == CHINESE_COMMA_FULL_WIDTH) {
             return true;
         }
         int suffixIndex = pattern.constant.length();
@@ -461,7 +459,7 @@ public class PageBookmarkProcessor {
         // Full-width and half-width dots are treated as the same type.
         boolean isDot = suffix == '.' || suffix == FULL_WIDTH_DOT;
         if (!(Character.isWhitespace(suffix) || isDot
-            || suffix == CHINESE_COMMA_FULL_WIDTH || suffix == CHINESE_COMMA_HALF_WIDTH)) {
+            || suffix == CHINESE_COMMA_FULL_WIDTH)) {
             return false;
         }
         // A dot right after the number cannot be followed by another digit
@@ -486,12 +484,12 @@ public class PageBookmarkProcessor {
      */
     /**
      * For each template, partitions candidates by "value=1" chapter markers
-     * (each chapter restarts at 涓€銆? and keeps the chapter whose values form
-     * the longest contiguous "from-1" sequence. Ties are resolved by the
-     * chapter whose first candidate is closest to the parent directory
-     * (smallest pageIndex, then largest topY). Inside the chosen chapter,
-     * duplicate values are deduplicated by keeping the latest-occurring
-     * occurrence; stray values outside the contiguous range are dropped.
+     * (each chapter restarts at 涓€銆? and trims each chapter independently.
+     * Inside each chapter, duplicate values are deduplicated by keeping the
+     * latest-occurring occurrence; stray values outside the contiguous range
+     * are dropped. All trimmed chapters are kept so that second-level headings
+     * under different first-level sections (e.g., multiple "一、.../二、..."
+     * sequences) are not discarded just because another chapter has a longer run.
      */
     private static void mergeContiguousGroups(List<Group> groups) {
         Map<TemplateKey, List<Group>> byTemplate = new HashMap<>();
@@ -511,12 +509,18 @@ public class PageBookmarkProcessor {
                 .comparingInt((Candidate c) -> c.pageIndex)
                 .thenComparing((Candidate c) -> -c.topY));
             List<List<Candidate>> sections = splitByValueOne(allCandidates);
-            List<Candidate> bestSection = pickLongestContiguousSection(sections);
-            if (bestSection == null || bestSection.isEmpty()) {
+            List<Candidate> trimmed = new ArrayList<>();
+            for (List<Candidate> section : sections) {
+                List<Candidate> trimmedSection = trimContiguousSection(section);
+                if (trimmedSection != null && !trimmedSection.isEmpty()) {
+                    trimmed.addAll(trimmedSection);
+                }
+            }
+            if (trimmed.isEmpty()) {
                 continue;
             }
             Group combined = new Group(entry.getKey());
-            combined.candidates.addAll(bestSection);
+            combined.candidates.addAll(trimmed);
             combined.computeStatistics();
             merged.add(combined);
         }
@@ -540,35 +544,20 @@ public class PageBookmarkProcessor {
         return sections;
     }
 
-    private static int sectionIndexForLog = 0;
-
-    private static List<Candidate> pickLongestContiguousSection(List<List<Candidate>> sections) {
-        sectionIndexForLog = 0;
-        List<Candidate> best = null;
-        int bestLength = 0;
-        int bestFirstIndex = Integer.MAX_VALUE;
-        double bestFirstTopY = Double.NEGATIVE_INFINITY;
-        for (List<Candidate> section : sections) {
-            int length = contiguousFromOneLength(section);
-            if (length == 0) {
-                continue;
-            }
-            int firstIndex = section.get(0).pageIndex;
-            double firstTopY = section.get(0).topY;
-            if (length > bestLength
-                || (length == bestLength
-                && (firstIndex < bestFirstIndex
-                || (firstIndex == bestFirstIndex && firstTopY > bestFirstTopY)))) {
-                best = section;
-                bestLength = length;
-                bestFirstIndex = firstIndex;
-                bestFirstTopY = firstTopY;
-            }
-        }
-        if (best == null) {
+    /**
+     * Trims a single chapter section to a contiguous "from-1" sequence.
+     * Duplicate values are deduplicated by keeping the latest-occurring
+     * occurrence; stray values outside the contiguous range are dropped.
+     *
+     * @param section candidates of one chapter, ordered in reading order
+     * @return trimmed candidates, or null if the section has no valid range
+     */
+    private static List<Candidate> trimContiguousSection(List<Candidate> section) {
+        int length = contiguousFromOneLength(section);
+        if (length == 0) {
             return null;
         }
-        List<Candidate> byLatestPage = new ArrayList<>(best);
+        List<Candidate> byLatestPage = new ArrayList<>(section);
         byLatestPage.sort(Comparator
             .comparingInt((Candidate c) -> c.pageIndex)
             .reversed()
@@ -576,7 +565,7 @@ public class PageBookmarkProcessor {
         Set<Integer> used = new HashSet<>();
         Map<Integer, Candidate> latestByValue = new LinkedHashMap<>();
         for (Candidate c : byLatestPage) {
-            if (c.value >= 1 && c.value <= bestLength && used.add(c.value)) {
+            if (c.value >= 1 && c.value <= length && used.add(c.value)) {
                 latestByValue.put(c.value, c);
             }
         }
