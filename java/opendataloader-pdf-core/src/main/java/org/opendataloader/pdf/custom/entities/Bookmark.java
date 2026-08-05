@@ -19,7 +19,7 @@ public class Bookmark implements Serializable {
     private Boolean isSuperLong = false;
 
     @JsonProperty("related_id")
-    private Integer relatedId;
+    private Integer relatedId = 0;
 
     @JsonProperty("is_open")
     private Boolean isOpen = false;
