@@ -634,7 +634,9 @@ public class JsonWriter {
                         /*if (content instanceof ShapeChunk) {
                             jsonGenerator.writeObject(content);
                         }*/
-                        textId++;
+                        if (!(content instanceof ImageChunk || content instanceof ShapeChunk)) {
+                            textId++;
+                        }
                         prevBottomY[0] = content.getBottomY();
                     }
 
