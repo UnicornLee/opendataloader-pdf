@@ -18,11 +18,10 @@ package org.opendataloader.pdf.processors;
 import org.opendataloader.pdf.custom.constants.BookmarkConstant;
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.custom.entities.Bookmark;
+import org.opendataloader.pdf.json.JsonName;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.SemanticHeading;
-import org.verapdf.wcag.algorithms.entities.content.TextBlock;
-import org.verapdf.wcag.algorithms.entities.content.TextColumn;
 import org.verapdf.wcag.algorithms.entities.content.TextLine;
 
 import java.util.ArrayList;
@@ -152,9 +151,15 @@ public class PageBookmarkProcessor {
         final double fontSize;
         final double leftX;
         final double topY;
+        final int relatedId;
 
         Candidate(int pageIndex, String text, TemplateKey templateKey, int value,
                   double fontSize, double leftX, double topY) {
+            this(pageIndex, text, templateKey, value, fontSize, leftX, topY, 0);
+        }
+
+        Candidate(int pageIndex, String text, TemplateKey templateKey, int value,
+                  double fontSize, double leftX, double topY, int relatedId) {
             this.pageIndex = pageIndex;
             this.text = text;
             this.templateKey = templateKey;
@@ -162,6 +167,7 @@ public class PageBookmarkProcessor {
             this.fontSize = fontSize;
             this.leftX = leftX;
             this.topY = topY;
+            this.relatedId = relatedId;
         }
     }
 
@@ -203,7 +209,32 @@ public class PageBookmarkProcessor {
             return Collections.emptyList();
         }
 
-        List<Candidate> candidates = collectCandidates(contents);
+        return buildBookmarksFromCandidates(collectCandidates(contents));
+    }
+
+    /**
+     * Extracts a hierarchical bookmark tree from the JSON data produced by
+     * {@link org.opendataloader.pdf.json.JsonWriter}. Catalog pages are skipped.
+     *
+     * @param data per-page JSON data array
+     * @param catalogStartPage 0-based inclusive start of catalog page range, or -1
+     * @param catalogEndPage 0-based inclusive end of catalog page range, or -1
+     * @return list of top-level page bookmarks, each carrying the source JSON item id
+     *         as {@code relatedId}
+     */
+    public static List<Bookmark> extractPageBookmarksFromJson(List<Map<String, Object>> data,
+                                                              int catalogStartPage,
+                                                              int catalogEndPage) {
+        if (data == null || data.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return buildBookmarksFromCandidates(collectJsonCandidates(data, catalogStartPage, catalogEndPage));
+    }
+
+    /**
+     * Builds a hierarchical bookmark tree from already-collected candidates.
+     */
+    private static List<Bookmark> buildBookmarksFromCandidates(List<Candidate> candidates) {
         if (candidates.isEmpty()) {
             return Collections.emptyList();
         }
@@ -397,6 +428,99 @@ public class PageBookmarkProcessor {
                 skipCatalogPages ? catalogStart : -1,
                 skipCatalogPages ? catalogEnd : -1});
         return candidates;
+    }
+
+    /**
+     * Collects page bookmark candidates from JSON items. Only paragraph and heading
+     * items are considered, and catalog pages are skipped.
+     */
+    private static List<Candidate> collectJsonCandidates(List<Map<String, Object>> data,
+                                                         int catalogStartPage,
+                                                         int catalogEndPage) {
+        List<Candidate> candidates = new ArrayList<>();
+        boolean skipCatalogPages = catalogStartPage >= 0 && catalogEndPage >= catalogStartPage;
+        for (int pageIndex = 0; pageIndex < data.size(); pageIndex++) {
+            if (skipCatalogPages && pageIndex >= catalogStartPage && pageIndex <= catalogEndPage) {
+                continue;
+            }
+            Map<String, Object> page = data.get(pageIndex);
+            List<Map<String, Object>> items = (List<Map<String, Object>>) page.get(JsonName.ITEMS);
+            if (items == null) {
+                continue;
+            }
+            for (Map<String, Object> item : items) {
+                String sourceType = (String) item.get(JsonName.SOURCE_TYPE);
+                if (!JsonName.SOURCE_TYPE_PARAGRAPH.equals(sourceType)
+                        && !JsonName.SOURCE_TYPE_HEADING.equals(sourceType)) {
+                    continue;
+                }
+                String firstLine = getJsonItemFirstLine(item);
+                if (firstLine == null) {
+                    continue;
+                }
+                String trimmed = firstLine.trim();
+                ConstantPattern match = matchPrefix(trimmed);
+                if (match == null) {
+                    continue;
+                }
+                Object idObj = item.get(JsonName.ID);
+                int relatedId = idObj instanceof Number ? ((Number) idObj).intValue() : 0;
+                double fontSize = getJsonItemFontSize(item);
+                double leftX = getJsonItemDouble(item, JsonName.X0);
+                // JSON y0 increases downward; negate so the existing
+                // descending-topY sort produces top-to-bottom reading order.
+                double topY = -getJsonItemDouble(item, JsonName.Y0);
+                candidates.add(new Candidate(
+                    pageIndex,
+                    trimmed,
+                    new TemplateKey(match.template, match.numberSystem),
+                    match.value,
+                    fontSize,
+                    leftX,
+                    topY,
+                    relatedId
+                ));
+            }
+        }
+        LOGGER.log(java.util.logging.Level.INFO,
+            "[PageBookmark] collected {0} JSON candidates (catalog pages skipped: {1}-{2})",
+            new Object[]{candidates.size(),
+                skipCatalogPages ? catalogStartPage : -1,
+                skipCatalogPages ? catalogEndPage : -1});
+        return candidates;
+    }
+
+    private static String getJsonItemFirstLine(Map<String, Object> item) {
+        Object contentObj = item.get(JsonName.CONTENT);
+        if (!(contentObj instanceof List) || ((List<?>) contentObj).isEmpty()) {
+            return null;
+        }
+        List<?> contentList = (List<?>) contentObj;
+        Object first = contentList.get(0);
+        if (first instanceof Map) {
+            Object textListObj = ((Map<?, ?>) first).get(JsonName.CONTENT);
+            if (textListObj instanceof List && !((List<?>) textListObj).isEmpty()) {
+                Object textObj = ((List<?>) textListObj).get(0);
+                return textObj != null ? textObj.toString() : null;
+            }
+        }
+        return first != null ? first.toString() : null;
+    }
+
+    private static double getJsonItemFontSize(Map<String, Object> item) {
+        Object value = item.get(JsonName.FONT_UNDERLINE_SIZE);
+        if (value instanceof Number) {
+            return ((Number) value).doubleValue();
+        }
+        return 0.0;
+    }
+
+    private static double getJsonItemDouble(Map<String, Object> item, String key) {
+        Object value = item.get(key);
+        if (value instanceof Number) {
+            return ((Number) value).doubleValue();
+        }
+        return 0.0;
     }
 
     /**
@@ -730,6 +854,7 @@ public class PageBookmarkProcessor {
         bookmark.setFontSize((float) candidate.fontSize);
         bookmark.setSingleLine(true);
         bookmark.setOpen(false);
+        bookmark.setRelatedId(candidate.relatedId);
         bookmark.setChildren(new ArrayList<>());
         return bookmark;
     }

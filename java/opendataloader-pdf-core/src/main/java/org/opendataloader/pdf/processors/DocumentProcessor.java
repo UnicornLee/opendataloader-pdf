@@ -17,7 +17,6 @@ package org.opendataloader.pdf.processors;
 
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.custom.dto.TextInOcrAnalysisResultDto;
-import org.opendataloader.pdf.custom.utils.BookmarkUtils;
 import org.opendataloader.pdf.custom.dto.TextInOcrDetailDto;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
 import org.opendataloader.pdf.entities.content.ShapeChunk;
@@ -580,10 +579,6 @@ public class DocumentProcessor {
             if (structured) {
                 // Cross-page operations (must be sequential)
                 HeaderFooterProcessor.processHeadersAndFooters(contents, false);
-                // Extract TOC pages as catalog bookmarks without mutating the
-                // original contents. The extracted bookmarks are stored in a
-                // thread-local container and emitted later by JsonWriter.
-                StaticLayoutContainers.setCatalogBookmarks(BookmarkUtils.getCatalogBookmarks(contents, config));
                 // TOC detection is temporarily disabled. It is not yet complete:
                 //  - the heuristic has heavy false positives (any line ending in a
                 //    bare number is treated as a TOC item), so it can restructure
@@ -611,7 +606,6 @@ public class DocumentProcessor {
             ).get();
 
             if (structured) {
-                CatalogBookmarkProcessor.writeCollectedCatalogMarkdown(contents, inputPdfName, config);
                 pool.submit(() ->
                     IntStream.range(0, totalPages).parallel().forEach(pageNumber -> {
                         if (!shouldProcessPage(pageNumber, pagesToProcess)) return;
@@ -641,13 +635,6 @@ public class DocumentProcessor {
                 if (shouldProcessPage(pageNumber, pagesToProcess)) {
                     setIDs(contents.get(pageNumber));
                 }
-            }
-
-            // Extract page bookmarks from CustomSemanticParagraph contents after
-            // paragraphs and headings have been detected. The extracted bookmarks
-            // are stored in a thread-local container and emitted later by JsonWriter.
-            if (structured) {
-                StaticLayoutContainers.setPageBookmarks(BookmarkUtils.getPageBookmarks(contents));
             }
 
             // Caption detection runs after setIDs so that recognizedStructureId is available
@@ -774,8 +761,8 @@ public class DocumentProcessor {
 
     public static void generateCustomOutputs(String inputPdfName, List<List<IObject>> contents, Config config,
                                        Map<Long, ElementMetadata> elementMetadata) throws IOException {
-        JsonWriter.writeToJCustomJson(inputPdfName, config.getOutputFolder(), contents, elementMetadata,
-            null, config.isIncludeHeaderFooter());
+        JsonWriter.writeToCustomJson(inputPdfName, config.getOutputFolder(), contents, elementMetadata,
+            null, config.isIncludeHeaderFooter(), config);
     }
 
     /**
