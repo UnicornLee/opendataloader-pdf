@@ -44,6 +44,34 @@ public class PageBookmarkProcessorTest {
         return ParagraphProcessor.createParagraphFromTextBlock(block);
     }
 
+    /**
+     * Builds a {@link CustomSemanticParagraph} that spans multiple text lines.
+     * Each entry in {@code lines} becomes a {@link TextLine} stacked vertically
+     * by 10 units starting from {@code topY} downward, sharing the same
+     * {@code fontSize}.
+     */
+    private static CustomSemanticParagraph createMultiLineParagraph(List<String> lines, int pageIndex,
+                                                                    double leftX, double topY, float fontSize) {
+        if (lines == null || lines.isEmpty()) {
+            throw new IllegalArgumentException("lines must be non-empty");
+        }
+        double currentTopY = topY;
+        double currentBottomY = topY - 10;
+        TextLine first = new TextLine(new TextChunk(
+                new BoundingBox(pageIndex, leftX, currentBottomY, leftX + 200, currentTopY),
+                lines.get(0), fontSize, (currentTopY + currentBottomY) / 2));
+        TextBlock block = new TextBlock(first);
+        for (int i = 1; i < lines.size(); i++) {
+            currentTopY -= 10;
+            currentBottomY -= 10;
+            TextLine line = new TextLine(new TextChunk(
+                    new BoundingBox(pageIndex, leftX, currentBottomY, leftX + 200, currentTopY),
+                    lines.get(i), fontSize, (currentTopY + currentBottomY) / 2));
+            block.add(line);
+        }
+        return ParagraphProcessor.createParagraphFromTextBlock(block);
+    }
+
     private static List<List<IObject>> singlePage(CustomSemanticParagraph... paragraphs) {
         List<List<IObject>> contents = new ArrayList<>();
         List<IObject> page = new ArrayList<>();
@@ -509,6 +537,112 @@ public class PageBookmarkProcessorTest {
                 "二、靠近父目录",
                 "三、靠近父目录"), texts,
                 "Should pick the chain closer to the parent on tied length");
+    }
+
+    /**
+     * A multi-line paragraph bookmark must expose the full text in
+     * {@code bookmark.text} and report {@code isSingleLine() == false} so
+     * downstream consumers can tell wrapped titles apart from one-line ones.
+     */
+    @Test
+    public void testMultiLineBookmarkFullText() {
+        // Standalone two-line paragraph; the first line matches "一、" so it
+        // becomes a bookmark candidate. Both lines must end up in
+        // bookmark.text after smart-space joining.
+        List<List<IObject>> contents = singlePage(
+                createMultiLineParagraph(
+                        Arrays.asList("一、信息披露制度", "与投资者关系"),
+                        0, 50, 900, 14.0f));
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(1, bookmarks.size());
+        Bookmark bookmark = bookmarks.get(0);
+        Assertions.assertEquals("一、信息披露制度与投资者关系", bookmark.getText(),
+                "Multi-line text joins without stray spaces (Chinese+Chinese)");
+        Assertions.assertFalse(bookmark.getSingleLine(),
+                "Multi-line bookmark must report isSingleLine=false");
+    }
+
+    /**
+     * Single-line bookmarks keep their original text and {@code isSingleLine=true}
+     * so the existing behaviour (and existing tests) are preserved.
+     */
+    @Test
+    public void testSingleLineBookmarkUnchanged() {
+        List<List<IObject>> contents = singlePage(
+                createParagraph("一、信息披露制度与投资者关系", 0, 50, 700, 680, 14.0f));
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Bookmark bookmark = bookmarks.get(0);
+        Assertions.assertEquals("一、信息披露制度与投资者关系", bookmark.getText());
+        Assertions.assertTrue(bookmark.getSingleLine());
+    }
+
+    /**
+     * Smart-space boundary cases:
+     * <ul>
+     *   <li>Letter + letter across the line break: insert one space.</li>
+     *   <li>Digit + digit across the line break: insert one space.</li>
+     *   <li>Chinese + English across the line break: no space (rule requires
+     *       both sides to be the same ASCII category).</li>
+     *   <li>Letter + digit / digit + letter: no space (cross-category).</li>
+     * </ul>
+     */
+    @Test
+    public void testMultiLineSmartSpaceBoundary() {
+        // First line ends with Chinese '题', second line starts with ASCII 'H'.
+        // Both lines contribute to a single bookmark; rule leaves no space.
+        List<List<IObject>> contents = singlePage(
+                createMultiLineParagraph(
+                        Arrays.asList("一、英文标题", "HL GLOBAL"),
+                        0, 50, 900, 14.0f));
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Bookmark chineseThenEnglish = bookmarks.get(0);
+        Assertions.assertEquals("一、英文标题HL GLOBAL", chineseThenEnglish.getText(),
+                "Chinese line + English next-line: rule is letter+letter OR digit+digit; "
+                        + "Chinese is neither, so no space is inserted");
+        Assertions.assertFalse(chineseThenEnglish.getSingleLine());
+
+        // Letter + letter: a single space is inserted. (Use "第1条" prefix so the
+        // paragraph is a recognised bookmark candidate.)
+        List<List<IObject>> letterThenLetter = singlePage(
+                createMultiLineParagraph(
+                        Arrays.asList("第1条 Section", "Header"),
+                        0, 50, 900, 14.0f));
+        Bookmark letterThenLetterBm = PageBookmarkProcessor.extractPageBookmarks(letterThenLetter).get(0);
+        Assertions.assertEquals("第1条 Section Header", letterThenLetterBm.getText(),
+                "Letter+letter across lines should insert one space");
+
+        // Digit + digit: a single space is inserted. ("（一）" is a recognised
+        // bookmark prefix; the line ends with a digit so digit+digit applies
+        // across the break.)
+        List<List<IObject>> digitThenDigit = singlePage(
+                createMultiLineParagraph(
+                        Arrays.asList("（一）42", "12"),
+                        0, 50, 900, 14.0f));
+        Bookmark digitThenDigitBm = PageBookmarkProcessor.extractPageBookmarks(digitThenDigit).get(0);
+        Assertions.assertEquals("（一）42 12", digitThenDigitBm.getText(),
+                "Digit+digit across lines should insert one space");
+
+        // Letter + digit: no space (different categories).
+        List<List<IObject>> letterThenDigit = singlePage(
+                createMultiLineParagraph(
+                        Arrays.asList("一、Item", "12"),
+                        0, 50, 900, 14.0f));
+        Bookmark letterThenDigitBm = PageBookmarkProcessor.extractPageBookmarks(letterThenDigit).get(0);
+        Assertions.assertEquals("一、Item12", letterThenDigitBm.getText(),
+                "Letter+digit across lines: no space (different categories)");
+        Assertions.assertFalse(letterThenDigitBm.getSingleLine());
+
+        // Digit + letter: no space.
+        List<List<IObject>> digitThenLetter = singlePage(
+                createMultiLineParagraph(
+                        Arrays.asList("（一）42", "Steps"),
+                        0, 50, 900, 14.0f));
+        Bookmark digitThenLetterBm = PageBookmarkProcessor.extractPageBookmarks(digitThenLetter).get(0);
+        Assertions.assertEquals("（一）42Steps", digitThenLetterBm.getText(),
+                "Digit+letter across lines: no space (different categories)");
     }
 
     @Test

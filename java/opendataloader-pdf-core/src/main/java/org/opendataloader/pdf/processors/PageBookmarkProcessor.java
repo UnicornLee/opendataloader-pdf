@@ -20,6 +20,7 @@ import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.custom.entities.Bookmark;
 import org.opendataloader.pdf.json.JsonName;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
+import org.opendataloader.pdf.utils.SmartTextJoiner;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.SemanticHeading;
 import org.verapdf.wcag.algorithms.entities.content.TextLine;
@@ -154,6 +155,8 @@ public class PageBookmarkProcessor {
     private static final class Candidate {
         final int pageIndex;
         final String text;
+        final String fullText;
+        final boolean singleLine;
         final TemplateKey templateKey;
         final int value;
         final double fontSize;
@@ -161,15 +164,20 @@ public class PageBookmarkProcessor {
         final double topY;
         final int relatedId;
 
-        Candidate(int pageIndex, String text, TemplateKey templateKey, int value,
+        Candidate(int pageIndex, String text, String fullText, boolean singleLine,
+                  TemplateKey templateKey, int value,
                   double fontSize, double leftX, double topY) {
-            this(pageIndex, text, templateKey, value, fontSize, leftX, topY, 0);
+            this(pageIndex, text, fullText, singleLine, templateKey, value,
+                fontSize, leftX, topY, 0);
         }
 
-        Candidate(int pageIndex, String text, TemplateKey templateKey, int value,
+        Candidate(int pageIndex, String text, String fullText, boolean singleLine,
+                  TemplateKey templateKey, int value,
                   double fontSize, double leftX, double topY, int relatedId) {
             this.pageIndex = pageIndex;
             this.text = text;
+            this.fullText = fullText;
+            this.singleLine = singleLine;
             this.templateKey = templateKey;
             this.value = value;
             this.fontSize = fontSize;
@@ -561,15 +569,18 @@ public class PageBookmarkProcessor {
                 continue;
             }
             for (IObject content : pageContents) {
-                String firstLineText = extractFirstText(content);
-                if (firstLineText == null) {
+                List<String> allLines = extractAllLines(content);
+                if (allLines.isEmpty()) {
                     continue;
                 }
-                String trimmed = firstLineText.trim();
+                String trimmed = allLines.get(0).trim();
                 ConstantPattern match = matchPrefix(trimmed);
                 if (match == null) {
                     continue;
                 }
+                // Build the full paragraph text by joining every line with the
+                // smart-space rule (ASCII letter+letter or digit+digit).
+                String fullText = SmartTextJoiner.joinPieces(allLines).trim();
                 // SemanticTextNode and its subclasses expose font size; CustomSemanticParagraph
                 // and SemanticHeading both descend from it, so this cast is safe for both.
                 double fontSize = content instanceof org.verapdf.wcag.algorithms.entities.SemanticTextNode
@@ -578,6 +589,8 @@ public class PageBookmarkProcessor {
                 candidates.add(new Candidate(
                     pageIndex,
                     trimmed,
+                    fullText,
+                    allLines.size() == 1,
                     new TemplateKey(match.template, match.numberSystem),
                     match.value,
                     fontSize,
@@ -618,15 +631,16 @@ public class PageBookmarkProcessor {
                         && !JsonName.SOURCE_TYPE_HEADING.equals(sourceType)) {
                     continue;
                 }
-                String firstLine = getJsonItemFirstLine(item);
-                if (firstLine == null) {
+                List<String> allLines = collectJsonItemAllLines(item);
+                if (allLines.isEmpty()) {
                     continue;
                 }
-                String trimmed = firstLine.trim();
+                String trimmed = allLines.get(0).trim();
                 ConstantPattern match = matchPrefix(trimmed);
                 if (match == null) {
                     continue;
                 }
+                String fullText = SmartTextJoiner.joinPieces(allLines).trim();
                 Object idObj = item.get(JsonName.ID);
                 int relatedId = idObj instanceof Number ? ((Number) idObj).intValue() : 0;
                 double fontSize = getJsonItemFontSize(item);
@@ -637,6 +651,8 @@ public class PageBookmarkProcessor {
                 candidates.add(new Candidate(
                     pageIndex,
                     trimmed,
+                    fullText,
+                    allLines.size() == 1,
                     new TemplateKey(match.template, match.numberSystem),
                     match.value,
                     fontSize,
@@ -669,6 +685,49 @@ public class PageBookmarkProcessor {
             }
         }
         return first != null ? first.toString() : null;
+    }
+
+    /**
+     * Returns all lines of a paragraph/heading JSON item in reading order.
+     * Each entry in {@code item.content} represents one line; if that line is
+     * itself a map with its own {@code content} list, the list elements are
+     * treated as text pieces of a single line and joined with the smart-space
+     * rule. Returns an empty list when the item has no usable text.
+     */
+    private static List<String> collectJsonItemAllLines(Map<String, Object> item) {
+        List<String> lines = new ArrayList<>();
+        Object contentObj = item.get(JsonName.CONTENT);
+        if (!(contentObj instanceof List)) {
+            return lines;
+        }
+        for (Object lineObj : (List<?>) contentObj) {
+            if (lineObj instanceof Map) {
+                Object textListObj = ((Map<?, ?>) lineObj).get(JsonName.CONTENT);
+                if (textListObj instanceof List) {
+                    StringBuilder sb = new StringBuilder();
+                    for (Object t : (List<?>) textListObj) {
+                        if (t == null) {
+                            continue;
+                        }
+                        String s = t.toString();
+                        if (s.isEmpty()) {
+                            continue;
+                        }
+                        SmartTextJoiner.appendSmart(sb, s);
+                    }
+                    String joined = sb.toString();
+                    if (!joined.isEmpty()) {
+                        lines.add(joined);
+                    }
+                }
+            } else if (lineObj != null) {
+                String s = lineObj.toString();
+                if (!s.isEmpty()) {
+                    lines.add(s);
+                }
+            }
+        }
+        return lines;
     }
 
     private static double getJsonItemFontSize(Map<String, Object> item) {
@@ -715,6 +774,35 @@ public class PageBookmarkProcessor {
             return firstLine != null ? firstLine.getValue() : null;
         }
         return null;
+    }
+
+    /**
+     * Returns all non-null text-line values of an element, in reading order.
+     * Paragraphs contribute every {@link TextLine}; headings contribute only
+     * their first line because the verapdf {@link SemanticHeading} API does
+     * not expose a multi-line accessor and headings are typically single-line
+     * anyway. Returns an empty list when the element has no usable text.
+     */
+    private static List<String> extractAllLines(IObject content) {
+        List<String> lines = new ArrayList<>();
+        if (content instanceof CustomSemanticParagraph) {
+            List<TextLine> textLines = ((CustomSemanticParagraph) content).getTextLines();
+            if (textLines != null) {
+                for (TextLine line : textLines) {
+                    if (line != null && line.getValue() != null) {
+                        lines.add(line.getValue());
+                    }
+                }
+            }
+            return lines;
+        }
+        if (content instanceof SemanticHeading) {
+            TextLine firstLine = ((SemanticHeading) content).getFirstLine();
+            if (firstLine != null && firstLine.getValue() != null) {
+                lines.add(firstLine.getValue());
+            }
+        }
+        return lines;
     }
 
     public static boolean isBookmarkCandidate(String text) {
@@ -855,10 +943,17 @@ public class PageBookmarkProcessor {
 
     private static Bookmark createBookmark(Candidate candidate) {
         Bookmark bookmark = new Bookmark();
-        bookmark.setText(candidate.text);
+        // Use the full paragraph text (joined with smart-space) so multi-line
+        // bookmarks expose every line in {@code text}. {@code Candidate.text}
+        // is kept as the first line for prefix matching upstream; it is no
+        // longer used as the output here.
+        bookmark.setText(candidate.fullText != null ? candidate.fullText : candidate.text);
         bookmark.setPageNum(candidate.pageIndex + 1);
         bookmark.setFontSize((float) candidate.fontSize);
-        bookmark.setSingleLine(true);
+        // Reflect whether the source paragraph/heading actually had a single
+        // line, so downstream consumers can tell apart one-line titles from
+        // wrapped multi-line ones.
+        bookmark.setSingleLine(candidate.singleLine);
         bookmark.setOpen(false);
         bookmark.setRelatedId(candidate.relatedId);
         bookmark.setChildren(new ArrayList<>());
