@@ -61,7 +61,7 @@
         <verapdf.version>1.31.99</verapdf.version>
         <verapdf.wcag.algs.version>1.31.33</verapdf.wcag.algs.version>
         <jackson.databind.version>2.22.1</jackson.databind.version>
-        <junit.jupiter.version>6.1.2</junit.jupiter.version>
+        <junit.jupiter.version>5.11.4</junit.jupiter.version>
         <assertj.version>3.27.7</assertj.version>
         <okhttp.version>5.4.0</okhttp.version>
         <commons.cli.version>1.11.0</commons.cli.version>

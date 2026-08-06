@@ -1,5 +1,5 @@
 {
-  "url" : "D:\\Code\\JavaCode\\opendataloader-pdf\\java\\opendataloader-pdf-core\\..\\..\\samples\\pdf\\lorem.pdf",
+  "url" : "D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\java\\opendataloader-pdf-core\\..\\..\\samples\\pdf\\lorem.pdf",
   "bookmarks" : [ ],
   "data" : [ {
     "page_index" : 1,
@@ -19,6 +19,8 @@
       "y1" : 134.062,
       "width" : 193.261,
       "x1" : 394.152,
+      "source_type" : "heading",
+      "id" : 1,
       "content" : [ {
         "item_type" : "text",
         "margin_top" : 0.0,
@@ -36,12 +38,7 @@
       "item_type" : "text",
       "margin_top" : 47.177,
       "font_size" : 9.949,
-      "y0" : 181.239,
-      "x0" : 85.034,
-      "y1" : 193.111,
-      "width" : 381.269,
-      "x1" : 466.303,
-      "is_bookmark" : false,
+      "source_type" : "paragraph",
       "content" : [ {
         "item_type" : "text",
         "margin_top" : 47.177,
@@ -55,17 +52,19 @@
         "content" : [ "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor" ],
         "height" : 11.873
       } ],
+      "y0" : 181.239,
+      "x0" : 85.034,
+      "y1" : 193.111,
+      "width" : 381.269,
+      "x1" : 466.303,
+      "id" : 2,
+      "is_bookmark" : false,
       "height" : 11.873
     }, {
       "item_type" : "text",
       "margin_top" : 4.19,
       "font_size" : 9.949,
-      "y0" : 197.301,
-      "x0" : 85.034,
-      "y1" : 273.064,
-      "width" : 417.272,
-      "x1" : 502.306,
-      "is_bookmark" : false,
+      "source_type" : "paragraph",
       "content" : [ {
         "item_type" : "text",
         "margin_top" : 4.19,
@@ -127,7 +126,16 @@
         "content" : [ "anim id est laborum." ],
         "height" : 11.873
       } ],
+      "y0" : 197.301,
+      "x0" : 85.034,
+      "y1" : 273.064,
+      "width" : 417.272,
+      "x1" : 502.306,
+      "id" : 3,
+      "is_bookmark" : false,
       "height" : 75.763
     } ]
-  } ]
+  } ],
+  "catalog_bookmarks" : [ ],
+  "page_bookmarks" : [ ]
 }
