@@ -696,7 +696,7 @@ public class JsonWriter {
         String jsFileName = outputFolder + File.separator + inputPDF.getName().substring(0, inputPDF.getName().length() - 3) + "js";
         String jsFileContent = "var url = " + mapper.writeValueAsString(inputPdfName) + ";";
         jsFileContent += "\n\n";
-        jsFileContent += "var bookmarks = " + mapper.writeValueAsString(map.get("catalog_bookmarks")) + ";";
+        jsFileContent += "var bookmarks = " + mapper.writeValueAsString(map.get("page_bookmarks")) + ";";
         jsFileContent += "\n\n";
         jsFileContent += "var data = " + mapper.writeValueAsString(map.get(JsonName.DATA)) + ";";
         FileUtils.writeToFile(jsFileName, jsFileContent);

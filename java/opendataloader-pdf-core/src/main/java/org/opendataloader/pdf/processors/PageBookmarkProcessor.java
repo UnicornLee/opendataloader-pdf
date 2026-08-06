@@ -34,7 +34,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.TreeSet;
 import java.util.logging.Logger;
 
 /**
@@ -46,9 +45,18 @@ import java.util.logging.Logger;
  * {@code 第一章} belong to two different groups and will never be merged into the
  * same bookmark level.</p>
  *
- * <p>Level assignment is dynamic: up to three validated groups are ranked by average
- * font size (larger = higher level) and average left indentation (smaller = higher
- * level), then arranged into a parent-child tree in document reading order.</p>
+ * <p>Hierarchy follows a local-consistency rule: all bookmarks directly under the
+ * same parent share the same template (prefix/numbering style). Top-level
+ * bookmarks share one template; within each parent, its children share one
+ * template; children templates may differ between sibling parents, depending on
+ * the candidates extracted between consecutive parents. Up to three levels are
+ * emitted.</p>
+ *
+ * <p>Within each parent range, the next level is selected by visual hierarchy
+ * (larger font / smaller left indentation = higher level) and consecutive-number
+ * validation. For the first level only, a right-aligned chapter-like group
+ * (第*章/第*节/第*条) may be promoted to top level when several such groups
+ * coexist.</p>
  */
 public class PageBookmarkProcessor {
 
@@ -233,44 +241,140 @@ public class PageBookmarkProcessor {
 
     /**
      * Builds a hierarchical bookmark tree from already-collected candidates.
+     *
+     * <p>The tree is built recursively: for each parent range, the best template
+     * (prefix/numbering style) is selected and used as the only child marker for
+     * that parent. Children templates may differ between sibling parents, but
+     * all children under the same parent share the same template. Up to three
+     * levels are emitted.</p>
      */
     private static List<Bookmark> buildBookmarksFromCandidates(List<Candidate> candidates) {
-        if (candidates.isEmpty()) {
+        if (candidates == null || candidates.isEmpty()) {
             return Collections.emptyList();
         }
 
-        Map<TemplateKey, Group> groups = groupByTemplate(candidates);
+        // Sort in reading order before recursing so that ranges are always sliced
+        // by consecutive parent occurrences in document order.
+        candidates.sort(Comparator
+            .comparingInt((Candidate c) -> c.pageIndex)
+            .thenComparing((Candidate c) -> -c.topY));
+
+        return extractLevel(candidates, 0, candidates.size() - 1, 1, Collections.emptySet());
+    }
+
+    /**
+     * Recursively extracts bookmarks of the given level within the candidate
+     * index range [start, end]. Templates listed in {@code usedTemplates} have
+     * already been assigned to ancestor levels and are ignored.
+     */
+    private static List<Bookmark> extractLevel(List<Candidate> candidates, int start, int end,
+                                                int level, Set<TemplateKey> usedTemplates) {
+        if (start > end || level > 3) {
+            return Collections.emptyList();
+        }
+
+        TemplateKey selectedTemplate = selectTemplateForLevel(candidates, start, end, level, usedTemplates);
+        if (selectedTemplate == null) {
+            return Collections.emptyList();
+        }
+
+        List<Candidate> selectedCandidates = new ArrayList<>();
+        for (int i = start; i <= end; i++) {
+            Candidate c = candidates.get(i);
+            if (selectedTemplate.equals(c.templateKey)) {
+                selectedCandidates.add(c);
+            }
+        }
+
+        List<Candidate> cleaned = (level == 1)
+            ? cleanCandidates(selectedCandidates)
+            : cleanCandidatesLocal(selectedCandidates);
+        if (cleaned.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        // Map cleaned candidates back to their original indices and order them by
+        // reading order so that child ranges are sliced correctly.
+        List<Integer> cleanedIndices = new ArrayList<>();
+        for (Candidate c : cleaned) {
+            int idx = candidates.indexOf(c);
+            cleanedIndices.add(idx);
+        }
+        cleanedIndices.sort(Comparator
+            .comparingInt((Integer i) -> candidates.get(i).pageIndex)
+            .thenComparing((Integer i) -> -candidates.get(i).topY));
+
+        List<Bookmark> bookmarks = new ArrayList<>();
+        Set<TemplateKey> newUsed = new HashSet<>(usedTemplates);
+        newUsed.add(selectedTemplate);
+
+        for (int i = 0; i < cleanedIndices.size(); i++) {
+            int idx = cleanedIndices.get(i);
+            Candidate candidate = candidates.get(idx);
+            int childStart = idx + 1;
+            int childEnd = (i + 1 < cleanedIndices.size()) ? cleanedIndices.get(i + 1) - 1 : end;
+            List<Bookmark> children = extractLevel(candidates, childStart, childEnd, level + 1, newUsed);
+            Bookmark bookmark = createBookmark(candidate);
+            bookmark.getChildren().addAll(children);
+            bookmarks.add(bookmark);
+        }
+
+        return bookmarks;
+    }
+
+    /**
+     * Selects the best template for the given level within the range
+     * [start, end]. The best template is the one with the highest visual
+     * hierarchy among templates that form a valid sequence.
+     *
+     * <p>For level 1, the template must form a contiguous sequence starting at
+     * 1 across the whole document. For deeper levels, only a contiguous run
+     * within the current parent range is required; it may start at any value,
+     * which allows headings to continue their numbering across parent
+     * sections.</p>
+     */
+    private static TemplateKey selectTemplateForLevel(List<Candidate> candidates, int start, int end,
+                                                       int level, Set<TemplateKey> usedTemplates) {
+        Map<TemplateKey, Group> groups = new HashMap<>();
+        for (int i = start; i <= end; i++) {
+            Candidate c = candidates.get(i);
+            if (usedTemplates.contains(c.templateKey)) {
+                continue;
+            }
+            groups.computeIfAbsent(c.templateKey, Group::new).add(c);
+        }
+
         List<Group> validGroups = new ArrayList<>();
         for (Group group : groups.values()) {
-            if (isValidGroup(group)) {
+            List<Candidate> cleaned;
+            if (level == 1) {
+                // Level 1: require a global consecutive-from-1 sequence.
                 group.computeStatistics();
-                validGroups.add(group);
+                if (!isValidGroup(group)) {
+                    continue;
+                }
+                cleaned = cleanCandidates(group.candidates);
+            } else {
+                // Deeper levels: allow a local consecutive run starting anywhere.
+                cleaned = cleanCandidatesLocal(group.candidates);
+                if (cleaned.isEmpty()) {
+                    continue;
+                }
             }
+            if (cleaned.isEmpty()) {
+                continue;
+            }
+            group.candidates.clear();
+            group.candidates.addAll(cleaned);
+            group.computeStatistics();
+            validGroups.add(group);
         }
-        mergeContiguousGroups(validGroups);
 
         if (validGroups.isEmpty()) {
-            return Collections.emptyList();
+            return null;
         }
 
-        // Rank groups by visual hierarchy: larger font and smaller left indentation
-        // indicate higher level. A 第*章/第*节/第*条 group whose left edge is to the
-        // right of every other group is a top-level heading pattern used by some
-        // PDFs. When several of them coexist, only the highest-priority one
-        // (章 > 节 > 条) is eligible for this promotion, so normally indented
-        // 章>节>条 hierarchies keep their font/indent-based ranking.
-        double rightmostLeftX = validGroups.stream()
-            .mapToDouble(group -> group.averageLeftX)
-            .max().orElse(Double.NEGATIVE_INFINITY);
-        String promotableTemplate = findPromotableChapterTemplate(validGroups);
         validGroups.sort((a, b) -> {
-            boolean aRightmostChapter = a.templateKey.template.equals(promotableTemplate)
-                && Math.abs(a.averageLeftX - rightmostLeftX) < 0.001;
-            boolean bRightmostChapter = b.templateKey.template.equals(promotableTemplate)
-                && Math.abs(b.averageLeftX - rightmostLeftX) < 0.001;
-            if (aRightmostChapter != bRightmostChapter) {
-                return aRightmostChapter ? -1 : 1;
-            }
             int fontCmp = Double.compare(b.averageFontSize, a.averageFontSize);
             if (fontCmp != 0) {
                 return fontCmp;
@@ -279,6 +383,10 @@ public class PageBookmarkProcessor {
             if (indentCmp != 0) {
                 return indentCmp;
             }
+            int countCmp = Integer.compare(b.candidates.size(), a.candidates.size());
+            if (countCmp != 0) {
+                return countCmp;
+            }
             int pageCmp = Integer.compare(a.firstPageIndex, b.firstPageIndex);
             if (pageCmp != 0) {
                 return pageCmp;
@@ -286,95 +394,93 @@ public class PageBookmarkProcessor {
             return Double.compare(b.firstTopY, a.firstTopY);
         });
 
-        int maxLevels = Math.min(3, validGroups.size());
-        Map<TemplateKey, Integer> levelByTemplate = new HashMap<>();
-        for (int i = 0; i < maxLevels; i++) {
-            levelByTemplate.put(validGroups.get(i).templateKey, i + 1);
-        }
-
-        // Only candidates that survived mergeContiguousGroups should be emitted;
-        // strays and out-of-chain duplicates discarded by the merge must not
-        // become bookmarks.
-        List<Candidate> mergedCandidates = new ArrayList<>();
-        for (Group group : validGroups) {
-            mergedCandidates.addAll(group.candidates);
-        }
-
-        // Sort candidates in reading order: page by page, top to bottom.
-        mergedCandidates.sort(Comparator
-            .comparingInt((Candidate c) -> c.pageIndex)
-            .thenComparing((Candidate c) -> -c.topY));
-
-        TemplateKey level1Template = validGroups.get(0).templateKey;
-        boolean level1Seen = false;
-
-        List<Bookmark> rootBookmarks = new ArrayList<>();
-        Bookmark currentLevel1 = null;
-        Bookmark currentLevel2 = null;
-
-        for (Candidate candidate : mergedCandidates) {
-            // A level can only have one marker style, so anything collected before
-            // the first level-1 heading has no parent to attach to and is dropped.
-            if (!level1Seen && !level1Template.equals(candidate.templateKey)) {
-                continue;
-            }
-            Integer level = levelByTemplate.get(candidate.templateKey);
-            if (level == null) {
-                continue;
-            }
-            Bookmark bookmark = createBookmark(candidate);
-            if (level == 1) {
-                level1Seen = true;
-                rootBookmarks.add(bookmark);
-                currentLevel1 = bookmark;
-                currentLevel2 = null;
-            } else if (level == 2) {
-                if (currentLevel1 == null) {
-                    rootBookmarks.add(bookmark);
-                } else {
-                    currentLevel1.getChildren().add(bookmark);
-                }
-                currentLevel2 = bookmark;
-            } else if (level == 3) {
-                if (currentLevel2 != null) {
-                    currentLevel2.getChildren().add(bookmark);
-                } else if (currentLevel1 != null) {
-                    currentLevel1.getChildren().add(bookmark);
-                } else {
-                    rootBookmarks.add(bookmark);
-                }
-            }
-        }
-
-        return rootBookmarks;
+        return validGroups.get(0).templateKey;
     }
 
     /**
-     * Returns the chapter-like template (第*章/第*节/第*条) eligible for the
-     * "rightmost group is a top-level heading" promotion. When several of them
-     * are present, only the highest-priority one (章 > 节 > 条) is eligible;
-     * returns {@code null} when no chapter-like group exists.
+     * Cleans a list of candidates of the same template by splitting at each
+     * value-1 restart and trimming each run to a contiguous "from-1" sequence.
+     * Duplicate values are resolved by keeping the latest occurrence.
      */
-    private static String findPromotableChapterTemplate(List<Group> groups) {
-        boolean hasChapter = false;
-        boolean hasSection = false;
-        boolean hasArticle = false;
-        for (Group group : groups) {
-            if (TEMPLATE_CHAPTER.equals(group.templateKey.template)) {
-                hasChapter = true;
-            } else if (TEMPLATE_SECTION.equals(group.templateKey.template)) {
-                hasSection = true;
-            } else if (TEMPLATE_ARTICLE.equals(group.templateKey.template)) {
-                hasArticle = true;
+    private static List<Candidate> cleanCandidates(List<Candidate> candidates) {
+        if (candidates.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<Candidate> sorted = new ArrayList<>(candidates);
+        sorted.sort(Comparator
+            .comparingInt((Candidate c) -> c.pageIndex)
+            .thenComparing((Candidate c) -> -c.topY));
+        List<List<Candidate>> sections = splitByValueOne(sorted);
+        List<Candidate> trimmed = new ArrayList<>();
+        for (List<Candidate> section : sections) {
+            List<Candidate> trimmedSection = trimContiguousSection(section);
+            if (trimmedSection != null && !trimmedSection.isEmpty()) {
+                trimmed.addAll(trimmedSection);
             }
         }
-        if (hasChapter) {
-            return TEMPLATE_CHAPTER;
+        return trimmed;
+    }
+
+    /**
+     * Cleans a list of candidates of the same template within a parent range.
+     * Duplicates are resolved by keeping the latest occurrence, and the longest
+     * consecutive run of values is retained. Unlike {@link #cleanCandidates},
+     * the run may start at any value, allowing headings to continue their
+     * numbering across parent sections.
+     */
+    private static List<Candidate> cleanCandidatesLocal(List<Candidate> candidates) {
+        if (candidates.isEmpty()) {
+            return Collections.emptyList();
         }
-        if (hasSection) {
-            return TEMPLATE_SECTION;
+
+        // Resolve duplicates by keeping the latest occurrence per value.
+        List<Candidate> byLatestPage = new ArrayList<>(candidates);
+        byLatestPage.sort(Comparator
+            .comparingInt((Candidate c) -> c.pageIndex)
+            .reversed()
+            .thenComparing((Candidate c) -> c.topY));
+        Set<Integer> used = new HashSet<>();
+        Map<Integer, Candidate> latestByValue = new LinkedHashMap<>();
+        for (Candidate c : byLatestPage) {
+            if (used.add(c.value)) {
+                latestByValue.put(c.value, c);
+            }
         }
-        return hasArticle ? TEMPLATE_ARTICLE : null;
+
+        if (latestByValue.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        // Find the longest run of consecutive integer values.
+        List<Integer> sortedValues = new ArrayList<>(latestByValue.keySet());
+        Collections.sort(sortedValues);
+        int bestStart = 0;
+        int bestLength = 1;
+        int currentStart = 0;
+        int currentLength = 1;
+        for (int i = 1; i < sortedValues.size(); i++) {
+            if (sortedValues.get(i) == sortedValues.get(i - 1) + 1) {
+                currentLength++;
+            } else {
+                if (currentLength > bestLength) {
+                    bestLength = currentLength;
+                    bestStart = currentStart;
+                }
+                currentStart = i;
+                currentLength = 1;
+            }
+        }
+        if (currentLength > bestLength) {
+            bestLength = currentLength;
+            bestStart = currentStart;
+        }
+
+        List<Candidate> trimmed = new ArrayList<>();
+        for (int i = bestStart; i < bestStart + bestLength; i++) {
+            trimmed.add(latestByValue.get(sortedValues.get(i)));
+        }
+        trimmed.sort(Comparator.comparingInt((Candidate c) -> c.value));
+        return trimmed;
     }
 
     private static List<Candidate> collectCandidates(List<List<IObject>> contents) {
@@ -592,66 +698,6 @@ public class PageBookmarkProcessor {
             || !Character.isDigit(text.charAt(suffixIndex + 1));
     }
 
-    /**
-     * Merges groups of the same template that together form a contiguous sequence
-     * of numbers, and drops groups that cannot be merged into the union. Without
-     * this pass, a section like "绗簲鑺? may collect disjoint sub-ranges
-     * (e.g. {1,2,3}, {5}, {4,5,6,7,8,9,10,11}); the disconnected {5} must be
-     * dropped and {1,2,3} combined with {4,5,6,...} into a single range.
-     */
-    /**
-     * For each template, walks the per-page groups in reading order and finds the
-     * longest contiguous "from-1" sequence. The selected span is merged into one
-     * group; the leftover singletons (e.g. a stray "5," that does not fit the
-     * chosen sequence) are discarded so they do not surface as standalone
-     * bookmarks.
-     */
-    /**
-     * For each template, partitions candidates by "value=1" chapter markers
-     * (each chapter restarts at 涓€銆? and trims each chapter independently.
-     * Inside each chapter, duplicate values are deduplicated by keeping the
-     * latest-occurring occurrence; stray values outside the contiguous range
-     * are dropped. All trimmed chapters are kept so that second-level headings
-     * under different first-level sections (e.g., multiple "一、.../二、..."
-     * sequences) are not discarded just because another chapter has a longer run.
-     */
-    private static void mergeContiguousGroups(List<Group> groups) {
-        Map<TemplateKey, List<Group>> byTemplate = new HashMap<>();
-        for (Group group : groups) {
-            byTemplate.computeIfAbsent(group.templateKey, k -> new ArrayList<>()).add(group);
-        }
-        List<Group> merged = new ArrayList<>();
-        for (Map.Entry<TemplateKey, List<Group>> entry : byTemplate.entrySet()) {
-            List<Candidate> allCandidates = new ArrayList<>();
-            for (Group g : entry.getValue()) {
-                allCandidates.addAll(g.candidates);
-            }
-            if (allCandidates.isEmpty()) {
-                continue;
-            }
-            allCandidates.sort(Comparator
-                .comparingInt((Candidate c) -> c.pageIndex)
-                .thenComparing((Candidate c) -> -c.topY));
-            List<List<Candidate>> sections = splitByValueOne(allCandidates);
-            List<Candidate> trimmed = new ArrayList<>();
-            for (List<Candidate> section : sections) {
-                List<Candidate> trimmedSection = trimContiguousSection(section);
-                if (trimmedSection != null && !trimmedSection.isEmpty()) {
-                    trimmed.addAll(trimmedSection);
-                }
-            }
-            if (trimmed.isEmpty()) {
-                continue;
-            }
-            Group combined = new Group(entry.getKey());
-            combined.candidates.addAll(trimmed);
-            combined.computeStatistics();
-            merged.add(combined);
-        }
-        groups.clear();
-        groups.addAll(merged);
-    }
-
     private static List<List<Candidate>> splitByValueOne(List<Candidate> sorted) {
         List<List<Candidate>> sections = new ArrayList<>();
         List<Candidate> current = new ArrayList<>();
@@ -713,104 +759,6 @@ public class PageBookmarkProcessor {
             }
         }
         return length;
-    }
-
-    /**
-     * Walks the groups in reading order and tracks the longest "from-1" run
-     * seen so far. A run starts when a group contains value 1, and continues
-     * with subsequent groups whose value equals the next expected integer.
-     * The longest run wins; ties are broken by picking the run whose first
-     * group is closest to the parent directory (smallest pageIndex, then
-     * largest topY).
-     */
-    private static Group pickBestContiguousSpan(List<Group> orderedGroups) {
-        List<Group> bestRun = null;
-        List<Group> current = new ArrayList<>();
-        int expectedNext = 1;
-        for (Group group : orderedGroups) {
-            Set<Integer> values = new TreeSet<>();
-            for (Candidate c : group.candidates) {
-                values.add(c.value);
-            }
-            if (values.isEmpty()) {
-                continue;
-            }
-            int smallest = values.iterator().next();
-            if (current.isEmpty()) {
-                if (smallest == 1) {
-                    current.add(group);
-                    expectedNext = 2;
-                }
-                continue;
-            }
-            if (smallest == expectedNext) {
-                current.add(group);
-                expectedNext++;
-            } else {
-                bestRun = chooseBetterRun(bestRun, current);
-                current = new ArrayList<>();
-                expectedNext = 1;
-                if (smallest == 1) {
-                    current.add(group);
-                    expectedNext = 2;
-                }
-            }
-        }
-        bestRun = chooseBetterRun(bestRun, current);
-        if (bestRun == null || bestRun.isEmpty()) {
-            return null;
-        }
-        Group combined = new Group(bestRun.get(0).templateKey);
-        for (Group g : bestRun) {
-            combined.candidates.addAll(g.candidates);
-        }
-        combined.computeStatistics();
-        return combined;
-    }
-
-    private static List<Group> chooseBetterRun(List<Group> bestRun, List<Group> candidate) {
-        if (candidate == null || candidate.isEmpty()) {
-            return bestRun;
-        }
-        if (bestRun == null) {
-            return candidate;
-        }
-        if (candidate.size() > bestRun.size()) {
-            return candidate;
-        }
-        if (candidate.size() < bestRun.size()) {
-            return bestRun;
-        }
-        int candidateFirstIndex = candidate.get(0).firstPageIndex;
-        int bestFirstIndex = bestRun.get(0).firstPageIndex;
-        if (candidateFirstIndex != bestFirstIndex) {
-            return candidateFirstIndex < bestFirstIndex ? candidate : bestRun;
-        }
-        double candidateFirstTopY = candidate.get(0).firstTopY;
-        double bestFirstTopY = bestRun.get(0).firstTopY;
-        return candidateFirstTopY > bestFirstTopY ? candidate : bestRun;
-    }
-
-    private static boolean isContiguousFromOne(Set<Integer> values) {
-        if (values.isEmpty() || values.iterator().next() != 1) {
-            return false;
-        }
-        int expected = 1;
-        for (Integer value : values) {
-            if (value != expected) {
-                return false;
-            }
-            expected++;
-        }
-        return true;
-    }
-
-    private static Map<TemplateKey, Group> groupByTemplate(List<Candidate> candidates) {
-        Map<TemplateKey, Group> groups = new HashMap<>();
-        for (Candidate candidate : candidates) {
-            groups.computeIfAbsent(candidate.templateKey, Group::new).add(candidate);
-        }
-        return groups;
     }
 
     private static boolean isValidGroup(Group group) {
