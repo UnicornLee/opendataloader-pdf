@@ -432,6 +432,85 @@ public class PageBookmarkProcessorTest {
         Assertions.assertTrue(bookmarks.get(2).getChildren().isEmpty());
     }
 
+    /**
+     * Within one parent there can be two sets of consecutive headings whose
+     * value ranges overlap (e.g., pages 1-6 carry 一..六, then later pages
+     * 17-30 restart at 一..四 as sub-items of a different group). The
+     * selector must prefer the more complete set rather than blindly keeping
+     * the latest occurrence per value.
+     */
+    @Test
+    public void testPicksMoreCompleteSetWhenTwoOverlap() {
+        // Set 1 (pages 1-6, near parent's start): 一..六 (complete, length 6).
+        // Set 2 (pages 17-30, further into parent): 一..四 (incomplete, length 4).
+        // Expected: Set 1 wins because its value range is wider (6 vs 4).
+        List<List<IObject>> contents = multiPage(
+                1, "第一节 投资者保护", 18.0f, 900.0,
+                1, "一、信息披露制度", 14.0f, 880.0,
+                2, "二、股利分配政策", 14.0f, 860.0,
+                5, "三、滚存利润安排", 14.0f, 840.0,
+                5, "四、股东投票机制", 14.0f, 820.0,
+                6, "五、特别表决权", 14.0f, 800.0,
+                6, "六、承诺事项", 14.0f, 780.0,
+                // Gap simulates non-numbered body content; then Set 2 starts.
+                17, "一、股价稳定措施", 14.0f, 760.0,
+                28, "二、利润分配政策", 14.0f, 740.0,
+                28, "三、分红回报规划", 14.0f, 720.0,
+                30, "四、利润分配承诺", 14.0f, 700.0);
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(1, bookmarks.size(), "Only the section should be top-level");
+        Bookmark section = bookmarks.get(0);
+        Assertions.assertEquals("第一节 投资者保护", section.getText());
+
+        List<String> texts = new ArrayList<>();
+        for (Bookmark child : section.getChildren()) {
+            texts.add(child.getText());
+        }
+        Assertions.assertEquals(Arrays.asList(
+                "一、信息披露制度",
+                "二、股利分配政策",
+                "三、滚存利润安排",
+                "四、股东投票机制",
+                "五、特别表决权",
+                "六、承诺事项"), texts,
+                "Should pick the more complete set (Set 1) closer to the parent");
+    }
+
+    /**
+     * When two sets have equal value-range width, the chain whose first
+     * candidate is on the earliest page wins (closer to the parent).
+     */
+    @Test
+    public void testPicksChainCloserToParentWhenLengthsTie() {
+        // Both sets cover values 1-3 (same length 3). Set 1 starts on page 5,
+        // Set 2 starts on page 100. The selector should keep Set 1 because
+        // its first candidate is closer to the parent's start page.
+        List<List<IObject>> contents = multiPage(
+                0, "第一节 测试", 18.0f, 900.0,
+                5, "一、靠近父目录", 14.0f, 880.0,
+                5, "二、靠近父目录", 14.0f, 860.0,
+                5, "三、靠近父目录", 14.0f, 840.0,
+                100, "一、远离父目录", 14.0f, 820.0,
+                100, "二、远离父目录", 14.0f, 800.0,
+                100, "三、远离父目录", 14.0f, 780.0);
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(1, bookmarks.size());
+        Bookmark section = bookmarks.get(0);
+        Assertions.assertEquals("第一节 测试", section.getText());
+
+        List<String> texts = new ArrayList<>();
+        for (Bookmark child : section.getChildren()) {
+            texts.add(child.getText());
+        }
+        Assertions.assertEquals(Arrays.asList(
+                "一、靠近父目录",
+                "二、靠近父目录",
+                "三、靠近父目录"), texts,
+                "Should pick the chain closer to the parent on tied length");
+    }
+
     @Test
     public void testEmptyContents() {
         List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(null);
