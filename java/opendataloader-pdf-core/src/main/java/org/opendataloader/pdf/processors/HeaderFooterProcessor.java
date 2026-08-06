@@ -16,6 +16,7 @@
 package org.opendataloader.pdf.processors;
 
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
+import org.opendataloader.pdf.entities.content.ShapeChunk;
 import org.verapdf.wcag.algorithms.entities.INode;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.SemanticHeaderOrFooter;
@@ -56,7 +57,7 @@ public class HeaderFooterProcessor {
         }
         List<List<IObject>> filteredSortedContents = new ArrayList<>();
         for (List<IObject> content : sortedContents) {
-            filteredSortedContents.add(content.stream().filter(c -> !(c instanceof LineChunk) && !(c instanceof LineArtChunk)).collect(Collectors.toList()));
+            filteredSortedContents.add(content.stream().filter(c -> !(c instanceof LineChunk) && !(c instanceof LineArtChunk) && !(c instanceof ShapeChunk)).collect(Collectors.toList()));
         }
         List<SemanticHeaderOrFooter> footers = getHeadersOrFooters(filteredSortedContents, false);
         List<SemanticHeaderOrFooter> headers = getHeadersOrFooters(filteredSortedContents, true);
