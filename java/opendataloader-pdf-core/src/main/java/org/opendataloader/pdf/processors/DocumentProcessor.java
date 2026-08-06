@@ -931,12 +931,12 @@ public class DocumentProcessor {
             if (group == null || group.isEmpty() || !containsBarChart(group)) {
                 continue;
             }
-            BoundingBox groupBBox = unionBoundingBoxes(group, pageNumber);
-            if (groupBBox == null || groupBBox.isEmpty()) {
+            BoundingBox groupBox = unionBoundingBoxes(group, pageNumber);
+            if (groupBox == null || groupBox.isEmpty()) {
                 continue;
             }
-            pageContents.removeIf(content -> isVerticallyMostlyInside(groupBBox, content.getBoundingBox()));
-            ImageChunk imageChunk = new ImageChunk(groupBBox);
+            pageContents.removeIf(content -> isVerticallyMostlyInside(groupBox, content.getBoundingBox()));
+            ImageChunk imageChunk = new ImageChunk(groupBox);
             imagesUtils.saveImageChunk(imageChunk);
             pageContents.add(imageChunk);
         }
@@ -1005,6 +1005,9 @@ public class DocumentProcessor {
             // Pull overlapping elements already added to result (the "before" neighbors).
             for (int j = result.size() - 1; j >= 0; j--) {
                 IObject candidate = result.get(j);
+                if (candidate instanceof ShapeChunk) {
+                    continue;
+                }
                 if (hasSignificantOverlap(candidate.getBoundingBox(), lineArtBox)) {
                     group.add(0, candidate);
                     result.remove(j);
@@ -1018,6 +1021,9 @@ public class DocumentProcessor {
             int forwardCount = 0;
             for (int j = i + 1; j < pageContents.size(); j++) {
                 IObject candidate = pageContents.get(j);
+                if (candidate instanceof ShapeChunk) {
+                    continue;
+                }
                 if (hasSignificantOverlap(candidate.getBoundingBox(), lineArtBox)) {
                     group.add(candidate);
                     forwardCount++;
