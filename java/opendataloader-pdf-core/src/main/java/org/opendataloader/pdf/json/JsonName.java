@@ -101,6 +101,18 @@ public class JsonName {
     public static final String PDFUA_TAG = "pdfua_tag";
     public static final String SOURCE_LABEL = "source label";
     public static final String HYBRID = "hybrid";
+
+    public static final String SOURCE_TYPE = "source_type";
+    public static final String SOURCE_TYPE_PARAGRAPH = "paragraph";
+    public static final String SOURCE_TYPE_HEADING = "heading";
+    public static final String SOURCE_TYPE_LIST = "list";
+    public static final String SOURCE_TYPE_CAPTION = "caption";
+    public static final String SOURCE_TYPE_TOC = "toc";
+    public static final String SOURCE_TYPE_TEXT_CHUNK = "text_chunk";
+    public static final String SOURCE_TYPE_STREAM_TABLE = "stream_table";
+    public static final String SOURCE_TYPE_LATTICE_TABLE = "lattice_table";
+    public static final String SOURCE_TYPE_IMAGE = "image";
+
     public static final String STROKE_COLOR_R = "stroke color r";
     public static final String STROKE_COLOR_G = "stroke color g";
     public static final String STROKE_COLOR_B = "stroke color b";

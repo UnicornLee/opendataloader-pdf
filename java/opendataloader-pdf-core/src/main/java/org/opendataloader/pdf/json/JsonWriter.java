@@ -21,6 +21,7 @@ import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.core.util.DefaultPrettyPrinter;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.opendataloader.pdf.api.Config;
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.custom.constants.GlobalConstant;
 import org.opendataloader.pdf.custom.dto.PageItem;
@@ -31,7 +32,9 @@ import org.opendataloader.pdf.custom.utils.BookmarkUtils;
 import org.opendataloader.pdf.entities.content.ShapeChunk;
 import org.opendataloader.pdf.custom.utils.FileUtils;
 import org.opendataloader.pdf.markdown.MarkdownSyntax;
+import org.opendataloader.pdf.processors.CatalogBookmarkProcessor;
 import org.opendataloader.pdf.processors.DocumentProcessor;
+import org.opendataloader.pdf.processors.PageBookmarkProcessor;
 import org.verapdf.as.ASAtom;
 import org.verapdf.cos.COSDictionary;
 import org.verapdf.cos.COSObjType;
@@ -62,14 +65,15 @@ import java.io.File;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -99,10 +103,18 @@ public class JsonWriter {
         writeToJson(inputPDF, outputFolder, contents, elementMetadata, hybridInfo, false);
     }
 
-    public static void writeToJCustomJson(String inputPdfName, String outputFolder, List<List<IObject>> contents,
-                                   Map<Long, ElementMetadata> elementMetadata,
-                                   Map<String, Object> hybridInfo,
-                                   boolean includeHeaderFooter) throws IOException {
+    public static void writeToCustomJson(String inputPdfName, String outputFolder, List<List<IObject>> contents,
+                                         Map<Long, ElementMetadata> elementMetadata,
+                                         Map<String, Object> hybridInfo,
+                                         boolean includeHeaderFooter) throws IOException {
+        writeToCustomJson(inputPdfName, outputFolder, contents, elementMetadata, hybridInfo, includeHeaderFooter, null);
+    }
+
+    public static void writeToCustomJson(String inputPdfName, String outputFolder, List<List<IObject>> contents,
+                                         Map<Long, ElementMetadata> elementMetadata,
+                                         Map<String, Object> hybridInfo,
+                                         boolean includeHeaderFooter,
+                                         Config config) throws IOException {
         StaticLayoutContainers.resetImageIndex();
         File inputPDF = new File(inputPdfName);
         String jsonFileName = outputFolder + File.separator + inputPDF.getName().substring(0, inputPDF.getName().length() - 3) + "json";
@@ -111,29 +123,6 @@ public class JsonWriter {
             jsonGenerator.writeStringField("url", inputPdfName);
             jsonGenerator.writeArrayFieldStart("bookmarks");
             for (Bookmark bookmark : BookmarkUtils.getSelfBookmarks(inputPdfName)) {
-                jsonGenerator.writePOJO(bookmark);
-            }
-            jsonGenerator.writeEndArray();
-
-            jsonGenerator.writeArrayFieldStart("catalog_bookmarks");
-            for (Bookmark bookmark : StaticLayoutContainers.getCatalogBookmarks()) {
-                jsonGenerator.writePOJO(bookmark);
-            }
-            jsonGenerator.writeEndArray();
-
-            // When CatalogBookmarkProcessor detected a table-of-contents page
-            // range, record it as 1-indexed page numbers so consumers can identify
-            // which pages were consumed by the catalog and exclude them when
-            // walking the page stream. Skipped when no catalog was detected.
-            int catalogStartPage = StaticLayoutContainers.getCatalogBookmarkStartPage();
-            int catalogEndPage = StaticLayoutContainers.getCatalogBookmarkEndPage();
-            if (catalogStartPage >= 0 && catalogEndPage >= catalogStartPage) {
-                jsonGenerator.writeNumberField("catalog_page_range_start", catalogStartPage + 1);
-                jsonGenerator.writeNumberField("catalog_page_range_end", catalogEndPage + 1);
-            }
-
-            jsonGenerator.writeArrayFieldStart("page_bookmarks");
-            for (Bookmark bookmark : StaticLayoutContainers.getPageBookmarks()) {
                 jsonGenerator.writePOJO(bookmark);
             }
             jsonGenerator.writeEndArray();
@@ -190,6 +179,7 @@ public class JsonWriter {
                                 column.getBlocks().forEach(block -> {
                                     Map<String, Object> paragraphMap = new HashMap<>();
                                     paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                                    paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_HEADING);
                                     paragraphMap.put(JsonName.ID, finalTextId);
                                     paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, block.getFontSize());
                                     paragraphMap.put(JsonName.X0, block.getLeftX());
@@ -239,6 +229,7 @@ public class JsonWriter {
                             pdfList.getListItems().forEach(listItem -> {
                                 Map<String, Object> paragraphMap = new HashMap<>();
                                 paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                                paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_LIST);
                                 paragraphMap.put(JsonName.ID, finalTextId);
                                 paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, listItem.getFontSize());
                                 paragraphMap.put(JsonName.X0, listItem.getLeftX());
@@ -288,6 +279,7 @@ public class JsonWriter {
                                 column.getBlocks().forEach(block -> {
                                     Map<String, Object> paragraphMap = new HashMap<>();
                                     paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                                    paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_CAPTION);
                                     paragraphMap.put(JsonName.ID, finalTextId);
                                     paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, block.getFontSize());
                                     paragraphMap.put(JsonName.X0, block.getLeftX());
@@ -340,6 +332,7 @@ public class JsonWriter {
                                     semanticTOCI.getLines().forEach(line -> {
                                         Map<String, Object> paragraphMap = new HashMap<>();
                                         paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                                        paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_TOC);
                                         paragraphMap.put(JsonName.ID, finalTextId);
                                         paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, line.getFontSize());
                                         paragraphMap.put(JsonName.X0, line.getLeftX());
@@ -397,6 +390,7 @@ public class JsonWriter {
                             paragraphContentList.add(textLineMap);
                             paragraphMap.put(JsonName.CONTENT, paragraphContentList);
                             paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                            paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_TEXT_CHUNK);
                             paragraphMap.put(JsonName.ID, finalTextId);
                             paragraphMap.put(JsonName.IS_BOOKMARK, false);
                             paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, textChunk.getFontSize());
@@ -440,6 +434,7 @@ public class JsonWriter {
                             });
                             paragraphMap.put(JsonName.CONTENT, paragraphContentList);
                             paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                            paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_PARAGRAPH);
                             paragraphMap.put(JsonName.ID, finalTextId);
                             paragraphMap.put(JsonName.IS_BOOKMARK, false);
                             paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, customSemanticParagraph.getFontSize());
@@ -456,6 +451,7 @@ public class JsonWriter {
                             ImageChunk imageChunk = (ImageChunk) content;
                             Map<String, Object> imageMap = new HashMap<>();
                             imageMap.put(JsonName.ITEM_TYPE, "image");
+                            imageMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_IMAGE);
                             imageMap.put(JsonName.WIDTH, imageChunk.getWidth());
                             imageMap.put(JsonName.HEIGHT, imageChunk.getHeight());
                             imageMap.put(JsonName.FONT_UNDERLINE_SIZE, imageChunk.getHeight());
@@ -476,6 +472,7 @@ public class JsonWriter {
                             if ("stream_table".equals(pageItem.getItemType())) {
                                 Map<String, Object> tableMap = new HashMap<>();
                                 tableMap.put(JsonName.ITEM_TYPE, "stream_table");
+                                tableMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_STREAM_TABLE);
                                 tableMap.put(JsonName.ID, finalTextId);
                                 tableMap.put(JsonName.WIDTH, pageItem.getWidth());
                                 tableMap.put(JsonName.HEIGHT, pageItem.getHeight());
@@ -512,6 +509,7 @@ public class JsonWriter {
                             TableBorder tableBorder = (TableBorder) content;
                             Map<String, Object> tableMap = new HashMap<>();
                             tableMap.put(JsonName.ITEM_TYPE, "lattice_table");
+                            tableMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_LATTICE_TABLE);
                             tableMap.put(JsonName.ID, finalTextId);
                             tableMap.put(JsonName.WIDTH, tableBorder.getWidth());
                             tableMap.put(JsonName.HEIGHT, tableBorder.getHeight());
@@ -662,11 +660,43 @@ public class JsonWriter {
             new File(jsonFileName),
             new TypeReference<Map<String, Object>>() {}
         );
+
+        // 在已生成的 JSON 数据上识别 catalog_bookmarks 与 page_bookmarks，
+        // page_bookmarks 的 relatedId 直接复用 JSON item 的 id。
+        map.putIfAbsent("catalog_bookmarks", new ArrayList<>());
+        map.putIfAbsent("page_bookmarks", new ArrayList<>());
+        if (config != null) {
+            List<Map<String, Object>> data = (List<Map<String, Object>>) map.get(JsonName.DATA);
+            if (data != null) {
+                CatalogBookmarkProcessor.CatalogResult catalogResult =
+                    CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, config);
+                List<Bookmark> catalogBookmarks = catalogResult.getBookmarks();
+                int catalogStartPage = catalogResult.getStartPage();
+                int catalogEndPage = catalogResult.getEndPage();
+
+                List<Bookmark> pageBookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(
+                    data, catalogStartPage, catalogEndPage);
+
+                map.put("catalog_bookmarks", catalogBookmarks);
+                map.put("page_bookmarks", pageBookmarks);
+                if (catalogStartPage >= 0 && catalogEndPage >= catalogStartPage) {
+                    map.put("catalog_page_range_start", catalogStartPage + 1);
+                    map.put("catalog_page_range_end", catalogEndPage + 1);
+                }
+
+                writeCollectedPageBookmarkMarkdown(outputFolder, inputPdfName, data,
+                    catalogStartPage, catalogEndPage);
+
+                // 把更新后的内容重新写回 json 文件
+                mapper.writerWithDefaultPrettyPrinter().writeValue(new File(jsonFileName), map);
+            }
+        }
+
         FileUtils.copyResourceToDir("templates/index.css", outputFolder);
         String jsFileName = outputFolder + File.separator + inputPDF.getName().substring(0, inputPDF.getName().length() - 3) + "js";
         String jsFileContent = "var url = " + mapper.writeValueAsString(inputPdfName) + ";";
         jsFileContent += "\n\n";
-        jsFileContent += "var bookmarks = " + mapper.writeValueAsString(map.get("page_bookmarks")) + ";";
+        jsFileContent += "var bookmarks = " + mapper.writeValueAsString(map.get("catalog_bookmarks")) + ";";
         jsFileContent += "\n\n";
         jsFileContent += "var data = " + mapper.writeValueAsString(map.get(JsonName.DATA)) + ";";
         FileUtils.writeToFile(jsFileName, jsFileContent);
@@ -678,6 +708,111 @@ public class JsonWriter {
         htmlLines.set(6, "  <title>" + pdfFileName + "</title>");
         htmlLines.set(11, "  <script type=\"text/javascript\" src= \"" + pdfFileName + ".js\"></script>");
         FileUtils.writeToFile(htmlFileName, String.join("\n", htmlLines));
+    }
+
+    /**
+     * 从 JSON data 中收集 page bookmark 候选并写出调试 markdown。
+     */
+    private static void writeCollectedPageBookmarkMarkdown(String outputFolder, String inputPdfName,
+                                                           List<Map<String, Object>> data,
+                                                           int catalogStartPage, int catalogEndPage) {
+        Path outputFolderPath = Path.of(outputFolder);
+        String inputName = Path.of(inputPdfName).getFileName().toString();
+        String stem = inputName.toLowerCase(Locale.ROOT).endsWith(".pdf")
+            ? inputName.substring(0, inputName.length() - 4) : inputName;
+        Path output = outputFolderPath.resolve(stem + "_page_bookmarks_collected.md");
+        StringBuilder markdown = new StringBuilder("# 收集到的页面目录候选（JSON items）\n\n");
+        markdown.append("| 所在页码 | 目录内容 |\n|---:|---|\n");
+        int count = 0;
+        for (int pageIndex = 0; pageIndex < data.size(); pageIndex++) {
+            if (catalogStartPage >= 0 && catalogEndPage >= catalogStartPage
+                    && pageIndex >= catalogStartPage && pageIndex <= catalogEndPage) {
+                continue;
+            }
+            Map<String, Object> page = data.get(pageIndex);
+            List<Map<String, Object>> items = (List<Map<String, Object>>) page.get(JsonName.ITEMS);
+            if (items == null) {
+                continue;
+            }
+            for (Map<String, Object> item : items) {
+                if (!isParagraphOrHeadingItem(item)) {
+                    continue;
+                }
+                String firstLine = getItemFirstLineText(item);
+                if (firstLine == null || !PageBookmarkProcessor.isBookmarkCandidate(firstLine)) {
+                    continue;
+                }
+                String fullText = getItemFullText(item);
+                if (fullText.isEmpty()) {
+                    continue;
+                }
+                markdown.append('|').append(pageIndex + 1).append('|')
+                    .append(fullText.replace("|", "\\|")).append('|').append('\n');
+                count++;
+            }
+        }
+        markdown.insert(0, "<!-- entries: " + count + " -->\n");
+        try {
+            Files.createDirectories(outputFolderPath);
+            Files.writeString(output, markdown.toString(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            LOGGER.log(Level.WARNING, "[JsonWriter] unable to write collected page bookmark markdown: " + output, e);
+        }
+    }
+
+    private static boolean isParagraphOrHeadingItem(Map<String, Object> item) {
+        String sourceType = (String) item.get(JsonName.SOURCE_TYPE);
+        return JsonName.SOURCE_TYPE_PARAGRAPH.equals(sourceType)
+            || JsonName.SOURCE_TYPE_HEADING.equals(sourceType);
+    }
+
+    /**
+     * 取 JSON item 的第一行文本（用于模式匹配）。
+     */
+    private static String getItemFirstLineText(Map<String, Object> item) {
+        Object contentObj = item.get(JsonName.CONTENT);
+        if (!(contentObj instanceof List) || ((List<?>) contentObj).isEmpty()) {
+            return null;
+        }
+        List<?> contentList = (List<?>) contentObj;
+        Object first = contentList.get(0);
+        if (first instanceof Map) {
+            Object textListObj = ((Map<?, ?>) first).get(JsonName.CONTENT);
+            if (textListObj instanceof List && !((List<?>) textListObj).isEmpty()) {
+                return ((List<?>) textListObj).get(0).toString();
+            }
+        }
+        return first.toString();
+    }
+
+    /**
+     * 取 JSON item 的完整文本。
+     */
+    private static String getItemFullText(Map<String, Object> item) {
+        Object contentObj = item.get(JsonName.CONTENT);
+        if (!(contentObj instanceof List)) {
+            return "";
+        }
+        StringBuilder text = new StringBuilder();
+        for (Object lineObj : (List<?>) contentObj) {
+            if (lineObj instanceof Map) {
+                Object textListObj = ((Map<?, ?>) lineObj).get(JsonName.CONTENT);
+                if (textListObj instanceof List) {
+                    for (Object t : (List<?>) textListObj) {
+                        if (text.length() > 0) {
+                            text.append(' ');
+                        }
+                        text.append(t);
+                    }
+                }
+            } else {
+                if (text.length() > 0) {
+                    text.append(' ');
+                }
+                text.append(lineObj);
+            }
+        }
+        return text.toString().trim();
     }
 
     public static void writeToJson(File inputPDF, String outputFolder, List<List<IObject>> contents,
