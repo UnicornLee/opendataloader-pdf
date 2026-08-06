@@ -362,6 +362,77 @@ public class PageBookmarkProcessorTest {
     }
 
     @Test
+    public void testLocalTemplateConsistency() {
+        // Verifies the local-consistency rule: all bookmarks under the same
+        // parent share the same template, while sibling parents may use
+        // different child templates depending on what is extracted between
+        // consecutive parents.
+        List<List<IObject>> contents = singlePage(
+                createParagraph("第1章 绪论", 0, 50, 700, 690, 20),
+                createParagraph("一、概述", 0, 60, 680, 670, 16),
+                createParagraph("二、背景", 0, 60, 660, 650, 16),
+                createParagraph("第2章 正文", 0, 50, 640, 630, 20),
+                createParagraph("（一）方法", 0, 60, 620, 610, 16),
+                createParagraph("1、步骤一", 0, 70, 600, 590, 14),
+                createParagraph("2、步骤二", 0, 70, 580, 570, 14),
+                createParagraph("（二）结果", 0, 60, 560, 550, 16),
+                createParagraph("（1）结果1", 0, 70, 540, 530, 14),
+                createParagraph("（2）结果2", 0, 70, 520, 510, 14));
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(2, bookmarks.size(), "All top-level bookmarks must share the same template");
+        Assertions.assertEquals("第1章 绪论", bookmarks.get(0).getText());
+        Assertions.assertEquals("第2章 正文", bookmarks.get(1).getText());
+
+        Bookmark chapter1 = bookmarks.get(0);
+        Assertions.assertEquals(2, chapter1.getChildren().size());
+        Assertions.assertEquals("一、概述", chapter1.getChildren().get(0).getText());
+        Assertions.assertEquals("二、背景", chapter1.getChildren().get(1).getText());
+        Assertions.assertTrue(chapter1.getChildren().get(0).getChildren().isEmpty());
+        Assertions.assertTrue(chapter1.getChildren().get(1).getChildren().isEmpty());
+
+        Bookmark chapter2 = bookmarks.get(1);
+        Assertions.assertEquals(2, chapter2.getChildren().size());
+        Assertions.assertEquals("（一）方法", chapter2.getChildren().get(0).getText());
+        Assertions.assertEquals("（二）结果", chapter2.getChildren().get(1).getText());
+
+        Bookmark method = chapter2.getChildren().get(0);
+        Assertions.assertEquals(2, method.getChildren().size());
+        Assertions.assertEquals("1、步骤一", method.getChildren().get(0).getText());
+        Assertions.assertEquals("2、步骤二", method.getChildren().get(1).getText());
+
+        Bookmark result = chapter2.getChildren().get(1);
+        Assertions.assertEquals(2, result.getChildren().size());
+        Assertions.assertEquals("（1）结果1", result.getChildren().get(0).getText());
+        Assertions.assertEquals("（2）结果2", result.getChildren().get(1).getText());
+    }
+
+    @Test
+    public void testTopLevelSelectsSingleTemplate() {
+        // When multiple templates could serve as top-level markers, only one
+        // is selected; the other template becomes a child of its preceding
+        // top-level parent.
+        List<List<IObject>> contents = singlePage(
+                createParagraph("第1章 A", 0, 50, 700, 690, 20),
+                createParagraph("一、B", 0, 60, 680, 670, 18),
+                createParagraph("第2章 C", 0, 50, 660, 650, 20),
+                createParagraph("二、D", 0, 60, 640, 630, 18),
+                createParagraph("第3章 E", 0, 50, 620, 610, 20));
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(3, bookmarks.size(), "Only chapter-style headings should be top-level");
+        Assertions.assertEquals("第1章 A", bookmarks.get(0).getText());
+        Assertions.assertEquals("第2章 C", bookmarks.get(1).getText());
+        Assertions.assertEquals("第3章 E", bookmarks.get(2).getText());
+
+        Assertions.assertEquals(1, bookmarks.get(0).getChildren().size());
+        Assertions.assertEquals("一、B", bookmarks.get(0).getChildren().get(0).getText());
+        Assertions.assertEquals(1, bookmarks.get(1).getChildren().size());
+        Assertions.assertEquals("二、D", bookmarks.get(1).getChildren().get(0).getText());
+        Assertions.assertTrue(bookmarks.get(2).getChildren().isEmpty());
+    }
+
+    @Test
     public void testEmptyContents() {
         List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(null);
         Assertions.assertTrue(bookmarks.isEmpty());
