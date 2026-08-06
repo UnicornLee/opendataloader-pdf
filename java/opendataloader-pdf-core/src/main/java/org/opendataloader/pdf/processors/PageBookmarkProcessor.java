@@ -422,65 +422,123 @@ public class PageBookmarkProcessor {
     }
 
     /**
-     * Cleans a list of candidates of the same template within a parent range.
-     * Duplicates are resolved by keeping the latest occurrence, and the longest
-     * consecutive run of values is retained. Unlike {@link #cleanCandidates},
-     * the run may start at any value, allowing headings to continue their
-     * numbering across parent sections.
+     * Cleans a list of candidates of the same template within a parent range
+     * by grouping them into maximal runs of consecutive values, chaining runs
+     * whose value ranges abut (previous.max + 1 == next.min), and selecting
+     * the chain whose value range is the widest. On ties, the chain whose
+     * first candidate is on the earliest page wins (closest to the parent).
+     *
+     * <p>Unlike {@link #cleanCandidates}, the run may start at any value,
+     * allowing headings to continue their numbering across parent sections.</p>
      */
     private static List<Candidate> cleanCandidatesLocal(List<Candidate> candidates) {
         if (candidates.isEmpty()) {
             return Collections.emptyList();
         }
 
-        // Resolve duplicates by keeping the latest occurrence per value.
-        List<Candidate> byLatestPage = new ArrayList<>(candidates);
-        byLatestPage.sort(Comparator
+        // Step 1: Sort candidates by reading order.
+        List<Candidate> sorted = new ArrayList<>(candidates);
+        sorted.sort(Comparator
             .comparingInt((Candidate c) -> c.pageIndex)
-            .reversed()
-            .thenComparing((Candidate c) -> c.topY));
-        Set<Integer> used = new HashSet<>();
-        Map<Integer, Candidate> latestByValue = new LinkedHashMap<>();
-        for (Candidate c : byLatestPage) {
-            if (used.add(c.value)) {
-                latestByValue.put(c.value, c);
+            .thenComparing((Candidate c) -> -c.topY));
+
+        // Step 2: Group into consecutive runs. Each run is a maximal sequence
+        // where every candidate's value is +1 from the previous one. A new run
+        // starts when the next value is not consecutive to the current run's
+        // last value. This preserves the "set" structure: two disjoint sets of
+        // values stay in separate runs even if their values overlap, so the
+        // selector below can distinguish them instead of blindly merging.
+        List<List<Candidate>> groups = new ArrayList<>();
+        List<Candidate> currentGroup = new ArrayList<>();
+        int previousValue = 0;
+        boolean currentGroupInitialized = false;
+        for (Candidate c : sorted) {
+            if (currentGroupInitialized && c.value != previousValue + 1) {
+                groups.add(currentGroup);
+                currentGroup = new ArrayList<>();
             }
+            currentGroup.add(c);
+            previousValue = c.value;
+            currentGroupInitialized = true;
+        }
+        if (!currentGroup.isEmpty()) {
+            groups.add(currentGroup);
         }
 
-        if (latestByValue.isEmpty()) {
+        if (groups.isEmpty()) {
             return Collections.emptyList();
         }
 
-        // Find the longest run of consecutive integer values.
-        List<Integer> sortedValues = new ArrayList<>(latestByValue.keySet());
-        Collections.sort(sortedValues);
-        int bestStart = 0;
-        int bestLength = 1;
-        int currentStart = 0;
-        int currentLength = 1;
-        for (int i = 1; i < sortedValues.size(); i++) {
-            if (sortedValues.get(i) == sortedValues.get(i - 1) + 1) {
-                currentLength++;
+        // Step 3: Sort groups by start value; ties broken by reading order of
+        // the first candidate so groups closer to the parent rank first.
+        groups.sort((a, b) -> {
+            int cmp = Integer.compare(a.get(0).value, b.get(0).value);
+            if (cmp != 0) return cmp;
+            return Integer.compare(a.get(0).pageIndex, b.get(0).pageIndex);
+        });
+
+        // Step 4: Build chains. A group extends the previous chain when its
+        // first value is exactly previous_chain.last + 1. This handles the case
+        // where a stray value sits between two value-contiguous runs in
+        // reading order: the contiguous runs still merge into one chain while
+        // the stray forms its own chain (or stays separate).
+        List<List<List<Candidate>>> chains = new ArrayList<>();
+        List<List<Candidate>> currentChain = null;
+        int currentChainMax = 0;
+        boolean currentChainInitialized = false;
+        for (List<Candidate> group : groups) {
+            int groupMin = group.get(0).value;
+            int groupMax = group.get(group.size() - 1).value;
+            if (currentChainInitialized && currentChainMax + 1 == groupMin) {
+                currentChain.add(group);
+                currentChainMax = groupMax;
             } else {
-                if (currentLength > bestLength) {
-                    bestLength = currentLength;
-                    bestStart = currentStart;
-                }
-                currentStart = i;
-                currentLength = 1;
+                currentChain = new ArrayList<>();
+                currentChain.add(group);
+                currentChainMax = groupMax;
+                currentChainInitialized = true;
+                chains.add(currentChain);
             }
         }
-        if (currentLength > bestLength) {
-            bestLength = currentLength;
-            bestStart = currentStart;
+
+        // Step 5: Pick the chain with the widest value range. Tie-break by the
+        // earliest start page of the chain's first candidate (closest to the
+        // parent's start page).
+        List<List<Candidate>> bestChain = null;
+        int bestLength = -1;
+        int bestStartPage = Integer.MAX_VALUE;
+        for (List<List<Candidate>> chain : chains) {
+            int chainMin = chain.get(0).get(0).value;
+            Candidate lastGroupLast = chain.get(chain.size() - 1)
+                .get(chain.get(chain.size() - 1).size() - 1);
+            int chainMax = lastGroupLast.value;
+            int length = chainMax - chainMin + 1;
+            int startPage = Integer.MAX_VALUE;
+            for (List<Candidate> group : chain) {
+                for (Candidate c : group) {
+                    if (c.pageIndex < startPage) startPage = c.pageIndex;
+                }
+            }
+            if (length > bestLength
+                || (length == bestLength && startPage < bestStartPage)) {
+                bestLength = length;
+                bestStartPage = startPage;
+                bestChain = chain;
+            }
         }
 
-        List<Candidate> trimmed = new ArrayList<>();
-        for (int i = bestStart; i < bestStart + bestLength; i++) {
-            trimmed.add(latestByValue.get(sortedValues.get(i)));
+        if (bestChain == null) {
+            return Collections.emptyList();
         }
-        trimmed.sort(Comparator.comparingInt((Candidate c) -> c.value));
-        return trimmed;
+
+        // Step 6: Concatenate candidates from the chosen chain and sort by
+        // value so callers receive a value-ordered list.
+        List<Candidate> result = new ArrayList<>();
+        for (List<Candidate> group : bestChain) {
+            result.addAll(group);
+        }
+        result.sort(Comparator.comparingInt((Candidate c) -> c.value));
+        return result;
     }
 
     private static List<Candidate> collectCandidates(List<List<IObject>> contents) {
