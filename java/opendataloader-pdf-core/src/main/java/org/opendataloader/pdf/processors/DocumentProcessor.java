@@ -505,6 +505,7 @@ public class DocumentProcessor {
                 List<List<IObject>> groupedShapeChunks = ShapeRecognizer.groupShapes(shapeChunks);
                 if (groupedShapeChunks != null && !groupedShapeChunks.isEmpty()) {
                     processBarChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
+                    FlowchartProcessor.processFlowchartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
                 }
                 processLineArtGroups(pageContents, pageNumber, imagesUtils, paddleUrl);
             }
