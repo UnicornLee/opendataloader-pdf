@@ -19,6 +19,7 @@ import org.opendataloader.pdf.api.Config;
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.custom.entities.Bookmark;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
+import org.opendataloader.pdf.json.JsonName;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.content.TextLine;
 import org.verapdf.wcag.algorithms.semanticalgorithms.containers.StaticContainers;
@@ -59,6 +60,33 @@ import java.nio.file.Path;
  * </ol>
  */
 public class CatalogBookmarkProcessor {
+
+    /**
+     * Result of catalog bookmark extraction, including the detected page range.
+     */
+    public static final class CatalogResult {
+        private final List<Bookmark> bookmarks;
+        private final int startPage;
+        private final int endPage;
+
+        public CatalogResult(List<Bookmark> bookmarks, int startPage, int endPage) {
+            this.bookmarks = bookmarks != null ? bookmarks : Collections.emptyList();
+            this.startPage = startPage;
+            this.endPage = endPage;
+        }
+
+        public List<Bookmark> getBookmarks() {
+            return bookmarks;
+        }
+
+        public int getStartPage() {
+            return startPage;
+        }
+
+        public int getEndPage() {
+            return endPage;
+        }
+    }
 
     private static final Logger LOGGER = Logger.getLogger(CatalogBookmarkProcessor.class.getCanonicalName());
 
@@ -109,6 +137,48 @@ public class CatalogBookmarkProcessor {
                 new Object[]{total, roots.size(), bestRange.startPage + 1, bestRange.endPage + 1});
 
         return roots;
+    }
+
+    /**
+     * Detects the catalog/TOC page range and extracts bookmarks from the JSON data
+     * produced by {@link org.opendataloader.pdf.json.JsonWriter}.
+     *
+     * @param data per-page JSON data array
+     * @param config processing configuration; thresholds are read from it
+     * @return catalog extraction result with bookmarks and detected page range
+     */
+    public static CatalogResult extractCatalogBookmarksFromJson(List<Map<String, Object>> data, Config config) {
+        if (data == null || data.isEmpty()) {
+            return new CatalogResult(Collections.emptyList(), -1, -1);
+        }
+
+        Set<String> pageLabels = collectPageLabels();
+
+        int minTocLines = config != null ? config.getCatalogBookmarkMinTocLines() : 3;
+        double minTocRatio = config != null ? config.getCatalogBookmarkMinTocRatio() : 0.4;
+
+        List<JsonPageTocInfo> pageInfos = analyzeJsonPages(data, pageLabels, minTocLines, minTocRatio);
+        List<JsonPageRange> ranges = detectJsonRanges(pageInfos);
+        JsonPageRange bestRange = selectBestJsonRange(ranges);
+
+        if (bestRange == null) {
+            LOGGER.log(Level.INFO, "[CatalogBookmark] no catalog page range detected from JSON");
+            return new CatalogResult(Collections.emptyList(), -1, -1);
+        }
+
+        LOGGER.log(Level.INFO,
+                "[CatalogBookmark] detected catalog page range from JSON: {0}-{1} ({2} pages, {3} toc items)",
+                new Object[]{bestRange.startPage + 1, bestRange.endPage + 1,
+                        bestRange.pageCount(), bestRange.totalTocLines});
+
+        List<Bookmark> roots = extractBookmarksFromJson(data, bestRange, pageLabels);
+        resolveCatalogBookmarkTargets(roots, data, bestRange.startPage, bestRange.endPage);
+        int total = countAllBookmarks(roots);
+        LOGGER.log(Level.INFO,
+                "[CatalogBookmark] extracted {0} bookmarks ({1} top-level) from JSON range {2}-{3}",
+                new Object[]{total, roots.size(), bestRange.startPage + 1, bestRange.endPage + 1});
+
+        return new CatalogResult(roots, bestRange.startPage, bestRange.endPage);
     }
 
     /**
@@ -316,6 +386,18 @@ public class CatalogBookmarkProcessor {
                 pendingTitle.setLength(0);
                 pendingLine = null;
 
+                if (isCatalogSelfReference(title)) {
+                    Bookmark bookmark = new Bookmark();
+                    bookmark.setText(title);
+                    bookmark.setOriginalPageNum(parseOriginalPageNum(info.rawPage));
+                    bookmark.setPageNum(range.startPage + 1);
+                    bookmark.setFontSize((float) info.line.getFontSize());
+                    bookmark.setSingleLine(true);
+                    bookmark.setChildren(new ArrayList<>());
+                    candidates.add(new Candidate(bookmark, info.line.getLeftX(), info.line.getTopY(), info.pageIndex));
+                    continue;
+                }
+
                 if (isTocHeading(title)) {
                     continue;
                 }
@@ -400,8 +482,16 @@ public class CatalogBookmarkProcessor {
      */
     private static boolean isTocHeading(String title) {
         String compact = title.replaceAll("\\s+", "");
-        return "目录".equals(compact) || "目錄".equals(compact) || "Contents".equalsIgnoreCase(compact)
-                || "TableofContents".equalsIgnoreCase(compact);
+        return "Contents".equalsIgnoreCase(compact) || "TableofContents".equalsIgnoreCase(compact);
+    }
+
+    /**
+     * Returns true for headings that refer to the catalog itself (e.g. "目录").
+     * These are kept as bookmarks but point to the catalog page range start.
+     */
+    private static boolean isCatalogSelfReference(String title) {
+        String compact = title.replaceAll("\\s+", "");
+        return "目录".equals(compact) || "目錄".equals(compact);
     }
 
     /**
@@ -567,6 +657,421 @@ public class CatalogBookmarkProcessor {
         return count;
     }
 
+    // ---------- JSON-based catalog bookmark extraction ----------
+
+    private static List<JsonPageTocInfo> analyzeJsonPages(List<Map<String, Object>> data,
+                                                          Set<String> pageLabels,
+                                                          int minTocLines, double minTocRatio) {
+        List<JsonPageTocInfo> infos = new ArrayList<>(data.size());
+        for (int pageIndex = 0; pageIndex < data.size(); pageIndex++) {
+            Map<String, Object> page = data.get(pageIndex);
+            JsonPageTocInfo info = new JsonPageTocInfo(pageIndex, minTocLines, minTocRatio);
+            List<Map<String, Object>> items = (List<Map<String, Object>>) page.get(JsonName.ITEMS);
+            if (items == null) {
+                infos.add(info);
+                continue;
+            }
+            for (Map<String, Object> item : items) {
+                if (!isTextItem(item)) {
+                    continue;
+                }
+                for (JsonTextLine line : getJsonItemLines(item)) {
+                    if (line.text.isEmpty()) {
+                        continue;
+                    }
+                    info.totalLines++;
+                    if (matchTocLine(line.text, pageLabels) != null) {
+                        info.tocLineCount++;
+                    }
+                }
+            }
+            infos.add(info);
+        }
+        return infos;
+    }
+
+    private static boolean isTextItem(Map<String, Object> item) {
+        String itemType = (String) item.get(JsonName.ITEM_TYPE);
+        return "text".equals(itemType);
+    }
+
+    private static List<JsonPageRange> detectJsonRanges(List<JsonPageTocInfo> pageInfos) {
+        List<JsonPageRange> ranges = new ArrayList<>();
+        JsonPageRange current = null;
+        for (JsonPageTocInfo info : pageInfos) {
+            if (info.isTocPage()) {
+                if (current == null) {
+                    current = new JsonPageRange(info.pageIndex, info.tocLineCount);
+                } else if (info.pageIndex == current.endPage + 1) {
+                    current.endPage = info.pageIndex;
+                    current.totalTocLines += info.tocLineCount;
+                } else {
+                    ranges.add(current);
+                    current = new JsonPageRange(info.pageIndex, info.tocLineCount);
+                }
+            }
+        }
+        if (current != null) {
+            ranges.add(current);
+        }
+        return ranges;
+    }
+
+    private static JsonPageRange selectBestJsonRange(List<JsonPageRange> ranges) {
+        if (ranges.isEmpty()) {
+            return null;
+        }
+        JsonPageRange best = ranges.get(0);
+        double bestScore = best.score();
+        for (int i = 1; i < ranges.size(); i++) {
+            JsonPageRange candidate = ranges.get(i);
+            double candidateScore = candidate.score();
+            if (candidateScore > bestScore) {
+                best = candidate;
+                bestScore = candidateScore;
+            }
+        }
+        return best;
+    }
+
+    private static List<Bookmark> extractBookmarksFromJson(List<Map<String, Object>> data,
+                                                           JsonPageRange range,
+                                                           Set<String> pageLabels) {
+        List<JsonLineInfo> allLines = collectJsonLines(data, range, pageLabels);
+        if (allLines.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        allLines.sort(Comparator
+            .comparingInt((JsonLineInfo l) -> l.pageIndex)
+            .thenComparing((JsonLineInfo l) -> -l.topY));
+
+        List<Candidate> candidates = new ArrayList<>();
+        StringBuilder pendingTitle = new StringBuilder();
+        JsonLineInfo pendingLine = null;
+
+        for (JsonLineInfo info : allLines) {
+            if (info.isToc) {
+                String title = info.title;
+                if (pendingTitle.length() > 0 && pendingLine != null
+                        && isJsonContinuation(pendingLine, info)) {
+                    title = pendingTitle.toString() + title;
+                }
+                pendingTitle.setLength(0);
+                pendingLine = null;
+
+                if (isCatalogSelfReference(title)) {
+                    Bookmark bookmark = new Bookmark();
+                    bookmark.setText(title);
+                    bookmark.setOriginalPageNum(parseOriginalPageNum(info.rawPage));
+                    bookmark.setPageNum(range.startPage + 1);
+                    bookmark.setFontSize((float) info.fontSize);
+                    bookmark.setSingleLine(true);
+                    bookmark.setRelatedId(info.relatedId);
+                    bookmark.setChildren(new ArrayList<>());
+                    candidates.add(new Candidate(bookmark, info.leftX, info.topY, info.pageIndex, info.relatedId));
+                    continue;
+                }
+
+                if (isTocHeading(title)) {
+                    continue;
+                }
+
+                Bookmark bookmark = new Bookmark();
+                bookmark.setText(title);
+                bookmark.setOriginalPageNum(parseOriginalPageNum(info.rawPage));
+                bookmark.setPageNum(resolvePageIndex(info.rawPage, pageLabels) + 1);
+                bookmark.setFontSize((float) info.fontSize);
+                bookmark.setSingleLine(true);
+                bookmark.setRelatedId(info.relatedId);
+                bookmark.setChildren(new ArrayList<>());
+                candidates.add(new Candidate(bookmark, info.leftX, info.topY, info.pageIndex, info.relatedId));
+            } else {
+                if (pendingTitle.length() == 0) {
+                    pendingTitle.append(info.title);
+                    pendingLine = info;
+                } else {
+                    pendingTitle.append(" ").append(info.title);
+                }
+            }
+        }
+
+        if (candidates.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        assignLevels(candidates);
+        return buildHierarchy(candidates);
+    }
+
+    private static List<JsonLineInfo> collectJsonLines(List<Map<String, Object>> data,
+                                                       JsonPageRange range,
+                                                       Set<String> pageLabels) {
+        List<JsonLineInfo> allLines = new ArrayList<>();
+        for (int pageIndex = range.startPage; pageIndex <= range.endPage; pageIndex++) {
+            Map<String, Object> page = data.get(pageIndex);
+            List<Map<String, Object>> items = (List<Map<String, Object>>) page.get(JsonName.ITEMS);
+            if (items == null) {
+                continue;
+            }
+            for (Map<String, Object> item : items) {
+                if (!isTextItem(item)) {
+                    continue;
+                }
+                for (JsonTextLine line : getJsonItemLines(item)) {
+                    if (line.text.isEmpty()) {
+                        continue;
+                    }
+                    TocMatch match = matchTocLine(line.text, pageLabels);
+                    if (match != null) {
+                        allLines.add(new JsonLineInfo(match.title, match.rawPage, pageIndex, true,
+                            line.leftX, line.topY, line.fontSize, line.relatedId));
+                    } else {
+                        allLines.add(new JsonLineInfo(line.text, null, pageIndex, false,
+                            line.leftX, line.topY, line.fontSize, line.relatedId));
+                    }
+                }
+            }
+        }
+        return allLines;
+    }
+
+    private static boolean isJsonContinuation(JsonLineInfo pending, JsonLineInfo toc) {
+        if (pending.pageIndex != toc.pageIndex) {
+            return false;
+        }
+        double fontSize = toc.fontSize;
+        double leftDelta = Math.abs(pending.leftX - toc.leftX);
+        double fontDelta = Math.abs(pending.fontSize - fontSize);
+        double verticalGap = pending.topY - toc.topY;
+        return leftDelta <= CONTINUATION_LEFT_X_DELTA + fontSize * 0.5
+            && fontDelta <= 0.5
+            && verticalGap >= 0
+            && verticalGap <= CONTINUATION_VERTICAL_GAP + fontSize;
+    }
+
+    private static String getJsonItemFullText(Map<String, Object> item) {
+        Object contentObj = item.get(JsonName.CONTENT);
+        if (!(contentObj instanceof List)) {
+            return "";
+        }
+        StringBuilder text = new StringBuilder();
+        for (Object lineObj : (List<?>) contentObj) {
+            if (lineObj instanceof Map) {
+                Object textListObj = ((Map<?, ?>) lineObj).get(JsonName.CONTENT);
+                if (textListObj instanceof List) {
+                    for (Object t : (List<?>) textListObj) {
+                        if (text.length() > 0) {
+                            text.append(' ');
+                        }
+                        text.append(t);
+                    }
+                }
+            } else {
+                if (text.length() > 0) {
+                    text.append(' ');
+                }
+                text.append(lineObj);
+            }
+        }
+        return text.toString().trim();
+    }
+
+    /**
+     * Returns each text line inside a JSON item as a separate line, preserving
+     * per-line coordinates. This mirrors the old TextLine-based logic so that TOC
+     * entries are not concatenated into one paragraph.
+     */
+    private static List<JsonTextLine> getJsonItemLines(Map<String, Object> item) {
+        List<JsonTextLine> lines = new ArrayList<>();
+        Object contentObj = item.get(JsonName.CONTENT);
+        if (!(contentObj instanceof List)) {
+            return lines;
+        }
+        double itemLeftX = getJsonItemDouble(item, JsonName.X0);
+        // JSON y0 increases downward; negate so the existing descending-topY sort
+        // produces top-to-bottom reading order.
+        double itemTopY = -getJsonItemDouble(item, JsonName.Y0);
+        double itemFontSize = getJsonItemDouble(item, JsonName.FONT_UNDERLINE_SIZE);
+        Object idObj = item.get(JsonName.ID);
+        int relatedId = idObj instanceof Number ? ((Number) idObj).intValue() : 0;
+
+        for (Object lineObj : (List<?>) contentObj) {
+            if (!(lineObj instanceof Map)) {
+                continue;
+            }
+            Map<?, ?> lineMap = (Map<?, ?>) lineObj;
+            Object textListObj = lineMap.get(JsonName.CONTENT);
+            if (!(textListObj instanceof List)) {
+                continue;
+            }
+            StringBuilder lineText = new StringBuilder();
+            for (Object t : (List<?>) textListObj) {
+                if (lineText.length() > 0) {
+                    lineText.append(' ');
+                }
+                lineText.append(t);
+            }
+            String text = lineText.toString().trim();
+            if (text.isEmpty()) {
+                continue;
+            }
+            double leftX = lineMap.containsKey(JsonName.X0)
+                ? getDouble(lineMap, JsonName.X0) : itemLeftX;
+            double topY = lineMap.containsKey(JsonName.Y0)
+                ? -getDouble(lineMap, JsonName.Y0) : itemTopY;
+            double fontSize = lineMap.containsKey(JsonName.FONT_UNDERLINE_SIZE)
+                ? getDouble(lineMap, JsonName.FONT_UNDERLINE_SIZE) : itemFontSize;
+            lines.add(new JsonTextLine(text, leftX, topY, fontSize, relatedId));
+        }
+        return lines;
+    }
+
+    private static double getDouble(Map<?, ?> map, String key) {
+        Object value = map.get(key);
+        if (value instanceof Number) {
+            return ((Number) value).doubleValue();
+        }
+        return 0.0;
+    }
+
+    private static double getJsonItemDouble(Map<String, Object> item, String key) {
+        Object value = item.get(key);
+        if (value instanceof Number) {
+            return ((Number) value).doubleValue();
+        }
+        return 0.0;
+    }
+
+    /**
+     * Resolves each catalog bookmark to its actual destination page and JSON item.
+     *
+     * <p>Catalog entries record the printed page number from the TOC, but the
+     * physical page in the PDF may differ (e.g. cover pages shift the body pages).
+     * This method searches non-catalog pages for the item whose text matches the
+     * bookmark title and is closest to the printed page number. When the title
+     * appears multiple times, the occurrence closest to the printed page is chosen;
+     * if two occurrences are equally close, the earlier page wins.</p>
+     */
+    private static void resolveCatalogBookmarkTargets(List<Bookmark> bookmarks,
+                                                      List<Map<String, Object>> data,
+                                                      int catalogStartPage,
+                                                      int catalogEndPage) {
+        if (bookmarks == null || bookmarks.isEmpty() || data == null || data.isEmpty()) {
+            return;
+        }
+        for (Bookmark bookmark : bookmarks) {
+            resolveCatalogBookmarkTarget(bookmark, data, catalogStartPage, catalogEndPage);
+            List<Bookmark> children = bookmark.getChildren();
+            if (children != null && !children.isEmpty()) {
+                resolveCatalogBookmarkTargets(children, data, catalogStartPage, catalogEndPage);
+            }
+        }
+    }
+
+    private static void resolveCatalogBookmarkTarget(Bookmark bookmark,
+                                                     List<Map<String, Object>> data,
+                                                     int catalogStartPage,
+                                                     int catalogEndPage) {
+        String title = bookmark.getText();
+        Integer catalogHint = bookmark.getOriginalPageNum();
+        if (title == null || title.trim().isEmpty() || catalogHint == null || catalogHint <= 0) {
+            return;
+        }
+
+        if (isCatalogSelfReference(title)) {
+            return;
+        }
+
+        String normalizedTitle = normalizeBookmarkText(title);
+        if (normalizedTitle.isEmpty()) {
+            return;
+        }
+
+        TargetMatch bestMatch = null;
+        for (int pageIndex = 0; pageIndex < data.size(); pageIndex++) {
+            if (catalogStartPage >= 0 && catalogEndPage >= catalogStartPage
+                    && pageIndex >= catalogStartPage && pageIndex <= catalogEndPage) {
+                continue;
+            }
+            Map<String, Object> page = data.get(pageIndex);
+            List<Map<String, Object>> items = (List<Map<String, Object>>) page.get(JsonName.ITEMS);
+            if (items == null) {
+                continue;
+            }
+            for (Map<String, Object> item : items) {
+                if (!isTextItem(item)) {
+                    continue;
+                }
+                String sourceType = (String) item.get(JsonName.SOURCE_TYPE);
+                if (!JsonName.SOURCE_TYPE_HEADING.equals(sourceType)
+                        && !JsonName.SOURCE_TYPE_PARAGRAPH.equals(sourceType)) {
+                    continue;
+                }
+                String itemText = getJsonItemFullText(item);
+                MatchQuality quality = matchBookmarkTitle(normalizedTitle, itemText);
+                if (quality == null) {
+                    continue;
+                }
+                int physicalPage = pageIndex + 1;
+                int distance = Math.abs(physicalPage - catalogHint);
+                if (bestMatch == null
+                        || distance < bestMatch.distance
+                        || (distance == bestMatch.distance && pageIndex < bestMatch.pageIndex)
+                        || (distance == bestMatch.distance && pageIndex == bestMatch.pageIndex
+                                && quality.ordinal() < bestMatch.quality.ordinal())) {
+                    Object idObj = item.get(JsonName.ID);
+                    int relatedId = idObj instanceof Number ? ((Number) idObj).intValue() : 0;
+                    bestMatch = new TargetMatch(pageIndex, relatedId, distance, quality);
+                }
+            }
+        }
+
+        if (bestMatch != null) {
+            bookmark.setPageNum(bestMatch.pageIndex + 1);
+            bookmark.setRelatedId(bestMatch.relatedId);
+        }
+    }
+
+    private static MatchQuality matchBookmarkTitle(String normalizedTitle, String itemText) {
+        if (itemText == null || itemText.isEmpty()) {
+            return null;
+        }
+        String normalized = normalizeBookmarkText(itemText);
+        if (normalized.equals(normalizedTitle)) {
+            return MatchQuality.EXACT;
+        }
+        if (normalized.startsWith(normalizedTitle)) {
+            return MatchQuality.PREFIX;
+        }
+        return null;
+    }
+
+    private static String normalizeBookmarkText(String text) {
+        if (text == null) {
+            return "";
+        }
+        return text.replaceAll("\\s+", "").trim();
+    }
+
+    private enum MatchQuality {
+        EXACT, PREFIX, CONTAINS
+    }
+
+    private static final class TargetMatch {
+        final int pageIndex;
+        final int relatedId;
+        final int distance;
+        final MatchQuality quality;
+
+        TargetMatch(int pageIndex, int relatedId, int distance, MatchQuality quality) {
+            this.pageIndex = pageIndex;
+            this.relatedId = relatedId;
+            this.distance = distance;
+            this.quality = quality;
+        }
+    }
+
     private static class TocMatch {
         final String title;
         final String rawPage;
@@ -651,13 +1156,99 @@ public class CatalogBookmarkProcessor {
         final double leftX;
         final double topY;
         final int pageIndex;
+        final int relatedId;
         int level = 1;
 
         Candidate(Bookmark bookmark, double leftX, double topY, int pageIndex) {
+            this(bookmark, leftX, topY, pageIndex, 0);
+        }
+
+        Candidate(Bookmark bookmark, double leftX, double topY, int pageIndex, int relatedId) {
             this.bookmark = bookmark;
             this.leftX = leftX;
             this.topY = topY;
             this.pageIndex = pageIndex;
+            this.relatedId = relatedId;
+        }
+    }
+
+    private static class JsonPageTocInfo {
+        final int pageIndex;
+        final int minTocLines;
+        final double minTocRatio;
+        int totalLines = 0;
+        int tocLineCount = 0;
+
+        JsonPageTocInfo(int pageIndex, int minTocLines, double minTocRatio) {
+            this.pageIndex = pageIndex;
+            this.minTocLines = minTocLines;
+            this.minTocRatio = minTocRatio;
+        }
+
+        boolean isTocPage() {
+            if (tocLineCount < minTocLines) {
+                return false;
+            }
+            return totalLines == 0 || (double) tocLineCount / totalLines >= minTocRatio;
+        }
+    }
+
+    private static class JsonPageRange {
+        int startPage;
+        int endPage;
+        int totalTocLines;
+
+        JsonPageRange(int startPage, int tocLines) {
+            this.startPage = startPage;
+            this.endPage = startPage;
+            this.totalTocLines = tocLines;
+        }
+
+        int pageCount() {
+            return endPage - startPage + 1;
+        }
+
+        double score() {
+            return totalTocLines * (1.0 + Math.log(1.0 + pageCount()));
+        }
+    }
+
+    private static class JsonLineInfo {
+        final String title;
+        final String rawPage;
+        final int pageIndex;
+        final boolean isToc;
+        final double leftX;
+        final double topY;
+        final double fontSize;
+        final int relatedId;
+
+        JsonLineInfo(String title, String rawPage, int pageIndex, boolean isToc,
+                     double leftX, double topY, double fontSize, int relatedId) {
+            this.title = title;
+            this.rawPage = rawPage;
+            this.pageIndex = pageIndex;
+            this.isToc = isToc;
+            this.leftX = leftX;
+            this.topY = topY;
+            this.fontSize = fontSize;
+            this.relatedId = relatedId;
+        }
+    }
+
+    private static class JsonTextLine {
+        final String text;
+        final double leftX;
+        final double topY;
+        final double fontSize;
+        final int relatedId;
+
+        JsonTextLine(String text, double leftX, double topY, double fontSize, int relatedId) {
+            this.text = text;
+            this.leftX = leftX;
+            this.topY = topY;
+            this.fontSize = fontSize;
+            this.relatedId = relatedId;
         }
     }
 }
