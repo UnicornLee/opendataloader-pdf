@@ -35,6 +35,7 @@ import org.opendataloader.pdf.markdown.MarkdownSyntax;
 import org.opendataloader.pdf.processors.CatalogBookmarkProcessor;
 import org.opendataloader.pdf.processors.DocumentProcessor;
 import org.opendataloader.pdf.processors.PageBookmarkProcessor;
+import org.opendataloader.pdf.utils.SmartTextJoiner;
 import org.verapdf.as.ASAtom;
 import org.verapdf.cos.COSDictionary;
 import org.verapdf.cos.COSObjType;
@@ -787,32 +788,38 @@ public class JsonWriter {
 
     /**
      * 取 JSON item 的完整文本。
+     *
+     * <p>遍历 item 所有行所有片段，调 {@link SmartTextJoiner} 按"两边都是 ASCII
+     * 字母或两边都是 ASCII 数字才插空格"的规则拼接成单行文本。空字符串片段
+     * 会被跳过，避免引入多余空白。</p>
      */
     private static String getItemFullText(Map<String, Object> item) {
         Object contentObj = item.get(JsonName.CONTENT);
         if (!(contentObj instanceof List)) {
             return "";
         }
-        StringBuilder text = new StringBuilder();
+        List<String> pieces = new ArrayList<>();
         for (Object lineObj : (List<?>) contentObj) {
             if (lineObj instanceof Map) {
                 Object textListObj = ((Map<?, ?>) lineObj).get(JsonName.CONTENT);
                 if (textListObj instanceof List) {
                     for (Object t : (List<?>) textListObj) {
-                        if (text.length() > 0) {
-                            text.append(' ');
+                        if (t != null) {
+                            String s = t.toString();
+                            if (!s.isEmpty()) {
+                                pieces.add(s);
+                            }
                         }
-                        text.append(t);
                     }
                 }
-            } else {
-                if (text.length() > 0) {
-                    text.append(' ');
+            } else if (lineObj != null) {
+                String s = lineObj.toString();
+                if (!s.isEmpty()) {
+                    pieces.add(s);
                 }
-                text.append(lineObj);
             }
         }
-        return text.toString().trim();
+        return SmartTextJoiner.joinNonEmptyPieces(pieces).trim();
     }
 
     public static void writeToJson(File inputPDF, String outputFolder, List<List<IObject>> contents,
