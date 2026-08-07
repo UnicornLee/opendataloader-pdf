@@ -45,7 +45,12 @@ public class FlowchartProcessor {
     private static final Logger LOGGER = Logger.getLogger(FlowchartProcessor.class.getCanonicalName());
 
     /** Margin used when collecting neighboring contents around the shape group. */
-    private static final double COLLECTION_MARGIN = 10.0;
+    private static final double COLLECTION_MARGIN = 2.0;
+    /** Horizontal expansion applied to the final flowchart screenshot bbox. */
+    private static final double SCREENSHOT_HORIZONTAL_MARGIN = 5.0;
+    /** Vertical tolerance (pt) added to the final flowchart screenshot bbox:
+     *  topY is increased by this amount and bottomY is decreased by it. */
+    private static final double SCREENSHOT_VERTICAL_TOLERANCE = 1.0;
 
     private static final double MIN_WIDTH = 80.0;
     private static final double MIN_HEIGHT = 40.0;
@@ -77,8 +82,10 @@ public class FlowchartProcessor {
         if (pageContents == null || groupedShapeChunks == null || imagesUtils == null) {
             return;
         }
-        for (List<IObject> group : groupedShapeChunks) {
-            if (group == null || group.isEmpty() || containsBarChart(group)) {
+        boolean[] skipped = new boolean[groupedShapeChunks.size()];
+        for (int i = 0; i < groupedShapeChunks.size(); i++) {
+            List<IObject> group = groupedShapeChunks.get(i);
+            if (skipped[i] || group == null || group.isEmpty() || containsBarChart(group)) {
                 continue;
             }
             Cluster cluster = collectCluster(pageContents, group, pageNumber);
@@ -86,11 +93,43 @@ public class FlowchartProcessor {
                 continue;
             }
             if (isFlowchartCluster(cluster)) {
-                LOGGER.log(Level.INFO, "Page {0}: detected flowchart cluster with bbox {1}",
-                        new Object[]{pageNumber + 1, cluster.boundingBox});
-                pageContents.removeAll(cluster.collectedContents);
-                pageContents.removeAll(group);
-                ImageChunk imageChunk = new ImageChunk(cluster.boundingBox);
+                BoundingBox screenshotBox = expandHorizontally(cluster.boundingBox, SCREENSHOT_HORIZONTAL_MARGIN,
+                        SCREENSHOT_VERTICAL_TOLERANCE);
+                List<IObject> absorbedContents = new ArrayList<>(cluster.collectedContents);
+                List<IObject> absorbedShapes = new ArrayList<>(group);
+                // Absorb any later shape groups that intersect the screenshot area so the
+                // whole connected diagram is captured as one image. Absorbed groups are
+                // skipped by the outer loop.
+                boolean expanded;
+                do {
+                    expanded = false;
+                    for (int j = i + 1; j < groupedShapeChunks.size(); j++) {
+                        if (skipped[j]) {
+                            continue;
+                        }
+                        List<IObject> laterGroup = groupedShapeChunks.get(j);
+                        if (laterGroup == null || laterGroup.isEmpty()) {
+                            continue;
+                        }
+                        BoundingBox laterBox = unionShapeBoundingBoxes(laterGroup, pageNumber);
+                        if (laterBox == null || !screenshotBox.overlaps(laterBox)) {
+                            continue;
+                        }
+                        Cluster laterCluster = collectCluster(pageContents, laterGroup, pageNumber);
+                        if (laterCluster != null) {
+                            screenshotBox.union(laterCluster.boundingBox);
+                            absorbedContents.addAll(laterCluster.collectedContents);
+                        }
+                        absorbedShapes.addAll(laterGroup);
+                        skipped[j] = true;
+                        expanded = true;
+                    }
+                } while (expanded);
+                LOGGER.log(Level.INFO, "Page {0}: detected flowchart cluster with screenshot bbox {1}",
+                        new Object[]{pageNumber + 1, screenshotBox});
+                pageContents.removeAll(absorbedContents);
+                pageContents.removeAll(absorbedShapes);
+                ImageChunk imageChunk = new ImageChunk(screenshotBox);
                 imagesUtils.saveImageChunk(imageChunk);
                 pageContents.add(imageChunk);
             }
@@ -160,6 +199,15 @@ public class FlowchartProcessor {
         return hasValid ? union : null;
     }
 
+    private static BoundingBox expandHorizontally(BoundingBox box, double xMargin, double yMargin) {
+        BoundingBox expanded = new BoundingBox(box);
+        expanded.setLeftX(box.getLeftX() - xMargin);
+        expanded.setRightX(box.getRightX() + xMargin);
+        expanded.setTopY(box.getTopY() + yMargin);
+        expanded.setBottomY(box.getBottomY() - yMargin);
+        return expanded;
+    }
+
     private static boolean isFlowchartCluster(Cluster cluster) {
         if (cluster == null || cluster.boundingBox == null || cluster.boundingBox.isEmpty()) {
             return false;
@@ -179,13 +227,15 @@ public class FlowchartProcessor {
             return false;
         }
 
-        boolean mixedShapes = cluster.rectangleCount >= 1 && cluster.polylineCount >= 1 && cluster.totalComponents >= 6;
+        int connectorCount = cluster.polylineCount + cluster.arrowCount;
+        boolean mixedShapes = cluster.rectangleCount >= 1 && connectorCount >= 1 && cluster.totalComponents >= 6;
         boolean compositeContent = (cluster.imageCount + cluster.tableCount) >= 2
                 && cluster.textCount >= 1 && cluster.shapeCount >= 2;
-        boolean imageWithConnectors = cluster.imageCount >= 1 && cluster.polylineCount >= 2 && cluster.textCount >= 1;
-        boolean labelsWithConnectors = cluster.textCount >= 3 && cluster.polylineCount >= 2;
+        boolean imageWithConnectors = cluster.imageCount >= 1 && connectorCount >= 2 && cluster.textCount >= 1;
+        boolean labelsWithConnectors = cluster.textCount >= 3 && connectorCount >= 2;
+        boolean boxesWithArrows = cluster.rectangleCount >= 2 && cluster.arrowCount >= 1;
 
-        return mixedShapes || compositeContent || imageWithConnectors || labelsWithConnectors;
+        return mixedShapes || compositeContent || imageWithConnectors || labelsWithConnectors || boxesWithArrows;
     }
 
     private static boolean isRegularTable(Cluster cluster) {
@@ -216,6 +266,7 @@ public class FlowchartProcessor {
         final int shapeCount;
         final int rectangleCount;
         final int polylineCount;
+        final int arrowCount;
         final int totalComponents;
         final int textCount;
         final int imageCount;
@@ -230,6 +281,7 @@ public class FlowchartProcessor {
             int shapeCount = 0;
             int rectangleCount = 0;
             int polylineCount = 0;
+            int arrowCount = 0;
             int totalComponents = 0;
             for (IObject obj : shapeGroup) {
                 if (obj instanceof ShapeChunk) {
@@ -241,12 +293,15 @@ public class FlowchartProcessor {
                         rectangleCount++;
                     } else if (ShapeChunk.TYPE_POLYLINE.equals(type)) {
                         polylineCount++;
+                    } else if (ShapeChunk.TYPE_ARROW.equals(type)) {
+                        arrowCount++;
                     }
                 }
             }
             this.shapeCount = shapeCount;
             this.rectangleCount = rectangleCount;
             this.polylineCount = polylineCount;
+            this.arrowCount = arrowCount;
             this.totalComponents = totalComponents;
 
             int textCount = 0;

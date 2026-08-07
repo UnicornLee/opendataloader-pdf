@@ -30,8 +30,10 @@ import org.opendataloader.pdf.html.HtmlGenerator;
 import org.opendataloader.pdf.html.HtmlGeneratorFactory;
 import org.opendataloader.pdf.pdf.PDFWriter;
 import org.apache.pdfbox.Loader;
+import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.rendering.PDFRenderer;
 import org.opendataloader.pdf.api.Config;
+import org.opendataloader.pdfbox.GetDrawings;
 import org.opendataloader.pdf.text.TextGenerator;
 import org.opendataloader.pdf.utils.ContentSanitizer;
 import org.opendataloader.pdf.utils.FileUtils;
@@ -760,7 +762,7 @@ public class DocumentProcessor {
         StaticStorages.setIsIgnoreMCIDs(!StaticLayoutContainers.isUseStructTree());
         StaticStorages.setIsAddSpacesBetweenTextPieces(true);
         document.parseChunks();
-        ShapeRecognizer.recognize(document);
+        ShapeRecognizer.recognize(document, extractPageFillBoxes(pdfName, pdDocument.getNumberOfPages()));
         LinesPreprocessingConsumer linesPreprocessingConsumer = new LinesPreprocessingConsumer();
         linesPreprocessingConsumer.findTableBorders();
         /*linesPreprocessingConsumer.getTableBorders().forEach(builders -> builders.forEach(builder -> {
@@ -768,6 +770,55 @@ public class DocumentProcessor {
             boolean badTable = border.isBadTable();
         }));*/
         StaticContainers.setTableBordersCollection(new TableBordersCollection(linesPreprocessingConsumer.getTableBorders()));
+    }
+
+    /**
+     * Extracts the bounding boxes of filled paths from the raw PDF content stream
+     * using PDFBox, per page, in y-up (bottom-left origin) coordinates.
+     *
+     * <p>These boxes are a fallback source for arrowheads: veraPDF's chunk layer can
+     * merge an arrowhead triangle into a larger marked-content container, which loses
+     * the bbox-only line-art chunk the shape recognizer normally relies on. Only
+     * closed fill paths are kept to limit noise. The boxes are empty for pages with
+     * no fills.</p>
+     *
+     * @param pdfName   the PDF file path
+     * @param pageCount expected page count (from the already parsed veraPDF document)
+     * @return map of page number (0-based) to fill boxes; never null
+     */
+    private static Map<Integer, List<BoundingBox>> extractPageFillBoxes(String pdfName, int pageCount) {
+        Map<Integer, List<BoundingBox>> pageFillBoxes = new HashMap<>();
+        try (org.apache.pdfbox.pdmodel.PDDocument boxDocument = Loader.loadPDF(new File(pdfName))) {
+            int pages = Math.min(pageCount, boxDocument.getNumberOfPages());
+            for (int pageNumber = 0; pageNumber < pages; pageNumber++) {
+                List<BoundingBox> pageBoxes = new ArrayList<>();
+                try {
+                    PDPage page = boxDocument.getPage(pageNumber);
+                    float pageHeight = page.getMediaBox().getHeight();
+                    for (GetDrawings.Drawing drawing : GetDrawings.getDrawings(page, pageNumber)) {
+                        if (drawing.type != GetDrawings.PaintType.FILL
+                                && drawing.type != GetDrawings.PaintType.FILL_STROKE) {
+                            continue;
+                        }
+                        if (!drawing.closePath || drawing.rect == null) {
+                            continue;
+                        }
+                        pageBoxes.add(new BoundingBox(pageNumber,
+                                drawing.rect.x0, pageHeight - drawing.rect.y1,
+                                drawing.rect.x1, pageHeight - drawing.rect.y0));
+                    }
+                } catch (IOException e) {
+                    LOGGER.log(Level.WARNING, "Failed to extract fill drawings for page " + (pageNumber + 1), e);
+                }
+                if (!pageBoxes.isEmpty()) {
+                    pageFillBoxes.put(pageNumber, pageBoxes);
+                }
+            }
+        } catch (IOException e) {
+            LOGGER.log(Level.WARNING, "Failed to load " + displayName(pdfName) + " for fill extraction; "
+                    + "arrowheads will rely on artifacts only", e);
+        }
+        return pageFillBoxes;
     }
 
     /**

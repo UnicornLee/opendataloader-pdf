@@ -41,6 +41,8 @@ public class ShapeChunk extends InfoChunk {
     public static final String TYPE_BAR_CHART = "bar_chart";
     /** Connected line segments forming a polyline / line chart. */
     public static final String TYPE_POLYLINE = "polyline";
+    /** A single line segment that connects two shapes, typically an arrow. */
+    public static final String TYPE_ARROW = "arrow";
     /** A generic group of same-colored connected pieces. */
     public static final String TYPE_GROUP = "group";
 
