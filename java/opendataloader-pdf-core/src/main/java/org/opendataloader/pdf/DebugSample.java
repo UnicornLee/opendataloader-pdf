@@ -19,7 +19,8 @@ public class DebugSample {
 //        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202302281677505819604328-272.pdf", config);
 //        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202303181679059838994480-452.pdf", config);
 //        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202303181679059838994480-252(公式).pdf", config);
-        OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202302281677505819604328.pdf", config);
+//        OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202302281677505819604328.pdf", config);
+        OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202303181679059838994480.pdf", config);
 //        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\带中文的公式.pdf", config);
 //        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202303181679059838994480-314(公式).pdf", config);
 //        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202304191681815910199312-95(图表).pdf", config);

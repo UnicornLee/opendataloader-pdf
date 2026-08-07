@@ -2,6 +2,7 @@ package org.opendataloader.pdf.custom.utils;
 
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDOutlineItem;
 import org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDOutlineNode;
 import org.opendataloader.pdf.api.Config;
@@ -22,36 +23,36 @@ public class BookmarkUtils {
         File inputPDF = new File(inputPdfName);
         try (PDDocument doc = Loader.loadPDF(inputPDF)) {
             PDOutlineNode outline = doc.getDocumentCatalog().getDocumentOutline();
-            if (outline == null) {
-                return selfBookmarks;
+            if (outline != null) {
+                selfBookmarks.addAll(getSelfBookmarks(outline, doc));
             }
-            PDOutlineItem item = outline.getFirstChild();
-            while (item != null) {
-                Bookmark bookmark = new Bookmark();
-                bookmark.setText(item.getTitle());
-                bookmark.setPageNum(item.getOpenCount());
-                if (item.hasChildren()) {
-                }
-                selfBookmarks.add(bookmark);
-                item = item.getNextSibling();
-            }
-
         } catch (Exception e) {
-
         }
         return selfBookmarks;
     }
 
     public static List<Bookmark> getSelfBookmarks(PDOutlineNode node) {
+        return getSelfBookmarks(node, null);
+    }
+
+    private static List<Bookmark> getSelfBookmarks(PDOutlineNode node, PDDocument doc) {
         List<Bookmark> selfBookmarks = new ArrayList<>();
 
         PDOutlineItem item = node.getFirstChild();
         while (item != null) {
             Bookmark bookmark = new Bookmark();
             bookmark.setText(item.getTitle());
-            bookmark.setPageNum(item.getOpenCount());
+            if (doc != null) {
+                try {
+                    PDPage page = item.findDestinationPage(doc);
+                    if (page != null) {
+                        bookmark.setPageNum(doc.getPages().indexOf(page) + 1);
+                    }
+                } catch (Exception e) {
+                }
+            }
             if (item.hasChildren()) {
-                bookmark.setChildren(getSelfBookmarks(item));
+                bookmark.setChildren(getSelfBookmarks(item, doc));
             }
             selfBookmarks.add(bookmark);
             item = item.getNextSibling();
