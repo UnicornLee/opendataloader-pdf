@@ -269,6 +269,163 @@ public class PageBookmarkProcessor {
     }
 
     /**
+     * Builds the immediate children of an anchor bookmark emitted at the given
+     * depth, reusing the exact candidate collection, cleaning and
+     * level-selection pipeline of {@link #extractPageBookmarksFromJson}.
+     *
+     * <p>The anchor is resolved by its exact {@code page_num}/{@code related_id}
+     * against the freshly collected candidate set. The child range starts right
+     * after the anchor candidate and ends before the next same-depth sibling of
+     * the anchor within its ancestor range — exactly the range the full-document
+     * path would slice for that anchor — and the ancestor templates are
+     * recomputed the same way. Children are therefore emitted at {@code level}
+     * (2 for an L1 anchor, 3 for an L2 anchor) with the ancestor templates
+     * excluded, so the result matches node-for-node what the page bookmark tree
+     * contains below that anchor and the tree never grows beyond three levels.
+     * The returned bookmarks are freshly built objects (never shared with any
+     * previously built page tree); catalog page ranges are skipped during
+     * collection exactly like the full-document path.</p>
+     *
+     * @param data per-page JSON data array
+     * @param catalogStartPage 0-based inclusive start of catalog page range, or -1
+     * @param catalogEndPage 0-based inclusive end of catalog page range, or -1
+     * @param anchorPage 1-based page_num of the anchor bookmark
+     * @param anchorRelatedId related_id of the anchor bookmark
+     * @param level depth at which the children are emitted (2 or 3)
+     * @return freshly built child bookmarks of the anchor, possibly empty
+     */
+    public static List<Bookmark> extractChildrenForAnchor(
+            List<Map<String, Object>> data,
+            int catalogStartPage, int catalogEndPage,
+            int anchorPage, int anchorRelatedId,
+            int level) {
+        if (data == null || data.isEmpty() || level < 2 || level > 3) {
+            return Collections.emptyList();
+        }
+        List<Candidate> all = collectJsonCandidates(data, catalogStartPage, catalogEndPage);
+        if (all.isEmpty()) {
+            return Collections.emptyList();
+        }
+        all.sort(Comparator
+            .comparingInt((Candidate c) -> c.pageIndex)
+            .thenComparing((Candidate c) -> -c.topY));
+
+        int anchorIndex = indexOfCandidate(all, anchorPage, anchorRelatedId);
+        if (anchorIndex < 0) {
+            return Collections.emptyList();
+        }
+
+        // Recompute the ancestor templates exactly as the full-document path
+        // does so deeper-level template selection matches it.
+        TemplateKey levelOneTemplate = selectTemplateForLevel(
+            all, 0, all.size() - 1, 1, Collections.emptySet());
+        if (levelOneTemplate == null) {
+            return Collections.emptyList();
+        }
+        Set<TemplateKey> usedTemplates = new HashSet<>();
+        usedTemplates.add(levelOneTemplate);
+
+        int childEnd;
+        if (level == 2) {
+            // Children of an L1 anchor: the range ends before the next L1 sibling.
+            List<Integer> levelOneIndices = cleanedIndicesOf(
+                all, 0, all.size() - 1, levelOneTemplate, 1);
+            childEnd = nextIndexAfter(levelOneIndices, anchorIndex, all.size() - 1);
+        } else {
+            // Children of an L2 anchor: the range is bounded by the parent L1
+            // range and the next L2 sibling inside it.
+            List<Integer> levelOneIndices = cleanedIndicesOf(
+                all, 0, all.size() - 1, levelOneTemplate, 1);
+            int parentLevelOneIndex = lastIndexBefore(levelOneIndices, anchorIndex);
+            if (parentLevelOneIndex < 0) {
+                return Collections.emptyList();
+            }
+            int levelOneEnd = nextIndexAfter(levelOneIndices, parentLevelOneIndex, all.size() - 1);
+            TemplateKey levelTwoTemplate = selectTemplateForLevel(
+                all, parentLevelOneIndex + 1, levelOneEnd, 2, usedTemplates);
+            if (levelTwoTemplate == null) {
+                return Collections.emptyList();
+            }
+            usedTemplates.add(levelTwoTemplate);
+            List<Integer> levelTwoIndices = cleanedIndicesOf(
+                all, parentLevelOneIndex + 1, levelOneEnd, levelTwoTemplate, 2);
+            childEnd = nextIndexAfter(levelTwoIndices, anchorIndex, levelOneEnd);
+        }
+
+        return extractLevel(all, anchorIndex + 1, childEnd, level, usedTemplates);
+    }
+
+    /**
+     * Returns the index of the candidate matching the exact (page, relatedId)
+     * pair, or -1 if no such candidate exists.
+     */
+    private static int indexOfCandidate(List<Candidate> candidates, int page, int relatedId) {
+        for (int i = 0; i < candidates.size(); i++) {
+            Candidate c = candidates.get(i);
+            if (c.pageIndex + 1 == page && c.relatedId == relatedId) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Collects, cleans and returns, in reading order, the original indices of
+     * the candidates matching the given template within [start, end]. This
+     * mirrors the bookkeeping done inside {@link #extractLevel} so that child
+     * ranges are sliced identically to the full-document path.
+     */
+    private static List<Integer> cleanedIndicesOf(List<Candidate> candidates, int start, int end,
+                                                   TemplateKey template, int level) {
+        List<Candidate> selected = new ArrayList<>();
+        for (int i = start; i <= end; i++) {
+            Candidate c = candidates.get(i);
+            if (template.equals(c.templateKey)) {
+                selected.add(c);
+            }
+        }
+        List<Candidate> cleaned = (level == 1)
+            ? cleanCandidates(selected)
+            : cleanCandidatesLocal(selected);
+        List<Integer> indices = new ArrayList<>();
+        for (Candidate c : cleaned) {
+            int idx = candidates.indexOf(c);
+            indices.add(idx);
+        }
+        indices.sort(Comparator
+            .comparingInt((Integer i) -> candidates.get(i).pageIndex)
+            .thenComparing((Integer i) -> -candidates.get(i).topY));
+        return indices;
+    }
+
+    /**
+     * Returns the largest index in {@code indices} that is strictly less than
+     * {@code index}, or -1 if none exists.
+     */
+    private static int lastIndexBefore(List<Integer> indices, int index) {
+        for (int i = indices.size() - 1; i >= 0; i--) {
+            if (indices.get(i) < index) {
+                return indices.get(i);
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Returns one less than the smallest index in {@code indices} that is
+     * strictly greater than {@code index} (an inclusive child range end), or
+     * {@code fallback} if no such index exists.
+     */
+    private static int nextIndexAfter(List<Integer> indices, int index, int fallback) {
+        for (int i = 0; i < indices.size(); i++) {
+            if (indices.get(i) > index) {
+                return indices.get(i) - 1;
+            }
+        }
+        return fallback;
+    }
+
+    /**
      * Builds a hierarchical bookmark tree from already-collected candidates.
      *
      * <p>The tree is built recursively: for each parent range, the best template

@@ -679,6 +679,11 @@ public class JsonWriter {
                 List<Bookmark> pageBookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(
                     data, catalogStartPage, catalogEndPage);
 
+                // Complement missing L2/L3 sub-bookmarks in the catalog tree from
+                // the page bookmark candidates (sliced by anchor ranges).
+                CatalogBookmarkProcessor.fillCatalogChildrenFromPageData(
+                    data, catalogStartPage, catalogEndPage, catalogBookmarks, pageBookmarks);
+
                 map.put("catalog_bookmarks", catalogBookmarks);
                 map.put("page_bookmarks", pageBookmarks);
                 if (catalogStartPage >= 0 && catalogEndPage >= catalogStartPage) {
@@ -698,7 +703,7 @@ public class JsonWriter {
         String jsFileName = outputFolder + File.separator + inputPDF.getName().substring(0, inputPDF.getName().length() - 3) + "js";
         String jsFileContent = "var url = " + mapper.writeValueAsString(inputPdfName) + ";";
         jsFileContent += "\n\n";
-        jsFileContent += "var bookmarks = " + mapper.writeValueAsString(map.get("page_bookmarks")) + ";";
+        jsFileContent += "var bookmarks = " + mapper.writeValueAsString(map.get("catalog_bookmarks")) + ";";
         jsFileContent += "\n\n";
         jsFileContent += "var data = " + mapper.writeValueAsString(map.get(JsonName.DATA)) + ";";
         FileUtils.writeToFile(jsFileName, jsFileContent);
