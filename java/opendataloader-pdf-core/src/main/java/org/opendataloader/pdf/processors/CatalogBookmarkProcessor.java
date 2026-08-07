@@ -1173,6 +1173,76 @@ public class CatalogBookmarkProcessor {
         }
     }
 
+    /**
+     * Resolves the {@code related_id} of each self bookmark (and its children)
+     * to the id of the JSON text item on the bookmark's page whose text matches
+     * the bookmark title. Bookmarks whose page has no matching item keep the
+     * default related id (0).
+     *
+     * @param bookmarks the self bookmark tree
+     * @param data      per-page JSON data with items
+     */
+    public static void resolveSelfBookmarkRelatedIds(List<Bookmark> bookmarks,
+                                                     List<Map<String, Object>> data) {
+        if (bookmarks == null || bookmarks.isEmpty() || data == null || data.isEmpty()) {
+            return;
+        }
+        for (Bookmark bookmark : bookmarks) {
+            resolveSelfBookmarkRelatedId(bookmark, data);
+            List<Bookmark> children = bookmark.getChildren();
+            if (children != null && !children.isEmpty()) {
+                resolveSelfBookmarkRelatedIds(children, data);
+            }
+        }
+    }
+
+    private static void resolveSelfBookmarkRelatedId(Bookmark bookmark,
+                                                     List<Map<String, Object>> data) {
+        Integer pageNum = bookmark.getPageNum();
+        if (pageNum == null || pageNum <= 0 || pageNum > data.size()) {
+            return;
+        }
+        String title = bookmark.getText();
+        if (title == null || title.trim().isEmpty()) {
+            return;
+        }
+        String normalizedTitle = normalizeBookmarkText(title);
+        if (normalizedTitle.isEmpty()) {
+            return;
+        }
+        Map<String, Object> page = data.get(pageNum - 1);
+        List<Map<String, Object>> items = (List<Map<String, Object>>) page.get(JsonName.ITEMS);
+        if (items == null) {
+            return;
+        }
+        int bestRelatedId = 0;
+        MatchQuality bestQuality = null;
+        for (Map<String, Object> item : items) {
+            if (!isTextItem(item)) {
+                continue;
+            }
+            String sourceType = (String) item.get(JsonName.SOURCE_TYPE);
+            if (!JsonName.SOURCE_TYPE_HEADING.equals(sourceType)
+                    && !JsonName.SOURCE_TYPE_PARAGRAPH.equals(sourceType)) {
+                continue;
+            }
+            String itemText = getJsonItemFullText(item);
+            MatchQuality quality = matchBookmarkTitle(normalizedTitle, itemText);
+            if (quality == null) {
+                continue;
+            }
+            if (bestQuality == null || quality.ordinal() < bestQuality.ordinal()) {
+                Object idObj = item.get(JsonName.ID);
+                int relatedId = idObj instanceof Number ? ((Number) idObj).intValue() : 0;
+                bestQuality = quality;
+                bestRelatedId = relatedId;
+            }
+        }
+        if (bestRelatedId != 0) {
+            bookmark.setRelatedId(bestRelatedId);
+        }
+    }
+
     private static MatchQuality matchBookmarkTitle(String normalizedTitle, String itemText) {
         if (itemText == null || itemText.isEmpty()) {
             return null;
