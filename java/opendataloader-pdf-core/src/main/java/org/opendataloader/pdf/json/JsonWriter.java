@@ -28,6 +28,7 @@ import org.opendataloader.pdf.custom.dto.PageItem;
 import org.opendataloader.pdf.custom.dto.TableSingleItem;
 import org.opendataloader.pdf.custom.entities.Bookmark;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
+import org.opendataloader.pdf.custom.utils.BookmarkQualitySelector;
 import org.opendataloader.pdf.custom.utils.BookmarkUtils;
 import org.opendataloader.pdf.entities.content.ShapeChunk;
 import org.opendataloader.pdf.custom.utils.FileUtils;
@@ -76,6 +77,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -665,8 +667,6 @@ public class JsonWriter {
 
         // 在已生成的 JSON 数据上识别 catalog_bookmarks 与 page_bookmarks，
         // page_bookmarks 的 relatedId 直接复用 JSON item 的 id。
-        map.putIfAbsent("catalog_bookmarks", new ArrayList<>());
-        map.putIfAbsent("page_bookmarks", new ArrayList<>());
         if (config != null) {
             List<Map<String, Object>> data = (List<Map<String, Object>>) map.get(JsonName.DATA);
             if (data != null) {
@@ -685,8 +685,6 @@ public class JsonWriter {
                 CatalogBookmarkProcessor.fillCatalogChildrenFromPageData(
                     data, catalogStartPage, catalogEndPage, catalogBookmarks, pageBookmarks);
 
-                map.put("catalog_bookmarks", catalogBookmarks);
-                map.put("page_bookmarks", pageBookmarks);
                 if (catalogStartPage >= 0 && catalogEndPage >= catalogStartPage) {
                     map.put("catalog_page_range_start", catalogStartPage + 1);
                     map.put("catalog_page_range_end", catalogEndPage + 1);
@@ -695,16 +693,31 @@ public class JsonWriter {
                 writeCollectedPageBookmarkMarkdown(outputFolder, inputPdfName, data,
                     catalogStartPage, catalogEndPage);
 
-                // 把更新后的内容重新写回 json 文件
-                mapper.writerWithDefaultPrettyPrinter().writeValue(new File(jsonFileName), map);
+                // 从 catalog/page/self 三种来源中选出质量最高的目录写入 bookmarks
+                List<Bookmark> selfBookmarks = mapper.convertValue(
+                    map.get("self_bookmarks"), new TypeReference<List<Bookmark>>() {});
+                Map<Integer, Set<Integer>> pageItemIds = BookmarkQualitySelector.buildPageItemIds(data);
+                BookmarkQualitySelector.Selection selection = BookmarkQualitySelector.select(
+                    catalogBookmarks, pageBookmarks, selfBookmarks, pageItemIds);
+                map.put("bookmarks", selection.getBookmarks());
+            } else {
+                map.put("bookmarks", new ArrayList<>());
             }
+            map.remove("self_bookmarks");
+            map.remove("catalog_bookmarks");
+            map.remove("page_bookmarks");
+
+            // 把更新后的内容重新写回 json 文件
+            mapper.writerWithDefaultPrettyPrinter().writeValue(new File(jsonFileName), map);
         }
 
         FileUtils.copyResourceToDir("templates/index.css", outputFolder);
         String jsFileName = outputFolder + File.separator + inputPDF.getName().substring(0, inputPDF.getName().length() - 3) + "js";
         String jsFileContent = "var url = " + mapper.writeValueAsString(inputPdfName) + ";";
         jsFileContent += "\n\n";
-        jsFileContent += "var bookmarks = " + mapper.writeValueAsString(map.get("self_bookmarks")) + ";";
+        Object selectedBookmarks = map.get("bookmarks");
+        jsFileContent += "var bookmarks = " + mapper.writeValueAsString(
+            selectedBookmarks != null ? selectedBookmarks : new ArrayList<>()) + ";";
         jsFileContent += "\n\n";
         jsFileContent += "var data = " + mapper.writeValueAsString(map.get(JsonName.DATA)) + ";";
         FileUtils.writeToFile(jsFileName, jsFileContent);
