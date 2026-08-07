@@ -35,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.logging.Logger;
 
 /**
@@ -76,6 +77,14 @@ public class PageBookmarkProcessor {
     private static final char CHINESE_COMMA_FULL_WIDTH = '\u3001';
 
     private static final char FULL_WIDTH_DOT = '．';
+
+    /**
+     * Maximum allowed length (in Java chars) of a bookmark entry's full text.
+     * Real headings are short; an entry longer than this is treated as body
+     * text that merely starts with a numbering prefix (e.g. a long numbered
+     * paragraph) and is excluded as a table-of-contents residue.
+     */
+    private static final int MAX_ENTRY_TEXT_LENGTH = 200;
 
     private enum NumberSystem {
         ARABIC, CHINESE
@@ -163,17 +172,27 @@ public class PageBookmarkProcessor {
         final double leftX;
         final double topY;
         final int relatedId;
+        final int pageLastId;
+        final boolean pageIdOneIsText;
 
         Candidate(int pageIndex, String text, String fullText, boolean singleLine,
                   TemplateKey templateKey, int value,
                   double fontSize, double leftX, double topY) {
             this(pageIndex, text, fullText, singleLine, templateKey, value,
-                fontSize, leftX, topY, 0);
+                fontSize, leftX, topY, 0, 0, false);
         }
 
         Candidate(int pageIndex, String text, String fullText, boolean singleLine,
                   TemplateKey templateKey, int value,
                   double fontSize, double leftX, double topY, int relatedId) {
+            this(pageIndex, text, fullText, singleLine, templateKey, value,
+                fontSize, leftX, topY, relatedId, 0, false);
+        }
+
+        Candidate(int pageIndex, String text, String fullText, boolean singleLine,
+                  TemplateKey templateKey, int value,
+                  double fontSize, double leftX, double topY, int relatedId,
+                  int pageLastId, boolean pageIdOneIsText) {
             this.pageIndex = pageIndex;
             this.text = text;
             this.fullText = fullText;
@@ -184,6 +203,8 @@ public class PageBookmarkProcessor {
             this.leftX = leftX;
             this.topY = topY;
             this.relatedId = relatedId;
+            this.pageLastId = pageLastId;
+            this.pageIdOneIsText = pageIdOneIsText;
         }
     }
 
@@ -509,6 +530,12 @@ public class PageBookmarkProcessor {
             }
         }
 
+        // Step 4.5: Discard chains that look like table-of-contents residue.
+        // These are short front-matter entries (over-long text, or same-page
+        // items whose JSON ids are consecutive) and must not surface as page
+        // bookmarks.
+        chains.removeIf(chain -> isTocLikeGroup(flattenChain(chain)));
+
         // Step 5: Pick the chain with the widest value range. Tie-break by the
         // earliest start page of the chain's first candidate (closest to the
         // parent's start page).
@@ -547,6 +574,151 @@ public class PageBookmarkProcessor {
         }
         result.sort(Comparator.comparingInt((Candidate c) -> c.value));
         return result;
+    }
+
+    /**
+     * Returns true when the given candidate chain resembles a table-of-contents
+     * residue that should be excluded from page bookmarks.
+     *
+     * <p><strong>Rule 1:</strong> any entry whose full text exceeds
+     * {@value #MAX_ENTRY_TEXT_LENGTH} characters. A real heading is short; a
+     * long numbered paragraph is almost certainly body text.</p>
+     *
+     * <p><strong>Rule 2:</strong> same-page entries whose
+     * {@link Candidate#relatedId} values are consecutive. Items emitted
+     * adjacently on the same page are consecutive in reading order, which is
+     * exactly how a table of contents lists its entries. For small chains
+     * (2-5 entries) a single adjacent pair is enough; for larger chains at
+     * least two pairs, or a run of three consecutive ids on one page, are
+     * required so that legitimate multi-level headings with a single
+     * coincidental adjacency are not dropped.</p>
+     */
+    private static boolean isTocLikeGroup(List<Candidate> chain) {
+        if (chain.isEmpty()) {
+            return false;
+        }
+        for (Candidate c : chain) {
+            if (c.fullText != null && c.fullText.length() > MAX_ENTRY_TEXT_LENGTH) {
+                return true;
+            }
+        }
+        int size = chain.size();
+        if (size < 2) {
+            return false;
+        }
+        int pairCount = 0;
+        for (int i = 0; i < size; i++) {
+            for (int j = i + 1; j < size; j++) {
+                if (isSamePageAdjacent(chain.get(i), chain.get(j))) {
+                    pairCount++;
+                } else if (j == i + 1 && isCrossPageAdjacent(chain.get(i), chain.get(j))) {
+                    pairCount++;
+                }
+            }
+        }
+        if (size <= 5) {
+            return pairCount >= 1;
+        }
+        return pairCount >= 2 || maxConsecutiveRelatedIdRun(chain) >= 3;
+    }
+
+    private static boolean isSamePageAdjacent(Candidate a, Candidate b) {
+        return a.pageIndex == b.pageIndex
+            && Math.abs(a.relatedId - b.relatedId) == 1;
+    }
+
+    /**
+     * Returns true when {@code a} (on page N) is immediately followed by
+     * {@code b} (on page N+1) as a page-boundary pair: {@code a} is the last
+     * element of its page and {@code b} is the first element of the next page
+     * (id 1), or id 2 provided the id-1 element on that page is text. Only
+     * paragraph/heading candidates are collected, so {@code a.relatedId == 0}
+     * (IObject path) never satisfies this and the rule stays JSON-only.
+     */
+    private static boolean isCrossPageAdjacent(Candidate a, Candidate b) {
+        return b.pageIndex == a.pageIndex + 1
+            && a.relatedId == a.pageLastId
+            && (b.relatedId == 1 || (b.relatedId == 2 && b.pageIdOneIsText));
+    }
+
+    /**
+     * Returns the longest run of strictly consecutive {@code relatedId} values
+     * in the chain. Runs are computed per page because the JSON id counter
+     * resets at the start of each page, and a page-boundary bridge (previous
+     * page ends at its last element, next page starts at id 1 or 2 with the
+     * id-1 element being text) joins the two pages' runs into a longer one.
+     */
+    private static int maxConsecutiveRelatedIdRun(List<Candidate> chain) {
+        Map<Integer, List<Integer>> idsByPage = new TreeMap<>();
+        Map<Integer, Integer> pageLastIdByPage = new HashMap<>();
+        Map<Integer, Boolean> pageIdOneIsTextByPage = new HashMap<>();
+        for (Candidate c : chain) {
+            idsByPage.computeIfAbsent(c.pageIndex, k -> new ArrayList<>()).add(c.relatedId);
+            pageLastIdByPage.putIfAbsent(c.pageIndex, c.pageLastId);
+            pageIdOneIsTextByPage.putIfAbsent(c.pageIndex, c.pageIdOneIsText);
+        }
+        int maxRun = 1;
+        Integer previousPage = null;
+        int previousPageLastId = 0;
+        int previousPageMaxId = 0;
+        int previousTrailingRun = 0;
+        for (Map.Entry<Integer, List<Integer>> entry : idsByPage.entrySet()) {
+            int pageIndex = entry.getKey();
+            List<Integer> distinct = new ArrayList<>(new HashSet<>(entry.getValue()));
+            Collections.sort(distinct);
+            int within = 1;
+            int currentRun = 1;
+            for (int i = 1; i < distinct.size(); i++) {
+                if (distinct.get(i) == distinct.get(i - 1) + 1) {
+                    currentRun++;
+                } else {
+                    currentRun = 1;
+                }
+                if (currentRun > within) {
+                    within = currentRun;
+                }
+            }
+            maxRun = Math.max(maxRun, within);
+            int trailing = 1;
+            for (int i = distinct.size() - 1; i > 0; i--) {
+                if (distinct.get(i) == distinct.get(i - 1) + 1) {
+                    trailing++;
+                } else {
+                    break;
+                }
+            }
+            int leading = 1;
+            for (int i = 1; i < distinct.size(); i++) {
+                if (distinct.get(i) == distinct.get(i - 1) + 1) {
+                    leading++;
+                } else {
+                    break;
+                }
+            }
+            if (previousPage != null && pageIndex == previousPage + 1) {
+                int pageLastId = pageLastIdByPage.getOrDefault(pageIndex, 0);
+                boolean idOneIsText = Boolean.TRUE.equals(pageIdOneIsTextByPage.get(pageIndex));
+                int minId = distinct.get(0);
+                boolean bridge = previousPageMaxId == previousPageLastId
+                    && (minId == 1 || (minId == 2 && idOneIsText));
+                if (bridge) {
+                    maxRun = Math.max(maxRun, previousTrailingRun + leading);
+                }
+            }
+            previousPage = pageIndex;
+            previousPageLastId = pageLastIdByPage.getOrDefault(pageIndex, 0);
+            previousPageMaxId = distinct.get(distinct.size() - 1);
+            previousTrailingRun = trailing;
+        }
+        return maxRun;
+    }
+
+    private static List<Candidate> flattenChain(List<List<Candidate>> chain) {
+        List<Candidate> flattened = new ArrayList<>();
+        for (List<Candidate> group : chain) {
+            flattened.addAll(group);
+        }
+        return flattened;
     }
 
     private static List<Candidate> collectCandidates(List<List<IObject>> contents) {
@@ -625,6 +797,23 @@ public class PageBookmarkProcessor {
             if (items == null) {
                 continue;
             }
+            int pageLastId = 0;
+            boolean pageIdOneIsText = false;
+            for (Map<String, Object> item : items) {
+                Object idObj = item.get(JsonName.ID);
+                if (!(idObj instanceof Number)) {
+                    continue;
+                }
+                int itemId = ((Number) idObj).intValue();
+                if (itemId > pageLastId) {
+                    pageLastId = itemId;
+                }
+                if (itemId == 1) {
+                    String sourceType = (String) item.get(JsonName.SOURCE_TYPE);
+                    pageIdOneIsText = JsonName.SOURCE_TYPE_PARAGRAPH.equals(sourceType)
+                        || JsonName.SOURCE_TYPE_HEADING.equals(sourceType);
+                }
+            }
             for (Map<String, Object> item : items) {
                 String sourceType = (String) item.get(JsonName.SOURCE_TYPE);
                 if (!JsonName.SOURCE_TYPE_PARAGRAPH.equals(sourceType)
@@ -658,7 +847,9 @@ public class PageBookmarkProcessor {
                     fontSize,
                     leftX,
                     topY,
-                    relatedId
+                    relatedId,
+                    pageLastId,
+                    pageIdOneIsText
                 ));
             }
         }

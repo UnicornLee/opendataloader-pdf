@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Test;
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.custom.entities.Bookmark;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
+import org.opendataloader.pdf.json.JsonName;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.SemanticHeading;
 import org.verapdf.wcag.algorithms.entities.content.TextBlock;
@@ -32,7 +33,9 @@ import org.verapdf.wcag.algorithms.entities.enums.SemanticType;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class PageBookmarkProcessorTest {
 
@@ -652,6 +655,256 @@ public class PageBookmarkProcessorTest {
 
         bookmarks = PageBookmarkProcessor.extractPageBookmarks(new ArrayList<>());
         Assertions.assertTrue(bookmarks.isEmpty());
+    }
+
+    /**
+     * Builds a JSON item for {@link PageBookmarkProcessor#extractPageBookmarksFromJson}.
+     * y0 is chosen so that, within a page, items are read top-to-bottom in the
+     * order they were added (ascending y0). Only the id and text differ per item.
+     */
+    private static Map<String, Object> jsonItem(int id, String text, double y0) {
+        Map<String, Object> item = new HashMap<>();
+        item.put(JsonName.ID, id);
+        item.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_PARAGRAPH);
+        item.put(JsonName.CONTENT, Arrays.asList(text));
+        item.put(JsonName.FONT_UNDERLINE_SIZE, 14.0);
+        item.put(JsonName.X0, 70.0);
+        item.put(JsonName.Y0, y0);
+        return item;
+    }
+
+    /**
+     * Builds a single-page JSON document consisting of a level-1 chapter and its
+     * level-2 children ({@code "一、…"}), all on page 0. The chapter carries a
+     * larger font size so it always wins level-1 template selection, sending the
+     * children through {@code cleanCandidatesLocal} (level >= 2).
+     */
+    private static List<Map<String, Object>> chapterWithChildren(List<String> childrenTexts, int[] childIds) {
+        List<Map<String, Object>> items = new ArrayList<>();
+        Map<String, Object> chapter = new HashMap<>();
+        chapter.put(JsonName.ID, 1);
+        chapter.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_HEADING);
+        chapter.put(JsonName.CONTENT, Arrays.asList("第1章 绪论"));
+        chapter.put(JsonName.FONT_UNDERLINE_SIZE, 20.0);
+        chapter.put(JsonName.X0, 50.0);
+        chapter.put(JsonName.Y0, 100.0);
+        items.add(chapter);
+        double y0 = 200.0;
+        for (int i = 0; i < childrenTexts.size(); i++) {
+            items.add(jsonItem(childIds[i], childrenTexts.get(i), y0));
+            y0 += 100.0;
+        }
+        List<Map<String, Object>> data = new ArrayList<>();
+        Map<String, Object> page = new HashMap<>();
+        page.put(JsonName.ITEMS, items);
+        data.add(page);
+        return data;
+    }
+
+    @Test
+    public void testTocFilter_overLongEntry_dropsChildrenChain() {
+        StringBuilder sb = new StringBuilder("一、");
+        for (int i = 0; i < 250; i++) {
+            sb.append('长');
+        }
+        String longEntry = sb.toString();
+        List<Map<String, Object>> data = chapterWithChildren(
+                Arrays.asList(longEntry, "二、背景", "三、方法"),
+                new int[]{1, 3, 5});
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
+        Assertions.assertEquals(1, bookmarks.size());
+        Assertions.assertEquals("第1章 绪论", bookmarks.get(0).getText());
+        Assertions.assertTrue(bookmarks.get(0).getChildren().isEmpty(),
+                "A chain with an over-long entry (>200 chars) must be dropped");
+    }
+
+    @Test
+    public void testTocFilter_smallChainAdjacentPair_isDropped() {
+        List<Map<String, Object>> data = chapterWithChildren(
+                Arrays.asList("一、概述", "二、背景", "三、方法"),
+                new int[]{1, 2, 5});
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
+        Assertions.assertEquals(1, bookmarks.size());
+        Assertions.assertTrue(bookmarks.get(0).getChildren().isEmpty(),
+                "2-5 entry chain containing an adjacent pair must be dropped");
+    }
+
+    @Test
+    public void testTocFilter_smallChainNoAdjacency_isKept() {
+        List<Map<String, Object>> data = chapterWithChildren(
+                Arrays.asList("一、概述", "二、背景", "三、方法"),
+                new int[]{1, 3, 5});
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
+        Assertions.assertEquals(1, bookmarks.size());
+        List<Bookmark> children = bookmarks.get(0).getChildren();
+        Assertions.assertEquals(3, children.size());
+        Assertions.assertEquals("一、概述", children.get(0).getText());
+        Assertions.assertEquals("二、背景", children.get(1).getText());
+        Assertions.assertEquals("三、方法", children.get(2).getText());
+    }
+
+    @Test
+    public void testTocFilter_largeChainTwoAdjacentPairs_isDropped() {
+        List<Map<String, Object>> data = chapterWithChildren(
+                Arrays.asList("一、概述", "二、背景", "三、方法", "四、结论", "五、附录", "六、索引"),
+                new int[]{1, 2, 5, 6, 9, 10});
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
+        Assertions.assertEquals(1, bookmarks.size());
+        Assertions.assertTrue(bookmarks.get(0).getChildren().isEmpty(),
+                ">5 entry chain with two adjacent pairs must be dropped");
+    }
+
+    @Test
+    public void testTocFilter_largeChainRunOfThree_isDropped() {
+        List<Map<String, Object>> data = chapterWithChildren(
+                Arrays.asList("一、概述", "二、背景", "三、方法", "四、结论", "五、附录", "六、索引"),
+                new int[]{1, 2, 3, 6, 8, 10});
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
+        Assertions.assertEquals(1, bookmarks.size());
+        Assertions.assertTrue(bookmarks.get(0).getChildren().isEmpty(),
+                ">5 entry chain with a same-page run of three must be dropped");
+    }
+
+    @Test
+    public void testTocFilter_largeChainSingleAdjacentPair_isKept() {
+        List<Map<String, Object>> data = chapterWithChildren(
+                Arrays.asList("一、概述", "二、背景", "三、方法", "四、结论", "五、附录", "六、索引"),
+                new int[]{1, 2, 5, 7, 9, 11});
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
+        Assertions.assertEquals(1, bookmarks.size());
+        Assertions.assertEquals(6, bookmarks.get(0).getChildren().size(),
+                ">5 entry chain with a single adjacent pair must be kept");
+    }
+
+    @Test
+    public void testTocFilter_largeChainNoAdjacency_isKept() {
+        List<Map<String, Object>> data = chapterWithChildren(
+                Arrays.asList("一、概述", "二、背景", "三、方法", "四、结论", "五、附录", "六、索引"),
+                new int[]{1, 4, 7, 10, 13, 16});
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
+        Assertions.assertEquals(1, bookmarks.size());
+        Assertions.assertEquals(6, bookmarks.get(0).getChildren().size());
+    }
+
+    private static Map<String, Object> jsonChapter() {
+        Map<String, Object> chapter = new HashMap<>();
+        chapter.put(JsonName.ID, 1);
+        chapter.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_HEADING);
+        chapter.put(JsonName.CONTENT, Arrays.asList("第1章 绪论"));
+        chapter.put(JsonName.FONT_UNDERLINE_SIZE, 20.0);
+        chapter.put(JsonName.X0, 50.0);
+        chapter.put(JsonName.Y0, 100.0);
+        return chapter;
+    }
+
+    private static Map<String, Object> jsonNonTextItem(int id, String sourceType, double y0) {
+        Map<String, Object> item = new HashMap<>();
+        item.put(JsonName.ID, id);
+        item.put(JsonName.SOURCE_TYPE, sourceType);
+        item.put(JsonName.X0, 70.0);
+        item.put(JsonName.Y0, y0);
+        return item;
+    }
+
+    @SafeVarargs
+    private static Map<String, Object> jsonPage(Map<String, Object>... items) {
+        Map<String, Object> page = new HashMap<>();
+        page.put(JsonName.ITEMS, new ArrayList<>(Arrays.asList(items)));
+        return page;
+    }
+
+    @SafeVarargs
+    private static List<Map<String, Object>> jsonDoc(Map<String, Object>... pages) {
+        return new ArrayList<>(Arrays.asList(pages));
+    }
+
+    /**
+     * Page 0's last item is a level-2 child ("一、概述", id 2) and page 1 begins
+     * with "二、背景" as id 1. The chain ends at the page boundary and resumes on
+     * the next page, so the pair must be treated as adjacent and dropped.
+     */
+    @Test
+    public void testTocFilter_crossPageBridge_isDropped() {
+        List<Map<String, Object>> data = jsonDoc(
+                jsonPage(jsonChapter(), jsonItem(2, "一、概述", 200.0)),
+                jsonPage(jsonItem(1, "二、背景", 100.0)));
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
+        Assertions.assertEquals(1, bookmarks.size());
+        Assertions.assertEquals("第1章 绪论", bookmarks.get(0).getText());
+        Assertions.assertTrue(bookmarks.get(0).getChildren().isEmpty(),
+                "Chain ending at a page's last element and resuming with id 1 on the next page must be dropped");
+    }
+
+    /**
+     * Same layout as {@link #testTocFilter_crossPageBridge_isDropped} but the
+     * next page's id-1 item is an image, not text. The rule requires the id-1
+     * element to be text when the resume id is 2, so no cross-page adjacency
+     * exists and the chain must be kept.
+     */
+    @Test
+    public void testTocFilter_crossPageBridge_id1NotText_isKept() {
+        List<Map<String, Object>> data = jsonDoc(
+                jsonPage(jsonChapter(), jsonItem(2, "一、概述", 200.0)),
+                jsonPage(
+                        jsonNonTextItem(1, JsonName.SOURCE_TYPE_IMAGE, 100.0),
+                        jsonItem(2, "二、背景", 200.0)));
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
+        Assertions.assertEquals(1, bookmarks.size());
+        Assertions.assertEquals(2, bookmarks.get(0).getChildren().size(),
+                "Resume id 2 with a non-text id-1 element must not form a cross-page pair");
+    }
+
+    /**
+     * Page 0's chapter is followed by a lattice table (id 3), so the child with
+     * id 2 is no longer the page's last element. No cross-page adjacency exists
+     * and the chain must be kept.
+     */
+    @Test
+    public void testTocFilter_crossPageBridge_prevNotLastElement_isKept() {
+        List<Map<String, Object>> data = jsonDoc(
+                jsonPage(
+                        jsonChapter(),
+                        jsonItem(2, "一、概述", 200.0),
+                        jsonNonTextItem(3, JsonName.SOURCE_TYPE_LATTICE_TABLE, 300.0)),
+                jsonPage(jsonItem(1, "二、背景", 100.0)));
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
+        Assertions.assertEquals(1, bookmarks.size());
+        Assertions.assertEquals(2, bookmarks.get(0).getChildren().size(),
+                "A child that is not the page's last element must not form a cross-page pair");
+    }
+
+    /**
+     * A 6-entry chain spanning two pages where page 0 ends at its last element
+     * (id 3) and page 1 resumes at id 1. Same-page pairs on page 1 plus the
+     * page-boundary pair exceed the threshold, so the chain must be dropped.
+     */
+    @Test
+    public void testTocFilter_crossPageBridge_largeChain_isDropped() {
+        List<Map<String, Object>> data = jsonDoc(
+                jsonPage(
+                        jsonChapter(),
+                        jsonItem(2, "一、概述", 200.0),
+                        jsonItem(3, "二、背景", 300.0)),
+                jsonPage(
+                        jsonItem(1, "三、方法", 100.0),
+                        jsonItem(2, "四、结论", 200.0),
+                        jsonItem(4, "五、附录", 300.0),
+                        jsonItem(5, "六、索引", 400.0)));
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
+        Assertions.assertEquals(1, bookmarks.size());
+        Assertions.assertTrue(bookmarks.get(0).getChildren().isEmpty(),
+                ">5 entry chain with same-page and page-boundary adjacency must be dropped");
     }
 
 }
