@@ -73,8 +73,29 @@ public class ShapeRecognizer {
     private static final int MIN_BAR_COUNT = 3;
     /** Minimum number of segments to classify a connected line group as a polyline. */
     private static final int MIN_POLYLINE_SEGMENTS = 2;
+    /** Margin used when deciding a single line segment connects two existing shapes. */
+    private static final double CONNECTOR_MARGIN = 8.0;
+    /** Maximum width (pt) across the shaft direction a filled region may have to be
+     *  considered an arrowhead. Boxes and other node shapes are typically wider.
+     *  Also used by the caller to pre-filter PDFBox fill drawings (see
+     *  {@code DocumentProcessor.extractPageFillBoxes}). */
+    public static final double MAX_ARROWHEAD_WIDTH = 15.0;
+    /** Maximum extent (pt) along the shaft direction a filled arrowhead may span,
+     *  as a multiple of the shaft length. Prevents large filled containers from
+     *  being mistaken for arrowheads. */
+    private static final double MAX_ARROWHEAD_LENGTH_FACTOR = 3.0;
+    /** Tolerance (pt) applied when deciding whether a candidate fill extends past an
+     *  end of the shaft. The base of an arrowhead triangle usually aligns exactly
+     *  with the shaft end, and PDFBox/veraPDF coordinate rounding can differ by a
+     *  fraction of a point; without this, a 0.0001 rounding error on the aligned
+     *  edge made the head look as if it extended both ends and got rejected. */
+    private static final double ARROWHEAD_EXTENSION_EPSILON = 0.5;
     /** Bar chart: width variation tolerance between bars. */
     private static final double BAR_WIDTH_VARIATION = 0.35;
+    /** Vertical tolerance (pt) when deciding that two shapes belong to the same
+     *  group in {@link #groupShapes}. A shape sitting up to this distance below
+     *  another shape's top edge (or above its bottom edge) still counts. */
+    private static final double SHAPE_GROUP_Y_TOLERANCE = 2.0;
 
     private ShapeRecognizer() {
         // utility class
@@ -88,6 +109,28 @@ public class ShapeRecognizer {
      * @return the list of shapes found per page
      */
     public static List<List<ShapeChunk>> recognize(IDocument document) {
+        return recognize(document, null);
+    }
+
+    /**
+     * Runs shape recognition on every page of the document and appends the
+     * discovered {@link ShapeChunk}s to each page's raw artifact list.
+     *
+     * <p>The optional {@code pageFillBoxes} map provides, per page, the bounding
+     * boxes of filled paths extracted directly from the PDF content stream (e.g.
+     * via PDFBox). When the veraPDF chunk layer merges an arrowhead into a larger
+     * marked-content container, the merged {@link LineArtChunk} carries line
+     * segments and the bbox-only arrowhead is lost from the artifact layer. The
+     * raw fill boxes act as a fallback candidate source so connector arrows still
+     * get their heads. Boxes that coincide with an already recognized shape are
+     * ignored.</p>
+     *
+     * @param document       the already-parsed document
+     * @param pageFillBoxes  per-page filled-path boxes (top-left origin converted
+     *                       to y-up), or null to rely on artifacts only
+     * @return the list of shapes found per page
+     */
+    public static List<List<ShapeChunk>> recognize(IDocument document, Map<Integer, List<BoundingBox>> pageFillBoxes) {
         if (document == null) {
             return Collections.emptyList();
         }
@@ -95,7 +138,8 @@ public class ShapeRecognizer {
         List<List<ShapeChunk>> result = new ArrayList<>(pages);
         for (int pageNumber = 0; pageNumber < pages; pageNumber++) {
             List<IChunk> artifacts = document.getArtifacts(pageNumber);
-            List<ShapeChunk> shapes = recognizePage(pageNumber, artifacts);
+            List<BoundingBox> fillBoxes = pageFillBoxes == null ? null : pageFillBoxes.get(pageNumber);
+            List<ShapeChunk> shapes = recognizePage(pageNumber, artifacts, fillBoxes);
             if (artifacts != null && !shapes.isEmpty()) {
                 artifacts.addAll(shapes);
             }
@@ -103,6 +147,10 @@ public class ShapeRecognizer {
             if (!shapes.isEmpty()) {
                 LOGGER.log(Level.INFO, "Page {0}: recognized {1} shape(s)",
                         new Object[]{pageNumber + 1, shapes.size()});
+                for (ShapeChunk shape : shapes) {
+                    LOGGER.log(Level.INFO, "Page {0}: shape type={1}, components={2}, bbox={3}",
+                            new Object[]{pageNumber + 1, shape.getShapeType(), shape.getComponentCount(), shape.getBoundingBox()});
+                }
             }
         }
         return result;
@@ -116,17 +164,40 @@ public class ShapeRecognizer {
      * @return a list of new shape chunks; never null
      */
     public static List<ShapeChunk> recognizePage(int pageNumber, List<IChunk> artifacts) {
+        return recognizePage(pageNumber, artifacts, null);
+    }
+
+    /**
+     * Recognizes shapes on a single page.
+     *
+     * @param pageNumber the 0-based page number
+     * @param artifacts  the raw page artifacts (may be null)
+     * @param fillBoxes  raw filled-path boxes (y-up) used as a fallback source for
+     *                   arrowheads lost to marked-content merging, or null
+     * @return a list of new shape chunks; never null
+     */
+    public static List<ShapeChunk> recognizePage(int pageNumber, List<IChunk> artifacts, List<BoundingBox> fillBoxes) {
         if (artifacts == null || artifacts.isEmpty()) {
             return Collections.emptyList();
         }
 
         List<LineChunk> allLines = new ArrayList<>();
+        List<BoundingBox> filledArtBoxes = new ArrayList<>();
         for (IChunk chunk : artifacts) {
             if (chunk instanceof LineChunk) {
                 allLines.add((LineChunk) chunk);
             } else if (chunk instanceof LineArtChunk) {
-                List<LineChunk> lineChunks = ((LineArtChunk) chunk).getLineChunks();
-                if (lineChunks != null) {
+                LineArtChunk art = (LineArtChunk) chunk;
+                List<LineChunk> lineChunks = art.getLineChunks();
+                if (lineChunks == null || lineChunks.isEmpty()) {
+                    BoundingBox artBox = art.getBoundingBox();
+                    if (artBox != null && !artBox.isEmpty()) {
+                        // Bbox-only line art: a filled region with no segment geometry,
+                        // typically an arrowhead triangle or a curved shape. Kept aside
+                        // so connectors can be extended onto their arrowheads.
+                        filledArtBoxes.add(artBox);
+                    }
+                } else {
                     allLines.addAll(lineChunks);
                 }
             }
@@ -154,6 +225,10 @@ public class ShapeRecognizer {
 
         shapes.addAll(recognizeFilledShapes(pageNumber, filledRects));
         shapes.addAll(recognizePolylines(pageNumber, thinLines));
+        // Single-segment lines that bridge two existing shapes are likely arrows/connectors.
+        // They are too short to form a polyline on their own but are important for
+        // reconstructing flowcharts and diagrams.
+        shapes.addAll(recognizeConnectorLines(pageNumber, thinLines, shapes, filledArtBoxes, fillBoxes));
 
         return shapes;
     }
@@ -324,6 +399,200 @@ public class ShapeRecognizer {
             }
         }
         return shapes;
+    }
+
+    /**
+     * Recognizes single line segments that act as connectors/arrows between two
+     * already recognized shapes. These are typically discarded by
+     * {@link #recognizePolylines} because a chain of length 1 does not meet the
+     * polyline threshold, but they are essential for diagrams and flowcharts.
+     */
+    private static List<ShapeChunk> recognizeConnectorLines(int pageNumber, List<LineChunk> thinLines,
+                                                             List<ShapeChunk> existingShapes,
+                                                             List<BoundingBox> filledArtBoxes,
+                                                             List<BoundingBox> fillBoxes) {
+        if (thinLines.isEmpty() || existingShapes.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        Map<String, List<LineChunk>> byColor = groupByColor(thinLines);
+        List<ShapeChunk> connectors = new ArrayList<>();
+
+        for (List<LineChunk> sameColorLines : byColor.values()) {
+            List<List<LineChunk>> chains = buildChains(sameColorLines);
+            for (List<LineChunk> chain : chains) {
+                if (chain.size() != 1) {
+                    continue;
+                }
+                LineChunk line = chain.get(0);
+                if (!isConnectorLine(line, existingShapes)) {
+                    continue;
+                }
+                BoundingBox bbox = findArrowBBox(line, filledArtBoxes, fillBoxes, existingShapes);
+                connectors.add(new ShapeChunk(new BoundingBox(bbox), ShapeChunk.TYPE_ARROW,
+                        line.getStrokeColor(), 1, Collections.singletonList(bbox)));
+            }
+        }
+        return connectors;
+    }
+
+    /**
+     * Computes the bounding box of an arrow given its shaft (a thin connector line)
+     * and the page's filled (bbox-only) regions. The arrowhead triangle in a PDF is
+     * usually rendered as a filled polygon that produces a {@link LineArtChunk} with
+     * no line segments. When a small such region overlaps the shaft and extends past
+     * exactly one of its ends, the returned box covers the shaft plus that arrowhead;
+     * otherwise the plain shaft box is returned.
+     *
+     * <p>If no arrowhead is found in the artifact layer (e.g. it was merged into a
+     * larger marked-content container and is lost from the artifacts), the raw
+     * content-stream fill boxes are used as a fallback candidate source.</p>
+     */
+    private static BoundingBox findArrowBBox(LineChunk line, List<BoundingBox> filledArtBoxes,
+                                             List<BoundingBox> fillBoxes, List<ShapeChunk> existingShapes) {
+        BoundingBox shaft = line.getBoundingBox();
+        if (shaft == null || shaft.isEmpty()) {
+            return new BoundingBox(shaft);
+        }
+        BoundingBox head = pickArrowhead(shaft, filledArtBoxes);
+        if (head == null && fillBoxes != null && !fillBoxes.isEmpty()) {
+            head = pickArrowhead(shaft, filterShapeCoincidentFills(fillBoxes, existingShapes));
+        }
+        if (head == null) {
+            return new BoundingBox(shaft);
+        }
+        BoundingBox arrow = new BoundingBox(shaft);
+        arrow.union(head);
+        return arrow;
+    }
+
+    /**
+     * Returns the best candidate region that looks like the arrowhead of the given
+     * shaft, or null when no candidate qualifies.
+     */
+    private static BoundingBox pickArrowhead(BoundingBox shaft, List<BoundingBox> candidates) {
+        if (candidates == null || candidates.isEmpty()) {
+            return null;
+        }
+        boolean vertical = shaft.getHeight() >= shaft.getWidth();
+        double shaftAlong = vertical ? shaft.getHeight() : shaft.getWidth();
+        if (shaftAlong <= 0) {
+            return null;
+        }
+
+        BoundingBox best = null;
+        double bestArea = Double.MAX_VALUE;
+        for (BoundingBox art : candidates) {
+            if (art == null || art.isEmpty() || !overlaps(art, shaft)) {
+                continue;
+            }
+            // An arrowhead extends before (or after) the shaft along its axis, never both.
+            boolean extendsBefore = vertical ? art.getBottomY() < shaft.getBottomY() - ARROWHEAD_EXTENSION_EPSILON
+                    : art.getLeftX() < shaft.getLeftX() - ARROWHEAD_EXTENSION_EPSILON;
+            boolean extendsAfter = vertical ? art.getTopY() > shaft.getTopY() + ARROWHEAD_EXTENSION_EPSILON
+                    : art.getRightX() > shaft.getRightX() + ARROWHEAD_EXTENSION_EPSILON;
+            if (extendsBefore == extendsAfter) {
+                continue;
+            }
+            // Size guards keep large filled backgrounds/containers from being arrowheads.
+            double perpDim = vertical ? art.getWidth() : art.getHeight();
+            if (perpDim > MAX_ARROWHEAD_WIDTH) {
+                continue;
+            }
+            double alongDim = vertical ? art.getHeight() : art.getWidth();
+            if (alongDim > MAX_ARROWHEAD_LENGTH_FACTOR * shaftAlong) {
+                continue;
+            }
+            double area = art.getWidth() * art.getHeight();
+            if (best == null || area < bestArea) {
+                best = art;
+                bestArea = area;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Drops raw fill boxes that substantially overlap an already recognized solid
+     * shape (rectangle/bar) of comparable size. Without this, a small filled node
+     * box at the end of a connector would be mistaken for an arrowhead and inflate
+     * the arrow's bounding box. Polylines are deliberately not consulted: an
+     * arrowhead triangle is itself reconstructed as a polyline from its (possibly
+     * MCID-merged) stroke segments, so requiring non-coincidence against it would
+     * defeat the PDFBox fill fallback. Arrowheads that merely poke into a much
+     * larger shape are kept as well, since their fill is a distinct, much smaller
+     * region.
+     */
+    private static List<BoundingBox> filterShapeCoincidentFills(List<BoundingBox> fillBoxes,
+                                                                List<ShapeChunk> existingShapes) {
+        List<BoundingBox> filtered = new ArrayList<>(fillBoxes.size());
+        for (BoundingBox fill : fillBoxes) {
+            if (fill == null || fill.isEmpty()) {
+                continue;
+            }
+            double fillArea = fill.getWidth() * fill.getHeight();
+            boolean coincides = false;
+            for (ShapeChunk shape : existingShapes) {
+                String type = shape.getShapeType();
+                if (!ShapeChunk.TYPE_RECTANGLE.equals(type) && !ShapeChunk.TYPE_BAR_CHART.equals(type)) {
+                    continue;
+                }
+                BoundingBox shapeBox = shape.getBoundingBox();
+                if (shapeBox == null || shapeBox.isEmpty()) {
+                    continue;
+                }
+                double overlap = overlapArea(fill, shapeBox);
+                double shapeArea = shapeBox.getWidth() * shapeBox.getHeight();
+                if (overlap >= 0.5 * fillArea && shapeArea <= 10.0 * fillArea) {
+                    coincides = true;
+                    break;
+                }
+            }
+            if (!coincides) {
+                filtered.add(fill);
+            }
+        }
+        return filtered;
+    }
+
+    private static double overlapArea(BoundingBox a, BoundingBox b) {
+        double width = Math.min(a.getRightX(), b.getRightX()) - Math.max(a.getLeftX(), b.getLeftX());
+        double height = Math.min(a.getTopY(), b.getTopY()) - Math.max(a.getBottomY(), b.getBottomY());
+        if (width <= 0 || height <= 0) {
+            return 0;
+        }
+        return width * height;
+    }
+
+    private static boolean overlaps(BoundingBox a, BoundingBox b) {
+        return a.getLeftX() <= b.getRightX() && a.getRightX() >= b.getLeftX()
+                && a.getBottomY() <= b.getTopY() && a.getTopY() >= b.getBottomY();
+    }
+
+    private static boolean isConnectorLine(LineChunk line, List<ShapeChunk> existingShapes) {
+        ShapeChunk startShape = findShapeNearPoint(line.getStartX(), line.getStartY(), existingShapes);
+        ShapeChunk endShape = findShapeNearPoint(line.getEndX(), line.getEndY(), existingShapes);
+        return startShape != null && endShape != null && startShape != endShape;
+    }
+
+    private static ShapeChunk findShapeNearPoint(double x, double y, List<ShapeChunk> shapes) {
+        ShapeChunk nearest = null;
+        double minDistance = Double.MAX_VALUE;
+        for (ShapeChunk shape : shapes) {
+            BoundingBox bbox = shape.getBoundingBox();
+            if (x < bbox.getLeftX() - CONNECTOR_MARGIN || x > bbox.getRightX() + CONNECTOR_MARGIN
+                    || y < bbox.getBottomY() - CONNECTOR_MARGIN || y > bbox.getTopY() + CONNECTOR_MARGIN) {
+                continue;
+            }
+            double centerX = 0.5 * (bbox.getLeftX() + bbox.getRightX());
+            double centerY = 0.5 * (bbox.getBottomY() + bbox.getTopY());
+            double distance = Math.hypot(x - centerX, y - centerY);
+            if (distance < minDistance) {
+                minDistance = distance;
+                nearest = shape;
+            }
+        }
+        return nearest;
     }
 
     /**
@@ -541,7 +810,8 @@ public class ShapeRecognizer {
             return result;
         }
 
-        // Union-find: build connected components of overlapping shapes.
+        // Union-find: build connected components of shapes whose bounding boxes
+        // overlap horizontally and are vertically within the y tolerance.
         UnionFind uf = new UnionFind(shapes.size());
         for (int i = 0; i < shapes.size(); i++) {
             BoundingBox bboxI = shapes.get(i).getBoundingBox();
@@ -550,7 +820,7 @@ public class ShapeRecognizer {
             }
             for (int j = i + 1; j < shapes.size(); j++) {
                 BoundingBox bboxJ = shapes.get(j).getBoundingBox();
-                if (bboxJ != null && !bboxJ.isEmpty() && bboxI.overlaps(bboxJ)) {
+                if (bboxJ != null && !bboxJ.isEmpty() && overlapsWithYTolerance(bboxI, bboxJ)) {
                     uf.union(i, j);
                 }
             }
@@ -562,6 +832,21 @@ public class ShapeRecognizer {
         }
 
         return new ArrayList<>(groups.values());
+    }
+
+    /**
+     * Returns true when two bounding boxes overlap in x and are vertically
+     * within {@link #SHAPE_GROUP_Y_TOLERANCE} of each other (or actually
+     * overlapping). A shape whose top edge sits up to the tolerance below the
+     * other's bottom edge — or whose bottom edge sits up to the tolerance above
+     * the other's top edge — is treated as connected.
+     */
+    private static boolean overlapsWithYTolerance(BoundingBox a, BoundingBox b) {
+        if (a.getLeftX() > b.getRightX() || b.getLeftX() > a.getRightX()) {
+            return false;
+        }
+        return a.getBottomY() <= b.getTopY() + SHAPE_GROUP_Y_TOLERANCE
+                && b.getBottomY() <= a.getTopY() + SHAPE_GROUP_Y_TOLERANCE;
     }
 
     private static class UnionFind {
