@@ -453,6 +453,7 @@ public class JsonWriter {
                             Map<String, Object> imageMap = new HashMap<>();
                             imageMap.put(JsonName.ITEM_TYPE, "image");
                             imageMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_IMAGE);
+                            imageMap.put(JsonName.ID, finalTextId);
                             imageMap.put(JsonName.WIDTH, imageChunk.getWidth());
                             imageMap.put(JsonName.HEIGHT, imageChunk.getHeight());
                             imageMap.put(JsonName.FONT_UNDERLINE_SIZE, imageChunk.getHeight());
@@ -633,7 +634,7 @@ public class JsonWriter {
                         /*if (content instanceof ShapeChunk) {
                             jsonGenerator.writeObject(content);
                         }*/
-                        if (!(content instanceof ImageChunk || content instanceof ShapeChunk)) {
+                        if (!(content instanceof ShapeChunk)) {
                             textId++;
                         }
                         prevBottomY[0] = content.getBottomY();
