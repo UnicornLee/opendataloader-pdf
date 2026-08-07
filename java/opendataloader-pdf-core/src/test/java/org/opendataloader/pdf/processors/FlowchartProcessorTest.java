@@ -63,6 +63,34 @@ class FlowchartProcessorTest {
     }
 
     @Test
+    void screenshotBoundingBoxExpandsVerticallyByTolerance() {
+        List<IObject> pageContents = new ArrayList<>();
+        List<List<IObject>> grouped = new ArrayList<>();
+
+        // Union bbox of the group is (100, 200)-(180, 440).
+        ShapeChunk box1 = new ShapeChunk(new BoundingBox(0, 100, 400, 180, 440), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk box2 = new ShapeChunk(new BoundingBox(0, 100, 300, 180, 340), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk box3 = new ShapeChunk(new BoundingBox(0, 100, 200, 180, 240), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk line1 = new ShapeChunk(new BoundingBox(0, 140, 240, 142, 300), ShapeChunk.TYPE_POLYLINE, BLACK, 2);
+        ShapeChunk line2 = new ShapeChunk(new BoundingBox(0, 140, 340, 142, 400), ShapeChunk.TYPE_POLYLINE, BLACK, 2);
+
+        List<IObject> group = Arrays.asList(box1, box2, box3, line1, line2);
+        grouped.add(group);
+        pageContents.addAll(group);
+
+        CapturingImagesUtils imagesUtils = new CapturingImagesUtils();
+        FlowchartProcessor.processFlowchartGroups(pageContents, grouped, imagesUtils, 0);
+
+        Assertions.assertEquals(1, imagesUtils.saved.size());
+        BoundingBox bbox = imagesUtils.saved.get(0).getBoundingBox();
+        // Horizontal margin 5: 100-5=95, 180+5=185. Y tolerance: topY+1=441, bottomY-1=199.
+        Assertions.assertEquals(95.0, bbox.getLeftX(), 0.0001);
+        Assertions.assertEquals(185.0, bbox.getRightX(), 0.0001);
+        Assertions.assertEquals(199.0, bbox.getBottomY(), 0.0001, "bottomY should be reduced by the vertical tolerance");
+        Assertions.assertEquals(441.0, bbox.getTopY(), 0.0001, "topY should be increased by the vertical tolerance");
+    }
+
+    @Test
     void detectsCompositeContentFlowchart() {
         List<IObject> pageContents = new ArrayList<>();
         List<List<IObject>> grouped = new ArrayList<>();
@@ -170,6 +198,90 @@ class FlowchartProcessorTest {
 
         Assertions.assertEquals(0, imagesUtils.saved.size(), "Bar chart group should be skipped");
         Assertions.assertEquals(3, pageContents.size(), "Bar chart contents should be untouched");
+    }
+
+    @Test
+    void mergesSubsequentGroupIntersectingScreenshotBox() {
+        List<IObject> pageContents = new ArrayList<>();
+        List<List<IObject>> grouped = new ArrayList<>();
+
+        // Group 1: flowchart, union bbox (100,200)-(180,440), screenshot (95,199)-(185,441).
+        ShapeChunk box1 = new ShapeChunk(new BoundingBox(0, 100, 400, 180, 440), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk box2 = new ShapeChunk(new BoundingBox(0, 100, 300, 180, 340), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk box3 = new ShapeChunk(new BoundingBox(0, 100, 200, 180, 240), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk line1 = new ShapeChunk(new BoundingBox(0, 140, 240, 142, 300), ShapeChunk.TYPE_POLYLINE, BLACK, 2);
+        ShapeChunk line2 = new ShapeChunk(new BoundingBox(0, 140, 340, 142, 400), ShapeChunk.TYPE_POLYLINE, BLACK, 2);
+        List<IObject> group1 = Arrays.asList(box1, box2, box3, line1, line2);
+
+        // Group 2: own flowchart, disjoint from group1 in x but intersecting
+        // group1's screenshot margin; union bbox (181,200)-(250,440).
+        ShapeChunk g2a = new ShapeChunk(new BoundingBox(0, 181, 400, 250, 440), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk g2b = new ShapeChunk(new BoundingBox(0, 181, 300, 250, 340), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk g2c = new ShapeChunk(new BoundingBox(0, 181, 200, 250, 240), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk g2l1 = new ShapeChunk(new BoundingBox(0, 200, 240, 202, 300), ShapeChunk.TYPE_POLYLINE, BLACK, 2);
+        ShapeChunk g2l2 = new ShapeChunk(new BoundingBox(0, 200, 340, 202, 400), ShapeChunk.TYPE_POLYLINE, BLACK, 2);
+        List<IObject> group2 = Arrays.asList(g2a, g2b, g2c, g2l1, g2l2);
+
+        grouped.add(group1);
+        grouped.add(group2);
+        pageContents.addAll(group1);
+        pageContents.addAll(group2);
+
+        CapturingImagesUtils imagesUtils = new CapturingImagesUtils();
+        FlowchartProcessor.processFlowchartGroups(pageContents, grouped, imagesUtils, 0);
+
+        Assertions.assertEquals(1, imagesUtils.saved.size(), "Intersecting later group should be merged into one screenshot");
+        Assertions.assertEquals(1, pageContents.size(), "Absorbed shapes should be replaced by one image");
+        Assertions.assertInstanceOf(ImageChunk.class, pageContents.get(0));
+        BoundingBox bbox = imagesUtils.saved.get(0).getBoundingBox();
+        Assertions.assertEquals(95.0, bbox.getLeftX(), 0.0001);
+        Assertions.assertEquals(250.0, bbox.getRightX(), 0.0001, "Screenshot should cover the absorbed group");
+        Assertions.assertEquals(199.0, bbox.getBottomY(), 0.0001);
+        Assertions.assertEquals(441.0, bbox.getTopY(), 0.0001);
+    }
+
+    @Test
+    void skipsAbsorbedGroupAndStillProcessesRemainingGroups() {
+        List<IObject> pageContents = new ArrayList<>();
+        List<List<IObject>> grouped = new ArrayList<>();
+
+        // Group 1: flowchart at x 100-180.
+        ShapeChunk box1 = new ShapeChunk(new BoundingBox(0, 100, 400, 180, 440), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk box2 = new ShapeChunk(new BoundingBox(0, 100, 300, 180, 340), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk box3 = new ShapeChunk(new BoundingBox(0, 100, 200, 180, 240), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk line1 = new ShapeChunk(new BoundingBox(0, 140, 240, 142, 300), ShapeChunk.TYPE_POLYLINE, BLACK, 2);
+        ShapeChunk line2 = new ShapeChunk(new BoundingBox(0, 140, 340, 142, 400), ShapeChunk.TYPE_POLYLINE, BLACK, 2);
+        List<IObject> group1 = Arrays.asList(box1, box2, box3, line1, line2);
+
+        // Group 2: flowchart that will be absorbed into group 1 (x 181-250).
+        ShapeChunk g2a = new ShapeChunk(new BoundingBox(0, 181, 400, 250, 440), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk g2b = new ShapeChunk(new BoundingBox(0, 181, 300, 250, 340), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk g2c = new ShapeChunk(new BoundingBox(0, 181, 200, 250, 240), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk g2l1 = new ShapeChunk(new BoundingBox(0, 200, 240, 202, 300), ShapeChunk.TYPE_POLYLINE, BLACK, 2);
+        ShapeChunk g2l2 = new ShapeChunk(new BoundingBox(0, 200, 340, 202, 400), ShapeChunk.TYPE_POLYLINE, BLACK, 2);
+        List<IObject> group2 = Arrays.asList(g2a, g2b, g2c, g2l1, g2l2);
+
+        // Group 3: independent flowchart far away (x 400-480), must still be processed.
+        ShapeChunk b1 = new ShapeChunk(new BoundingBox(0, 400, 400, 480, 440), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk b2 = new ShapeChunk(new BoundingBox(0, 400, 300, 480, 340), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk b3 = new ShapeChunk(new BoundingBox(0, 400, 200, 480, 240), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk l1 = new ShapeChunk(new BoundingBox(0, 430, 240, 432, 300), ShapeChunk.TYPE_POLYLINE, BLACK, 2);
+        ShapeChunk l2 = new ShapeChunk(new BoundingBox(0, 430, 340, 432, 400), ShapeChunk.TYPE_POLYLINE, BLACK, 2);
+        List<IObject> group3 = Arrays.asList(b1, b2, b3, l1, l2);
+
+        grouped.add(group1);
+        grouped.add(group2);
+        grouped.add(group3);
+        pageContents.addAll(group1);
+        pageContents.addAll(group2);
+        pageContents.addAll(group3);
+
+        CapturingImagesUtils imagesUtils = new CapturingImagesUtils();
+        FlowchartProcessor.processFlowchartGroups(pageContents, grouped, imagesUtils, 0);
+
+        Assertions.assertEquals(2, imagesUtils.saved.size(),
+                "Absorbed group 2 must be skipped; group 1 and group 3 each produce a screenshot");
+        Assertions.assertEquals(2, pageContents.size(), "Two independent screenshots should remain");
     }
 
     private static class CapturingImagesUtils extends ImagesUtils {
