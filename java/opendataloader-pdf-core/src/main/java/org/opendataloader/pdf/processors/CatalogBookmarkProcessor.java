@@ -32,6 +32,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -179,6 +180,145 @@ public class CatalogBookmarkProcessor {
                 new Object[]{total, roots.size(), bestRange.startPage + 1, bestRange.endPage + 1});
 
         return new CatalogResult(roots, bestRange.startPage, bestRange.endPage);
+    }
+
+    /**
+     * Complements missing sub-bookmarks in the catalog tree by re-running the
+     * page bookmark candidate pipeline below each catalog anchor.
+     *
+     * <p>Only catalog nodes whose {@code page_num}/{@code related_id} anchor
+     * exists in the page bookmark tree are considered; front-matter entries with
+     * no page anchor (e.g. 本次发行概况 / 重要声明 / 目 录) are left untouched.
+     * A catalog L1 without children gets its L2 children re-derived at level 2;
+     * a catalog L2 without children gets its L3 children re-derived at level 3.
+     * Existing catalog children are preserved, so the catalog keeps its own
+     * detected L1/L2 structure and the tree never grows beyond three levels.
+     * The slice source is the raw candidate set (before cleaning), so the
+     * appended nodes are freshly built objects independent of the page bookmark
+     * tree, yet node-for-node consistent with it.</p>
+     *
+     * @param data per-page JSON data array
+     * @param catalogStartPage 0-based inclusive start of catalog page range, or -1
+     * @param catalogEndPage 0-based inclusive end of catalog page range, or -1
+     * @param catalogBookmarks catalog bookmark roots, mutated in place
+     * @param pageBookmarks page bookmark roots used for anchor resolution
+     */
+    public static void fillCatalogChildrenFromPageData(
+            List<Map<String, Object>> data,
+            int catalogStartPage, int catalogEndPage,
+            List<Bookmark> catalogBookmarks,
+            List<Bookmark> pageBookmarks) {
+        if (data == null || data.isEmpty()
+                || catalogBookmarks == null || catalogBookmarks.isEmpty()
+                || pageBookmarks == null || pageBookmarks.isEmpty()) {
+            return;
+        }
+
+        Map<BookmarkKey, Bookmark> pageIndex = indexBookmarks(pageBookmarks);
+        int complemented = 0;
+
+        for (Bookmark catalogTop : catalogBookmarks) {
+            Bookmark pageTop = pageIndex.get(new BookmarkKey(catalogTop));
+            if (pageTop == null || pageTop.getChildren().isEmpty()) {
+                continue;
+            }
+
+            if (catalogTop.getChildren().isEmpty()) {
+                // The catalog lost the whole subtree below this anchor: rebuild
+                // the L2 children from the anchor range.
+                List<Bookmark> built = PageBookmarkProcessor.extractChildrenForAnchor(
+                    data, catalogStartPage, catalogEndPage,
+                    anchorPage(catalogTop), anchorRelatedId(catalogTop), 2);
+                if (!built.isEmpty()) {
+                    catalogTop.getChildren().addAll(built);
+                    complemented++;
+                }
+                continue;
+            }
+
+            for (Bookmark catalogChild : catalogTop.getChildren()) {
+                Bookmark pageChild = pageIndex.get(new BookmarkKey(catalogChild));
+                if (pageChild == null || pageChild.getChildren().isEmpty()
+                        || !catalogChild.getChildren().isEmpty()) {
+                    continue;
+                }
+                List<Bookmark> built = PageBookmarkProcessor.extractChildrenForAnchor(
+                    data, catalogStartPage, catalogEndPage,
+                    anchorPage(catalogChild), anchorRelatedId(catalogChild), 3);
+                if (!built.isEmpty()) {
+                    catalogChild.getChildren().addAll(built);
+                    complemented++;
+                }
+            }
+        }
+
+        LOGGER.log(Level.INFO,
+            "[CatalogBookmark] complemented {0} catalog bookmark group(s) from page data",
+            complemented);
+    }
+
+    /**
+     * Builds a deep (page_num, related_id) to bookmark index of the page tree so
+     * catalog anchors can be resolved against any level.
+     */
+    private static Map<BookmarkKey, Bookmark> indexBookmarks(List<Bookmark> roots) {
+        Map<BookmarkKey, Bookmark> index = new HashMap<>();
+        for (Bookmark root : roots) {
+            indexBookmarkDeep(index, root);
+        }
+        return index;
+    }
+
+    private static void indexBookmarkDeep(Map<BookmarkKey, Bookmark> index, Bookmark bookmark) {
+        if (bookmark == null) {
+            return;
+        }
+        index.put(new BookmarkKey(bookmark), bookmark);
+        List<Bookmark> children = bookmark.getChildren();
+        if (children != null) {
+            for (Bookmark child : children) {
+                indexBookmarkDeep(index, child);
+            }
+        }
+    }
+
+    private static int anchorPage(Bookmark bookmark) {
+        return bookmark == null || bookmark.getPageNum() == null ? 0 : bookmark.getPageNum();
+    }
+
+    private static int anchorRelatedId(Bookmark bookmark) {
+        return bookmark == null || bookmark.getRelatedId() == null ? 0 : bookmark.getRelatedId();
+    }
+
+    private static final class BookmarkKey {
+        final int page;
+        final int relatedId;
+
+        BookmarkKey(Bookmark bookmark) {
+            this(anchorPage(bookmark), anchorRelatedId(bookmark));
+        }
+
+        BookmarkKey(int page, int relatedId) {
+            this.page = page;
+            this.relatedId = relatedId;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof BookmarkKey)) {
+                return false;
+            }
+            BookmarkKey that = (BookmarkKey) o;
+            return page == that.page && relatedId == that.relatedId;
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(page, relatedId);
+        }
     }
 
     /**
