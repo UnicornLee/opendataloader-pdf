@@ -122,7 +122,7 @@ public class JsonWriter {
         try (JsonGenerator jsonGenerator = getJsonGenerator(jsonFileName)) {
             jsonGenerator.writeStartObject();
             jsonGenerator.writeStringField("url", inputPdfName);
-            jsonGenerator.writeArrayFieldStart("bookmarks");
+            jsonGenerator.writeArrayFieldStart("self_bookmarks");
             for (Bookmark bookmark : BookmarkUtils.getSelfBookmarks(inputPdfName)) {
                 jsonGenerator.writePOJO(bookmark);
             }
@@ -670,6 +670,7 @@ public class JsonWriter {
         if (config != null) {
             List<Map<String, Object>> data = (List<Map<String, Object>>) map.get(JsonName.DATA);
             if (data != null) {
+                resolveSelfBookmarkRelatedIds(mapper, map, data);
                 CatalogBookmarkProcessor.CatalogResult catalogResult =
                     CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, config);
                 List<Bookmark> catalogBookmarks = catalogResult.getBookmarks();
@@ -703,7 +704,7 @@ public class JsonWriter {
         String jsFileName = outputFolder + File.separator + inputPDF.getName().substring(0, inputPDF.getName().length() - 3) + "js";
         String jsFileContent = "var url = " + mapper.writeValueAsString(inputPdfName) + ";";
         jsFileContent += "\n\n";
-        jsFileContent += "var bookmarks = " + mapper.writeValueAsString(map.get("catalog_bookmarks")) + ";";
+        jsFileContent += "var bookmarks = " + mapper.writeValueAsString(map.get("self_bookmarks")) + ";";
         jsFileContent += "\n\n";
         jsFileContent += "var data = " + mapper.writeValueAsString(map.get(JsonName.DATA)) + ";";
         FileUtils.writeToFile(jsFileName, jsFileContent);
@@ -771,6 +772,21 @@ public class JsonWriter {
         String sourceType = (String) item.get(JsonName.SOURCE_TYPE);
         return JsonName.SOURCE_TYPE_PARAGRAPH.equals(sourceType)
             || JsonName.SOURCE_TYPE_HEADING.equals(sourceType);
+    }
+
+    /**
+     * 解析 self_bookmarks 的 related_id：对每个书签按 page_num 定位 JSON 页，
+     * 用书签标题在该页 items 中匹配文本项，命中则复用其 id，未命中保持 0。
+     */
+    private static void resolveSelfBookmarkRelatedIds(ObjectMapper mapper, Map<String, Object> map,
+                                                     List<Map<String, Object>> data) {
+        Object selfObj = map.get("self_bookmarks");
+        if (!(selfObj instanceof List)) {
+            return;
+        }
+        List<Bookmark> selfBookmarks = mapper.convertValue(selfObj, new TypeReference<List<Bookmark>>() {});
+        CatalogBookmarkProcessor.resolveSelfBookmarkRelatedIds(selfBookmarks, data);
+        map.put("self_bookmarks", selfBookmarks);
     }
 
     /**
