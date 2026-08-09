@@ -31,7 +31,7 @@ pulsar:
     ocr_receive_topic_name: capital/pdf_parse_common/pdf_parse_ocr_image_analysis_result
 
 oss:
-    template_bucket_name: stock-temp-bucket
+    temp_bucket_name: stock-temp-bucket
     permanent_bucket_name: common-pdf-bucket
     endpoint: https://obs.cn-north-1.myhuaweicloud.com
     access_key: EUD3T68PPED8VI2ZHX2K
