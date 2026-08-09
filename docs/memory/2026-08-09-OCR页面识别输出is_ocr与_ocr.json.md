@@ -58,7 +58,14 @@ private static void writeOcrDetectionJson(ObjectMapper mapper,
 4. 遍历 items，挑选 `item_type == "image"` 且 `height / page.height` 比例最大的；记录 `bestImage / bestRatio`。
 5. `bestImage == null || bestRatio <= 0.8` → 跳过。
 6. 命中：`page["is_ocr"] = true`；取 `bestImage["content"][0]` 作为 `image_url`；`image_height = page.height`、`image_width = page.width`；构造 entry 追加到 `ocrEntries`。
-7. 构造 OCR JSON：
+7. **无命中页时直接 `return`**，不构造 OCR JSON、不写文件，避免出现 `data:[]` 的空文件；只输出 INFO 日志：
+   ```java
+   if (ocrEntries.isEmpty()) {
+       LOGGER.log(Level.INFO, "No OCR pages detected, skip creating _ocr.json for {0}", pdfFileName);
+       return;
+   }
+   ```
+8. 构造 OCR JSON：
    ```json
    {
      "business_id": "None",
@@ -67,7 +74,7 @@ private static void writeOcrDetectionJson(ObjectMapper mapper,
      "data": [ { "page_index": N, "image_url": "...", "image_height": H, "image_width": W } ]
    }
    ```
-8. 文件名：
+9. 文件名：
    ```java
    String ocrBaseName = pdfFileName.substring(0, pdfFileName.length() - 3);
    if (ocrBaseName.endsWith(".")) {
@@ -76,11 +83,11 @@ private static void writeOcrDetectionJson(ObjectMapper mapper,
    String ocrFileName = outputFolder + File.separator + ocrBaseName + "_ocr.json";
    ```
    - 必须显式去掉 `length()-3` 残留的尾部 `.`，否则 `.pdf` 会得到 `xxx._ocr.json`（实测遇到）。
-9. 紧凑 JSON（**不带** `writerWithDefaultPrettyPrinter`），匹配样例单行格式：
-   ```java
-   mapper.writeValue(new File(ocrFileName), ocrResult);
-   LOGGER.log(Level.INFO, "Created {0}", ocrFileName);
-   ```
+10. 紧凑 JSON（**不带** `writerWithDefaultPrettyPrinter`），匹配样例单行格式：
+    ```java
+    mapper.writeValue(new File(ocrFileName), ocrResult);
+    LOGGER.log(Level.INFO, "Created {0}", ocrFileName);
+    ```
 
 ### 改动 3：新增 import
 ```java
@@ -90,15 +97,17 @@ import java.util.LinkedHashMap;   // 紧跟 java.util.HashMap 之后
 
 ## 验证结果
 - `mvn -pl opendataloader-pdf-core compile -DskipTests` BUILD SUCCESS，无新增 warning/error。
-- 跑 `DebugSample`（`docs/pdf\202303181679059838994480.pdf`）：
-  - 生成 `tmp_output\202303181679059838994480_ocr.json`：
-    ```json
-    {"business_id":"None","extend":{},"url":"...\\202303181679059838994480.pdf","data":[{"page_index":196,"image_url":"...\\202303181679059838994480_images\\imageFile85.png","image_height":841.92,"image_width":595.32}]}
-    ```
-  - 主 `tmp_output\202303181679059838994480.json` 中 page_index=196 出现 `"is_ocr" : true`（其余页保持 `false`），证明：
-    - 命中判定正确（page196 仅 1 张图，图片高度 808 / 页高 841.92 ≈ 0.96 > 0.8）。
-    - `is_ocr` 写回主 JSON 链路通（`config != null` 分支写回时生效）。
+- **正例**（`docs/pdf\202303181679059838994480.pdf`，全量 PDF）：生成 `tmp_output\202303181679059838994480_ocr.json`：
+  ```json
+  {"business_id":"None","extend":{},"url":"...\\202303181679059838994480.pdf","data":[{"page_index":196,"image_url":"...\\202303181679059838994480_images\\imageFile85.png","image_height":841.92,"image_width":595.32}]}
+  ```
+  主 `tmp_output\202303181679059838994480.json` 中 page_index=196 出现 `"is_ocr" : true`（其余页保持 `false`），证明：
+  - 命中判定正确（page196 仅 1 张图，图片高度 808 / 页高 841.92 ≈ 0.96 > 0.8）。
+  - `is_ocr` 写回主 JSON 链路通（`config != null` 分支写回时生效）。
   - 文件名严格匹配 `<pdfname>_ocr.json`，无 `.` 前缀（已剥除）。
+- **反例**（`docs/pdf\202303181679059838994480-197.pdf`，单页子集 PDF，无命中页）：
+  - 日志：`No OCR pages detected, skip creating _ocr.json for 202303181679059838994480-197.pdf`
+  - 不生成 `*_ocr.json` 文件；目录扫描确认 `tmp_output` 内没有新的空 OCR 文件。
 
 ## 关键决策（Key Decisions）
 - **`is_ocr` 改在内存 map 上、由现有 bookmarks 写回顺带持久化**，避免在 OCR 流程里多写一次主 JSON；前提是 `config != null`（实际调用方 `DocumentProcessor.processDocument` 总是非 null）。
