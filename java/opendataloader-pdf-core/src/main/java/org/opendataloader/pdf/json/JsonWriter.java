@@ -36,6 +36,7 @@ import org.opendataloader.pdf.markdown.MarkdownSyntax;
 import org.opendataloader.pdf.processors.CatalogBookmarkProcessor;
 import org.opendataloader.pdf.processors.DocumentProcessor;
 import org.opendataloader.pdf.processors.PageBookmarkProcessor;
+import org.opendataloader.pdf.utils.HuaweiObsClient;
 import org.opendataloader.pdf.utils.SmartTextJoiner;
 import org.verapdf.as.ASAtom;
 import org.verapdf.cos.COSDictionary;
@@ -65,14 +66,20 @@ import org.verapdf.wcag.algorithms.semanticalgorithms.containers.StaticContainer
 
 import java.io.File;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -107,18 +114,18 @@ public class JsonWriter {
         writeToJson(inputPDF, outputFolder, contents, elementMetadata, hybridInfo, false);
     }
 
-    public static void writeToCustomJson(String inputPdfName, String outputFolder, List<List<IObject>> contents,
-                                         Map<Long, ElementMetadata> elementMetadata,
-                                         Map<String, Object> hybridInfo,
-                                         boolean includeHeaderFooter) throws IOException {
-        writeToCustomJson(inputPdfName, outputFolder, contents, elementMetadata, hybridInfo, includeHeaderFooter, null);
+    public static CustomOutputResult writeToCustomJson(String inputPdfName, String outputFolder, List<List<IObject>> contents,
+                                          Map<Long, ElementMetadata> elementMetadata,
+                                          Map<String, Object> hybridInfo,
+                                          boolean includeHeaderFooter) throws IOException {
+        return writeToCustomJson(inputPdfName, outputFolder, contents, elementMetadata, hybridInfo, includeHeaderFooter, null);
     }
 
-    public static void writeToCustomJson(String inputPdfName, String outputFolder, List<List<IObject>> contents,
-                                         Map<Long, ElementMetadata> elementMetadata,
-                                         Map<String, Object> hybridInfo,
-                                         boolean includeHeaderFooter,
-                                         Config config) throws IOException {
+    public static CustomOutputResult writeToCustomJson(String inputPdfName, String outputFolder, List<List<IObject>> contents,
+                                          Map<Long, ElementMetadata> elementMetadata,
+                                          Map<String, Object> hybridInfo,
+                                          boolean includeHeaderFooter,
+                                          Config config) throws IOException {
         StaticLayoutContainers.resetImageIndex();
         File inputPDF = new File(inputPdfName);
         String jsonFileName = outputFolder + File.separator + inputPDF.getName().substring(0, inputPDF.getName().length() - 3) + "json";
@@ -666,86 +673,127 @@ public class JsonWriter {
             new TypeReference<Map<String, Object>>() {}
         );
 
-        // 扫描每一页，识别符合 OCR 条件的页面，写入 <pdfname>_ocr.json，
-        // 并在命中页上将 is_ocr 置为 true（由后续 bookmarks 写回主 JSON 时一起持久化）。
+        // 解析配置中的 OSS 参数，判断是否启用对象存储
+        OssUploadConfig ossConfig = OssUploadConfig.fromCustomOptions(config);
+        boolean ossEnabled = ossConfig.isEnabled();
+        HuaweiObsClient obsClient = null;
+        if (ossEnabled) {
+            obsClient = new HuaweiObsClient(ossConfig.getEndpoint(), ossConfig.getAccessKey(), ossConfig.getSecretKey());
+        }
+
+        // 遍历每页，把图片上传到永久桶并用 OSS URL 替换本地路径
         try {
-            writeOcrDetectionJson(mapper, map, outputFolder, inputPDF.getName(), config);
-        } catch (Exception ocrEx) {
-            LOGGER.log(Level.WARNING, "Unable to create OCR detection JSON: " + ocrEx.getMessage());
-        }
+            if (ossEnabled) {
+                uploadImagesToOssAndUpdateMap(map, obsClient, ossConfig);
+            }
 
-        // 在已生成的 JSON 数据上识别 catalog_bookmarks 与 page_bookmarks，
-        // page_bookmarks 的 relatedId 直接复用 JSON item 的 id。
-        if (config != null) {
-            // 记录 BookmarkQualitySelector 选中的来源键名；未选中(null)时三个原始键全部保留。
-            String selectedSource = null;
-            List<Map<String, Object>> data = (List<Map<String, Object>>) map.get(JsonName.DATA);
-            if (data != null) {
-                resolveSelfBookmarkRelatedIds(mapper, map, data);
-                CatalogBookmarkProcessor.CatalogResult catalogResult =
-                    CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, config);
-                List<Bookmark> catalogBookmarks = catalogResult.getBookmarks();
-                int catalogStartPage = catalogResult.getStartPage();
-                int catalogEndPage = catalogResult.getEndPage();
+            // 扫描每一页，识别符合 OCR 条件的页面，写入 <pdfname>_ocr.json，
+            // 并在命中页上将 is_ocr 置为 true（由后续 bookmarks 写回主 JSON 时一起持久化）。
+            try {
+                writeOcrDetectionJson(mapper, map, outputFolder, inputPDF.getName(), config);
+            } catch (Exception ocrEx) {
+                LOGGER.log(Level.WARNING, "Unable to create OCR detection JSON: " + ocrEx.getMessage());
+            }
 
-                List<Bookmark> pageBookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(
-                    data, catalogStartPage, catalogEndPage);
+            // 在已生成的 JSON 数据上识别 catalog_bookmarks 与 page_bookmarks，
+            // page_bookmarks 的 relatedId 直接复用 JSON item 的 id。
+            if (config != null) {
+                // 记录 BookmarkQualitySelector 选中的来源键名；未选中(null)时三个原始键全部保留。
+                String selectedSource = null;
+                List<Map<String, Object>> data = (List<Map<String, Object>>) map.get(JsonName.DATA);
+                if (data != null) {
+                    resolveSelfBookmarkRelatedIds(mapper, map, data);
+                    CatalogBookmarkProcessor.CatalogResult catalogResult =
+                        CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, config);
+                    List<Bookmark> catalogBookmarks = catalogResult.getBookmarks();
+                    int catalogStartPage = catalogResult.getStartPage();
+                    int catalogEndPage = catalogResult.getEndPage();
 
-                // Complement missing L2/L3 sub-bookmarks in the catalog tree from
-                // the page bookmark candidates (sliced by anchor ranges).
-                CatalogBookmarkProcessor.fillCatalogChildrenFromPageData(
-                    data, catalogStartPage, catalogEndPage, catalogBookmarks, pageBookmarks);
+                    List<Bookmark> pageBookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(
+                        data, catalogStartPage, catalogEndPage);
 
-                if (catalogStartPage >= 0 && catalogEndPage >= catalogStartPage) {
-                    map.put("catalog_page_range_start", catalogStartPage + 1);
-                    map.put("catalog_page_range_end", catalogEndPage + 1);
+                    // Complement missing L2/L3 sub-bookmarks in the catalog tree from
+                    // the page bookmark candidates (sliced by anchor ranges).
+                    CatalogBookmarkProcessor.fillCatalogChildrenFromPageData(
+                        data, catalogStartPage, catalogEndPage, catalogBookmarks, pageBookmarks);
+
+                    if (catalogStartPage >= 0 && catalogEndPage >= catalogStartPage) {
+                        map.put("catalog_page_range_start", catalogStartPage + 1);
+                        map.put("catalog_page_range_end", catalogEndPage + 1);
+                    }
+                    map.put("catalog_bookmarks", catalogBookmarks);
+                    map.put("page_bookmarks", pageBookmarks);
+
+                    writeCollectedPageBookmarkMarkdown(outputFolder, inputPdfName, data,
+                        catalogStartPage, catalogEndPage);
+
+                    // 从 catalog/page/self 三种来源中选出质量最高的目录写入 bookmarks
+                    List<Bookmark> selfBookmarks = mapper.convertValue(
+                        map.get("self_bookmarks"), new TypeReference<List<Bookmark>>() {});
+                    Map<Integer, Set<Integer>> pageItemIds = BookmarkQualitySelector.buildPageItemIds(data);
+                    BookmarkQualitySelector.Selection selection = BookmarkQualitySelector.select(
+                        catalogBookmarks, pageBookmarks, selfBookmarks, pageItemIds);
+                    map.put("bookmarks", selection.getBookmarks());
+                    // 只移除被选中的来源；未选中的(或全部被淘汰时 selectedSource 为 null)
+                    // 仍保留在 map 中，以便写入 json。
+                    selectedSource = selection.getSource();
+                } else {
+                    map.put("bookmarks", new ArrayList<>());
+                    // data 为空时无法做来源选择，三个原始键保留在输出中。
                 }
-                map.put("catalog_bookmarks", catalogBookmarks);
-                map.put("page_bookmarks", pageBookmarks);
+                if (selectedSource != null) {
+                    map.remove(selectedSource);
+                }
 
-                writeCollectedPageBookmarkMarkdown(outputFolder, inputPdfName, data,
-                    catalogStartPage, catalogEndPage);
+                // 把更新后的内容重新写回 json 文件
+                mapper.writerWithDefaultPrettyPrinter().writeValue(new File(jsonFileName), map);
+            }
 
-                // 从 catalog/page/self 三种来源中选出质量最高的目录写入 bookmarks
-                List<Bookmark> selfBookmarks = mapper.convertValue(
-                    map.get("self_bookmarks"), new TypeReference<List<Bookmark>>() {});
-                Map<Integer, Set<Integer>> pageItemIds = BookmarkQualitySelector.buildPageItemIds(data);
-                BookmarkQualitySelector.Selection selection = BookmarkQualitySelector.select(
-                    catalogBookmarks, pageBookmarks, selfBookmarks, pageItemIds);
-                map.put("bookmarks", selection.getBookmarks());
-                // 只移除被选中的来源；未选中的(或全部被淘汰时 selectedSource 为 null)
-                // 仍保留在 map 中，以便写入 json。
-                selectedSource = selection.getSource();
+            // 上传主 JSON 到临时桶，并构造返回结果
+            String jsonUrlOrPath;
+            String ocrJsonLocalPath = resolveOcrJsonLocalPath(outputFolder, inputPDF.getName());
+            boolean ossUploadSuccess = false;
+            if (ossEnabled) {
+                String jsonObjectKey = buildJsonObjectKey(ossConfig, inputPDF.getName());
+                jsonUrlOrPath = obsClient.uploadFile(ossConfig.getTempBucketName(), jsonObjectKey, new File(jsonFileName), ossConfig.getDomainName());
+                LOGGER.log(Level.INFO, "Uploaded main JSON to OBS: {0}", jsonUrlOrPath);
+                ossUploadSuccess = true;
+
+                // 上传成功后清理本地文件：保留 _ocr.json，删除 outputFolder 下与当前 PDF 相关的其余生成文件
+                cleanupLocalFiles(outputFolder, inputPDF.getName(), ocrJsonLocalPath);
             } else {
-                map.put("bookmarks", new ArrayList<>());
-                // data 为空时无法做来源选择，三个原始键保留在输出中。
-            }
-            if (selectedSource != null) {
-                map.remove(selectedSource);
+                // 生成 html/js/css 等辅助文件
+                FileUtils.copyResourceToDir("templates/index.css", outputFolder);
+                String jsFileName = outputFolder + File.separator + inputPDF.getName().substring(0, inputPDF.getName().length() - 3) + "js";
+                String jsFileContent = "var url = " + mapper.writeValueAsString(inputPdfName) + ";";
+                jsFileContent += "\n\n";
+                Object selectedBookmarks = map.get("bookmarks");
+                jsFileContent += "var bookmarks = " + mapper.writeValueAsString(
+                    selectedBookmarks != null ? selectedBookmarks : new ArrayList<>()) + ";";
+                jsFileContent += "\n\n";
+                jsFileContent += "var data = " + mapper.writeValueAsString(map.get(JsonName.DATA)) + ";";
+                FileUtils.writeToFile(jsFileName, jsFileContent);
+
+                String htmlFileName = outputFolder + File.separator + inputPDF.getName().substring(0, inputPDF.getName().length() - 3) + "html";
+                // 按行读取 templates/announcementAnalysis.html 文件，并按行写入 htmlFileName
+                List<String> htmlLines = FileUtils.readResourceLines("templates/announcementAnalysis.html");
+                String pdfFileName = inputPDF.getName().substring(0, inputPDF.getName().length() - 4);
+                htmlLines.set(6, "  <title>" + pdfFileName + "</title>");
+                htmlLines.set(11, "  <script type=\"text/javascript\" src= \"" + pdfFileName + ".js\"></script>");
+                FileUtils.writeToFile(htmlFileName, String.join("\n", htmlLines));
+                jsonUrlOrPath = new File(jsonFileName).getAbsolutePath();
             }
 
-            // 把更新后的内容重新写回 json 文件
-            mapper.writerWithDefaultPrettyPrinter().writeValue(new File(jsonFileName), map);
+            return new CustomOutputResult(jsonUrlOrPath, ocrJsonLocalPath, ossUploadSuccess);
+        } finally {
+            if (obsClient != null) {
+                try {
+                    obsClient.close();
+                } catch (IOException closeEx) {
+                    LOGGER.log(Level.WARNING, "Failed to close OBS client: " + closeEx.getMessage());
+                }
+            }
         }
-
-        FileUtils.copyResourceToDir("templates/index.css", outputFolder);
-        String jsFileName = outputFolder + File.separator + inputPDF.getName().substring(0, inputPDF.getName().length() - 3) + "js";
-        String jsFileContent = "var url = " + mapper.writeValueAsString(inputPdfName) + ";";
-        jsFileContent += "\n\n";
-        Object selectedBookmarks = map.get("bookmarks");
-        jsFileContent += "var bookmarks = " + mapper.writeValueAsString(
-            selectedBookmarks != null ? selectedBookmarks : new ArrayList<>()) + ";";
-        jsFileContent += "\n\n";
-        jsFileContent += "var data = " + mapper.writeValueAsString(map.get(JsonName.DATA)) + ";";
-        FileUtils.writeToFile(jsFileName, jsFileContent);
-
-        String htmlFileName = outputFolder + File.separator + inputPDF.getName().substring(0, inputPDF.getName().length() - 3) + "html";
-        // 按行读取 templates/announcementAnalysis.html 文件，并按行写入 htmlFileName
-        List<String> htmlLines = FileUtils.readResourceLines("templates/announcementAnalysis.html");
-        String pdfFileName = inputPDF.getName().substring(0, inputPDF.getName().length() - 4);
-        htmlLines.set(6, "  <title>" + pdfFileName + "</title>");
-        htmlLines.set(11, "  <script type=\"text/javascript\" src= \"" + pdfFileName + ".js\"></script>");
-        FileUtils.writeToFile(htmlFileName, String.join("\n", htmlLines));
     }
 
     /**
@@ -1026,6 +1074,276 @@ public class JsonWriter {
             }
         }
         return SmartTextJoiner.joinNonEmptyPieces(pieces).trim();
+    }
+
+    /**
+     * 封装 customOptions 中的 OSS 配置项。
+     */
+    private static final class OssUploadConfig {
+        private final String businessId;
+        private final String basicEnv;
+        private final String pulsarReceiveTopicName;
+        private final String tempBucketName;
+        private final String permanentBucketName;
+        private final String endpoint;
+        private final String accessKey;
+        private final String secretKey;
+        private final String domainName;
+
+        private OssUploadConfig(String businessId, String basicEnv, String pulsarReceiveTopicName,
+                                String tempBucketName, String permanentBucketName, String endpoint,
+                                String accessKey, String secretKey, String domainName) {
+            this.businessId = businessId;
+            this.basicEnv = basicEnv;
+            this.pulsarReceiveTopicName = pulsarReceiveTopicName;
+            this.tempBucketName = tempBucketName;
+            this.permanentBucketName = permanentBucketName;
+            this.endpoint = endpoint;
+            this.accessKey = accessKey;
+            this.secretKey = secretKey;
+            this.domainName = domainName;
+        }
+
+        static OssUploadConfig fromCustomOptions(Config config) {
+            if (config == null) {
+                return disabled();
+            }
+            Map<String, Object> options = config.getCustomOptions();
+            if (options == null) {
+                return disabled();
+            }
+            String[] requiredKeys = {
+                "businessId", "basicEnv", "pulsarReceiveTopicName", "ossTempBucketName",
+                "ossPermanentBucketName", "ossEndpoint", "ossAccessKey", "ossSecretKey", "ossDomainName"
+            };
+            for (String key : requiredKeys) {
+                if (!options.containsKey(key) || options.get(key) == null) {
+                    return disabled();
+                }
+            }
+            String topicName = String.valueOf(options.get("pulsarReceiveTopicName"));
+            int lastSlash = topicName.lastIndexOf('/');
+            String topicLastPart = lastSlash >= 0 ? topicName.substring(lastSlash + 1) : topicName;
+            return new OssUploadConfig(
+                String.valueOf(options.get("businessId")),
+                String.valueOf(options.get("basicEnv")),
+                topicLastPart,
+                String.valueOf(options.get("ossTempBucketName")),
+                String.valueOf(options.get("ossPermanentBucketName")),
+                String.valueOf(options.get("ossEndpoint")),
+                String.valueOf(options.get("ossAccessKey")),
+                String.valueOf(options.get("ossSecretKey")),
+                String.valueOf(options.get("ossDomainName"))
+            );
+        }
+
+        private static OssUploadConfig disabled() {
+            return new OssUploadConfig(null, null, null, null, null, null, null, null, null);
+        }
+
+        boolean isEnabled() {
+            return businessId != null;
+        }
+
+        String getBusinessId() { return businessId; }
+        String getBasicEnv() { return basicEnv; }
+        String getPulsarReceiveTopicName() { return pulsarReceiveTopicName; }
+        String getTempBucketName() { return tempBucketName; }
+        String getPermanentBucketName() { return permanentBucketName; }
+        String getEndpoint() { return endpoint; }
+        String getAccessKey() { return accessKey; }
+        String getSecretKey() { return secretKey; }
+        String getDomainName() { return domainName; }
+    }
+
+    /**
+     * 遍历主 JSON 的每一页，将图片上传到 OSS 永久桶，并用 OSS URL 替换 content 中的本地路径。
+     */
+    private static void uploadImagesToOssAndUpdateMap(Map<String, Object> map,
+                                                       HuaweiObsClient obsClient,
+                                                       OssUploadConfig ossConfig) throws IOException {
+        Object dataObj = map.get(JsonName.DATA);
+        if (!(dataObj instanceof List)) {
+            return;
+        }
+        List<?> pages = (List<?>) dataObj;
+        for (Object pageObj : pages) {
+            if (!(pageObj instanceof Map)) {
+                continue;
+            }
+            Map<String, Object> page = (Map<String, Object>) pageObj;
+            Object itemsObj = page.get(JsonName.ITEMS);
+            if (!(itemsObj instanceof List)) {
+                continue;
+            }
+            for (Object itemObj : (List<?>) itemsObj) {
+                if (!(itemObj instanceof Map)) {
+                    continue;
+                }
+                Map<String, Object> item = (Map<String, Object>) itemObj;
+                if (!"image".equals(item.get(JsonName.ITEM_TYPE))) {
+                    continue;
+                }
+                Object contentObj = item.get(JsonName.CONTENT);
+                if (!(contentObj instanceof List) || ((List<?>) contentObj).isEmpty()) {
+                    continue;
+                }
+                Object first = ((List<?>) contentObj).get(0);
+                if (first == null) {
+                    continue;
+                }
+                String localPath = first.toString();
+                File imageFile = new File(localPath);
+                if (!imageFile.exists()) {
+                    LOGGER.log(Level.WARNING, "Image file not found, skip uploading: {0}", localPath);
+                    continue;
+                }
+                String imageName = imageFile.getName();
+                String objectKey = String.format("public/%s/%s_%s/%s",
+                    ossConfig.getBasicEnv(),
+                    ossConfig.getPulsarReceiveTopicName(),
+                    ossConfig.getBusinessId(),
+                    imageName);
+                String imageUrl = obsClient.uploadFile(
+                    ossConfig.getPermanentBucketName(), objectKey, imageFile, ossConfig.getDomainName());
+                ((List<Object>) contentObj).set(0, imageUrl);
+                LOGGER.log(Level.INFO, "Replaced image path with OBS URL: {0}", imageUrl);
+            }
+        }
+    }
+
+    /**
+     * 构造主 JSON 文件上传到临时桶时使用的 object key。
+     */
+    private static String buildJsonObjectKey(OssUploadConfig ossConfig, String pdfFileName) {
+        String baseName = pdfFileName;
+        if (baseName.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
+            baseName = baseName.substring(0, baseName.length() - 4);
+        }
+        // 去除可能残留的点号
+        if (baseName.endsWith(".")) {
+            baseName = baseName.substring(0, baseName.length() - 1);
+        }
+        return String.format("public/%s/%s_%s.json",
+            ossConfig.getBasicEnv(),
+            ossConfig.getPulsarReceiveTopicName(),
+            ossConfig.getBusinessId());
+    }
+
+    /**
+     * 解析 _ocr.json 的本地绝对路径；若文件不存在则返回空字符串。
+     */
+    private static String resolveOcrJsonLocalPath(String outputFolder, String pdfFileName) {
+        String baseName = pdfFileName;
+        if (baseName.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
+            baseName = baseName.substring(0, baseName.length() - 4);
+        }
+        if (baseName.endsWith(".")) {
+            baseName = baseName.substring(0, baseName.length() - 1);
+        }
+        String ocrFileName = outputFolder + File.separator + baseName + "_ocr.json";
+        File ocrFile = new File(ocrFileName);
+        return ocrFile.exists() ? ocrFile.getAbsolutePath() : "";
+    }
+
+    /**
+     * OSS 上传成功后清理本地生成文件。
+     *
+     * <p>保留 {@code ocrJsonLocalPath}（如果存在），只删除输出目录下与当前 PDF
+     * 文件名相关的生成文件，不影响其他 PDF 产生的文件。{@code ocrJsonLocalPath}
+     * 为空字符串时表示没有生成 _ocr.json。
+     * 原始输入 PDF 不在这里删除，由上层在关闭 PDF 资源后处理。</p>
+     */
+    private static void cleanupLocalFiles(String outputFolder, String pdfFileName, String ocrJsonLocalPath)
+            throws IOException {
+        Path outputPath = Paths.get(outputFolder);
+        if (!Files.exists(outputPath)) {
+            return;
+        }
+
+        String pdfBaseName = pdfFileName;
+        if (pdfBaseName.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
+            pdfBaseName = pdfBaseName.substring(0, pdfBaseName.length() - 4);
+        }
+        if (pdfBaseName.endsWith(".")) {
+            pdfBaseName = pdfBaseName.substring(0, pdfBaseName.length() - 1);
+        }
+        final String baseName = pdfBaseName;
+        final String imageDirName = baseName + MarkdownSyntax.IMAGES_DIRECTORY_SUFFIX;
+        final Path ocrPath = ocrJsonLocalPath.isEmpty() ? null : Paths.get(ocrJsonLocalPath).toAbsolutePath().normalize();
+        final String ocrFileName = ocrPath != null ? ocrPath.getFileName().toString() : null;
+
+        Files.walkFileTree(outputPath, new SimpleFileVisitor<Path>() {
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                Path normalized = file.toAbsolutePath().normalize();
+                if (ocrPath != null && normalized.equals(ocrPath)) {
+                    return FileVisitResult.CONTINUE;
+                }
+                String fileName = normalized.getFileName().toString();
+                if (fileName.equals(ocrFileName)) {
+                    return FileVisitResult.CONTINUE;
+                }
+                if (isRelatedToCurrentPdf(fileName, baseName)) {
+                    Files.delete(file);
+                }
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
+                Path normalized = dir.toAbsolutePath().normalize();
+                if (normalized.equals(outputPath.toAbsolutePath().normalize())) {
+                    return FileVisitResult.CONTINUE;
+                }
+                String dirName = normalized.getFileName().toString();
+                if (dirName.equals(imageDirName)) {
+                    // 直接删除当前 PDF 的图片目录及其内容，不再继续遍历该目录
+                    deleteDirectoryTree(normalized);
+                    return FileVisitResult.SKIP_SUBTREE;
+                }
+                if (!isRelatedToCurrentPdf(dirName, baseName)) {
+                    return FileVisitResult.SKIP_SUBTREE;
+                }
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+                Path normalized = dir.toAbsolutePath().normalize();
+                if (normalized.equals(outputPath.toAbsolutePath().normalize())) {
+                    return FileVisitResult.CONTINUE;
+                }
+                String dirName = normalized.getFileName().toString();
+                if (isRelatedToCurrentPdf(dirName, baseName)) {
+                    Files.delete(dir);
+                }
+                return FileVisitResult.CONTINUE;
+            }
+        });
+    }
+
+    private static void deleteDirectoryTree(Path dir) throws IOException {
+        if (!Files.exists(dir)) {
+            return;
+        }
+        Files.walk(dir)
+            .sorted(Collections.reverseOrder())
+            .forEach(path -> {
+                try {
+                    Files.delete(path);
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            });
+    }
+
+    private static boolean isRelatedToCurrentPdf(String name, String pdfBaseName) {
+        return name.equals(pdfBaseName + ".json")
+            || name.equals(pdfBaseName + ".js")
+            || name.equals(pdfBaseName + ".html")
+            || name.equals(pdfBaseName + "_page_bookmarks_collected.md")
+            || name.startsWith(pdfBaseName + "_");
     }
 
     public static void writeToJson(File inputPDF, String outputFolder, List<List<IObject>> contents,

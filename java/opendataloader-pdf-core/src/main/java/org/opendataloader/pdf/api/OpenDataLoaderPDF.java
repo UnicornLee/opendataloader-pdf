@@ -17,6 +17,7 @@ package org.opendataloader.pdf.api;
 
 import org.opendataloader.pdf.hybrid.HybridClientFactory;
 import org.opendataloader.pdf.processors.DocumentProcessor;
+import org.opendataloader.pdf.processors.ProcessingResult;
 
 import java.io.IOException;
 
@@ -34,10 +35,11 @@ public final class OpenDataLoaderPDF {
      *
      * @param inputPdfName The path to the input PDF file.
      * @param config       The configuration object specifying output formats and other options.
+     * @return A {@link ProcessingResult} containing timing metadata and output file paths/URLs.
      * @throws IOException If an error occurs during file reading or processing.
      */
-    public static void processFile(String inputPdfName, Config config) throws IOException {
-        DocumentProcessor.processFile(inputPdfName, config);
+    public static ProcessingResult processFile(String inputPdfName, Config config) throws IOException {
+        return DocumentProcessor.processFileWithResult(inputPdfName, config);
     }
 
     /**

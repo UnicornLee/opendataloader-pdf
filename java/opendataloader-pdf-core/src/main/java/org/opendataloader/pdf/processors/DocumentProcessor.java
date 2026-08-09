@@ -21,6 +21,7 @@ import org.opendataloader.pdf.custom.dto.TextInOcrDetailDto;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
 import org.opendataloader.pdf.entities.content.ShapeChunk;
 import org.opendataloader.pdf.hybrid.ElementMetadata;
+import org.opendataloader.pdf.json.CustomOutputResult;
 import org.opendataloader.pdf.processors.readingorder.XYCutPlusPlusSorter;
 import org.opendataloader.pdf.json.JsonWriter;
 import org.opendataloader.pdf.markdown.MarkdownGenerator;
@@ -153,21 +154,36 @@ public class DocumentProcessor {
      * @throws IOException if unable to process the file
      */
     public static ProcessingResult processFileWithResult(String inputPdfName, Config config) throws IOException {
+        CustomOutputResult customOutput = null;
         try {
             // Phase 1: Extract
             ExtractionResult extraction = extractContents(inputPdfName, config);
 
             // Phase 2: Output (JSON/MD/HTML/PDF/Text)
             long t0 = System.nanoTime();
-            generateCustomOutputs(inputPdfName, extraction.getContents(), config, extraction.getElementMetadata());
+            customOutput = generateCustomOutputs(inputPdfName, extraction.getContents(), config, extraction.getElementMetadata());
             long outputNs = System.nanoTime() - t0;
 
-            return new ProcessingResult(extraction.getHybridTimings(), extraction.getExtractionNs(), outputNs);
+            return new ProcessingResult(extraction.getHybridTimings(), extraction.getExtractionNs(), outputNs,
+                customOutput.getJsonUrlOrPath(), customOutput.getOcrJsonLocalPath());
         } finally {
             // Always release resources, even if processing threw. closePdfResources
             // logs and swallows per-step failures so cleanup cannot mask the original
             // processing exception.
             closePdfResources();
+
+            // OSS 上传成功且原始 PDF 仍存在时，在资源释放后删除源文件。
+            if (customOutput != null && customOutput.isOssUploadSuccess()) {
+                try {
+                    File inputPdf = new File(inputPdfName);
+                    if (inputPdf.exists()) {
+                        Files.delete(inputPdf.toPath());
+                        LOGGER.log(Level.INFO, "Deleted input PDF after OSS upload: {0}", inputPdfName);
+                    }
+                } catch (IOException deleteEx) {
+                    LOGGER.log(Level.WARNING, "Failed to delete input PDF after OSS upload: " + inputPdfName, deleteEx);
+                }
+            }
         }
     }
 
@@ -640,9 +656,9 @@ public class DocumentProcessor {
         return pagesToProcess == null || pagesToProcess.contains(pageNumber);
     }
 
-    public static void generateCustomOutputs(String inputPdfName, List<List<IObject>> contents, Config config,
+    public static CustomOutputResult generateCustomOutputs(String inputPdfName, List<List<IObject>> contents, Config config,
                                        Map<Long, ElementMetadata> elementMetadata) throws IOException {
-        JsonWriter.writeToCustomJson(inputPdfName, config.getOutputFolder(), contents, elementMetadata,
+        return JsonWriter.writeToCustomJson(inputPdfName, config.getOutputFolder(), contents, elementMetadata,
             null, config.isIncludeHeaderFooter(), config);
     }
 
