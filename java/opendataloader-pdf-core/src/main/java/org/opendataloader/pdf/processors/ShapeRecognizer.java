@@ -66,6 +66,14 @@ public class ShapeRecognizer {
     private static final double ADJACENCY_GAP = 2.0;
     /** Color tolerance for treating two RGB values as the same color. */
     private static final double COLOR_EPSILON = 0.02;
+    /**
+     * Tolerance for treating a color channel as fully white. PDFs commonly use
+     * exactly 1.0 for white fills, but small floating point differences (e.g.
+     * 0.9999) are still treated as white. White shapes on a white page background
+     * are invisible and are almost always decorative backgrounds or table rows,
+     * not meaningful chart elements.
+     */
+    private static final double WHITE_EPSILON = 0.005;
     /** A line is considered a filled rectangle if its thickness is at least this
      *  fraction of the smaller bounding-box dimension. */
     private static final double FILLED_RECTANGLE_RATIO = 0.5;
@@ -92,6 +100,13 @@ public class ShapeRecognizer {
     private static final double ARROWHEAD_EXTENSION_EPSILON = 0.5;
     /** Bar chart: width variation tolerance between bars. */
     private static final double BAR_WIDTH_VARIATION = 0.35;
+    /**
+     * Minimum relative variation in bar length (height for vertical bars, width
+     * for horizontal bars) required to treat a cluster as a bar chart. A set of
+     * bars with nearly identical lengths is usually a table row or decorative
+     * stripe, not a chart encoding different values.
+     */
+    private static final double BAR_VALUE_VARIATION = 0.15;
     /** Vertical tolerance (pt) when deciding that two shapes belong to the same
      *  group in {@link #groupShapes}. A shape sitting up to this distance below
      *  another shape's top edge (or above its bottom edge) still counts. */
@@ -185,7 +200,16 @@ public class ShapeRecognizer {
         List<BoundingBox> filledArtBoxes = new ArrayList<>();
         for (IChunk chunk : artifacts) {
             if (chunk instanceof LineChunk) {
-                allLines.add((LineChunk) chunk);
+                LineChunk line = (LineChunk) chunk;
+                // PDF has no standard page-background-color field; the default page
+                // background is white. White shapes on a white background are invisible
+                // and are almost always decorative backgrounds or table rows, not
+                // chart elements. Ignore them to avoid false positives like bar charts
+                // built from white table-row backgrounds.
+                if (isWhite(line.getStrokeColor())) {
+                    continue;
+                }
+                allLines.add(line);
             } else if (chunk instanceof LineArtChunk) {
                 LineArtChunk art = (LineArtChunk) chunk;
                 List<LineChunk> lineChunks = art.getLineChunks();
@@ -198,7 +222,12 @@ public class ShapeRecognizer {
                         filledArtBoxes.add(artBox);
                     }
                 } else {
-                    allLines.addAll(lineChunks);
+                    // Same white-filter applies to line art children.
+                    for (LineChunk line : lineChunks) {
+                        if (!isWhite(line.getStrokeColor())) {
+                            allLines.add(line);
+                        }
+                    }
                 }
             }
         }
@@ -326,14 +355,14 @@ public class ShapeRecognizer {
                 } else if (isSameBarGroup(currentGroup, rect)) {
                     currentGroup.add(rect);
                 } else {
-                    if (currentGroup.size() >= MIN_BAR_COUNT) {
+                    if (currentGroup.size() >= MIN_BAR_COUNT && isValidBarGroup(currentGroup)) {
                         groups.add(new ArrayList<>(currentGroup));
                     }
                     currentGroup.clear();
                     currentGroup.add(rect);
                 }
             }
-            if (currentGroup.size() >= MIN_BAR_COUNT) {
+            if (currentGroup.size() >= MIN_BAR_COUNT && isValidBarGroup(currentGroup)) {
                 groups.add(currentGroup);
             }
         }
@@ -624,6 +653,25 @@ public class ShapeRecognizer {
     }
 
     /**
+     * Returns true when the color is white (or near-white). Because PDF does not
+     * define a standard page background color, this recognizer assumes the
+     * default white background. White shapes on a white background are invisible
+     * to readers and are almost always decorative backgrounds or table rows, not
+     * chart elements that should be extracted as shapes.
+     */
+    private static boolean isWhite(double[] color) {
+        if (color == null) {
+            return false;
+        }
+        for (double channel : color) {
+            if (Math.abs(channel - 1.0) > WHITE_EPSILON) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * Clusters rectangles that overlap or are adjacent (gap <= ADJACENCY_GAP).
      */
     private static List<List<LineChunk>> clusterRects(List<LineChunk> rects) {
@@ -695,7 +743,7 @@ public class ShapeRecognizer {
                 similarWidths = false;
             }
         }
-        if (sameBaseline && similarWidths) {
+        if (sameBaseline && similarWidths && isValidBarGroup(byX)) {
             return ShapeChunk.TYPE_BAR_CHART;
         }
 
@@ -717,11 +765,88 @@ public class ShapeRecognizer {
                 similarHeights = false;
             }
         }
-        if (sameVerticalEdge && similarHeights) {
+        if (sameVerticalEdge && similarHeights && isValidBarGroup(byY)) {
             return ShapeChunk.TYPE_BAR_CHART;
         }
 
         return ShapeChunk.TYPE_RECTANGLE;
+    }
+
+    /**
+     * Returns true when the group looks like an actual bar chart: bars are
+     * elongated enough to have a clear orientation, they are separated by gaps
+     * (not stacked table rows), and their lengths vary as if encoding values.
+     */
+    private static boolean isValidBarGroup(List<LineChunk> group) {
+        if (group == null || group.isEmpty()) {
+            return false;
+        }
+        BoundingBox firstBox = group.get(0).getBoundingBox();
+        if (firstBox == null || firstBox.isEmpty()) {
+            return false;
+        }
+        boolean vertical = firstBox.getHeight() >= 2.0 * firstBox.getWidth();
+        boolean horizontal = firstBox.getWidth() >= 2.0 * firstBox.getHeight();
+        if (!vertical && !horizontal) {
+            return false;
+        }
+        return hasBarGaps(group, vertical) && hasVaryingBarLengths(group, vertical);
+    }
+
+    /**
+     * Checks that at least two consecutive bars are separated by a positive gap,
+     * so stacked/adjacent rectangles (e.g. table rows) are not treated as charts.
+     */
+    private static boolean hasBarGaps(List<LineChunk> group, boolean vertical) {
+        List<LineChunk> sorted = new ArrayList<>(group);
+        if (vertical) {
+            sorted.sort(Comparator.comparingDouble(LineChunk::getCenterX));
+        } else {
+            sorted.sort(Comparator.comparingDouble(LineChunk::getCenterY));
+        }
+        for (int i = 1; i < sorted.size(); i++) {
+            LineChunk prev = sorted.get(i - 1);
+            LineChunk curr = sorted.get(i);
+            BoundingBox prevBox = prev.getBoundingBox();
+            BoundingBox currBox = curr.getBoundingBox();
+            if (prevBox == null || currBox == null || prevBox.isEmpty() || currBox.isEmpty()) {
+                continue;
+            }
+            double gap = vertical ? currBox.getLeftX() - prevBox.getRightX()
+                    : currBox.getBottomY() - prevBox.getTopY();
+            if (gap > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Checks that bars differ in their value dimension (height for vertical bars,
+     * width for horizontal bars). Identical-length bars are usually decorative
+     * stripes or table rows, not a bar chart.
+     */
+    private static boolean hasVaryingBarLengths(List<LineChunk> group, boolean vertical) {
+        double min = Double.MAX_VALUE;
+        double max = Double.MIN_VALUE;
+        double sum = 0;
+        int count = 0;
+        for (LineChunk r : group) {
+            BoundingBox bb = r.getBoundingBox();
+            if (bb == null || bb.isEmpty()) {
+                continue;
+            }
+            double len = vertical ? bb.getHeight() : bb.getWidth();
+            min = Math.min(min, len);
+            max = Math.max(max, len);
+            sum += len;
+            count++;
+        }
+        if (count == 0) {
+            return false;
+        }
+        double avg = sum / count;
+        return avg > 0 && (max - min) / avg > BAR_VALUE_VARIATION;
     }
 
     /**
