@@ -32,6 +32,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -75,6 +76,10 @@ public final class LineArtProcessor {
         if (pageContents == null || pageContents.isEmpty() || imagesUtils == null) {
             return;
         }
+        // Sort page contents from top to bottom (topY descending) so the forward/backward
+        // overlap scan finds neighbours in the correct vertical order, regardless of
+        // how earlier processors may have rearranged the list.
+        pageContents.sort(Comparator.comparingDouble(IObject::getTopY).reversed());
         List<IObject> result = new ArrayList<>(pageContents.size());
         for (int i = 0; i < pageContents.size(); i++) {
             IObject current = pageContents.get(i);

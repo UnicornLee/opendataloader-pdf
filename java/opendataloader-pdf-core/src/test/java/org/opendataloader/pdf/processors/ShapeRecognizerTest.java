@@ -71,6 +71,52 @@ class ShapeRecognizerTest {
     }
 
     @Test
+    void stackedEqualWidthHorizontalBarsAreNotBarChart() {
+        List<IChunk> artifacts = new ArrayList<>();
+        double[] color = new double[]{0.0, 0.0, 0.0};
+        // Four stacked horizontal bars with identical width and similar heights,
+        // perfectly adjacent: looks like table rows / decorative stripes, not a chart.
+        artifacts.add(new LineChunk(0, 0, 10, 100, 10, 10, color));
+        artifacts.add(new LineChunk(0, 0, 20, 100, 20, 10, color));
+        artifacts.add(new LineChunk(0, 0, 30, 100, 30, 10, color));
+        artifacts.add(new LineChunk(0, 0, 40, 100, 40, 12, color));
+
+        List<ShapeChunk> shapes = ShapeRecognizer.recognizePage(0, artifacts);
+        Assertions.assertTrue(shapes.stream().noneMatch(s -> ShapeChunk.TYPE_BAR_CHART.equals(s.getShapeType())),
+                "Identical-width stacked bars should not be recognized as a bar chart");
+    }
+
+    @Test
+    void whiteShapesAreIgnored() {
+        List<IChunk> artifacts = new ArrayList<>();
+        double[] white = new double[]{1.0, 1.0, 1.0};
+        // White shapes on a white page background are invisible and should not be
+        // extracted as rectangles, bar charts, or any other shape.
+        artifacts.add(new LineChunk(0, 0, 10, 100, 10, 10, white));
+        artifacts.add(new LineChunk(0, 0, 20, 100, 20, 10, white));
+        artifacts.add(new LineChunk(0, 0, 30, 100, 30, 10, white));
+        artifacts.add(new LineChunk(0, 0, 40, 100, 40, 12, white));
+
+        List<ShapeChunk> shapes = ShapeRecognizer.recognizePage(0, artifacts);
+        Assertions.assertTrue(shapes.isEmpty(), "White shapes should be ignored");
+    }
+
+    @Test
+    void equalHeightVerticalBarsAreNotBarChart() {
+        List<IChunk> artifacts = new ArrayList<>();
+        double[] color = new double[]{0.2, 0.4, 0.6};
+        // Four vertical bars with identical height and width, side by side: not a chart.
+        artifacts.add(new LineChunk(0, 5, 10, 7, 30, 2, color));
+        artifacts.add(new LineChunk(0, 15, 10, 17, 30, 2, color));
+        artifacts.add(new LineChunk(0, 25, 10, 27, 30, 2, color));
+        artifacts.add(new LineChunk(0, 35, 10, 37, 30, 2, color));
+
+        List<ShapeChunk> shapes = ShapeRecognizer.recognizePage(0, artifacts);
+        Assertions.assertTrue(shapes.stream().noneMatch(s -> ShapeChunk.TYPE_BAR_CHART.equals(s.getShapeType())),
+                "Identical-height vertical bars should not be recognized as a bar chart");
+    }
+
+    @Test
     void recognizesPolylineFromConnectedLineSegments() {
         List<IChunk> artifacts = new ArrayList<>();
         double[] color = new double[]{0.0, 0.0, 0.0};
