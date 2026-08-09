@@ -78,7 +78,7 @@ public final class LineArtProcessor {
         List<IObject> result = new ArrayList<>(pageContents.size());
         for (int i = 0; i < pageContents.size(); i++) {
             IObject current = pageContents.get(i);
-            if (!(current instanceof LineArtChunk)) {
+            if (!(current instanceof LineArtChunk && current.getHeight() <= 3)) {
                 result.add(current);
                 continue;
             }
