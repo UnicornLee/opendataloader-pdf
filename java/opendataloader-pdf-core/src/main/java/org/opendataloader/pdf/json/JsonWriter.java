@@ -669,7 +669,7 @@ public class JsonWriter {
         // 扫描每一页，识别符合 OCR 条件的页面，写入 <pdfname>_ocr.json，
         // 并在命中页上将 is_ocr 置为 true（由后续 bookmarks 写回主 JSON 时一起持久化）。
         try {
-            writeOcrDetectionJson(mapper, map, outputFolder, inputPDF.getName());
+            writeOcrDetectionJson(mapper, map, outputFolder, inputPDF.getName(), config);
         } catch (Exception ocrEx) {
             LOGGER.log(Level.WARNING, "Unable to create OCR detection JSON: " + ocrEx.getMessage());
         }
@@ -827,7 +827,8 @@ public class JsonWriter {
     private static void writeOcrDetectionJson(ObjectMapper mapper,
                                               Map<String, Object> map,
                                               String outputFolder,
-                                              String pdfFileName) throws IOException {
+                                              String pdfFileName,
+                                              Config config) throws IOException {
         Object dataObj = map.get(JsonName.DATA);
         if (!(dataObj instanceof List)) {
             return;
@@ -915,10 +916,33 @@ public class JsonWriter {
             ocrEntries.add(entry);
         }
 
-        // 即使 ocrEntries 为空，也写出文件（保持流程可预测）
+        // 没有命中页时跳过写出，避免产生空 _ocr.json
+        if (ocrEntries.isEmpty()) {
+            LOGGER.log(Level.INFO, "No OCR pages detected, skip creating _ocr.json for {0}", pdfFileName);
+            return;
+        }
+
+        // business_id / extend 取自 config.customOptions（key 分别为 businessId / extend），
+        // 缺省时回落到原样（"None" / 空对象），保持向后兼容。
+        Object businessId = null;
+        Object extendValue = null;
+        Map<String, Object> customOptions = config != null ? config.getCustomOptions() : null;
+        if (customOptions != null) {
+            if (customOptions.containsKey("businessId")) {
+                businessId = customOptions.get("businessId");
+            }
+            if (customOptions.containsKey("extend")) {
+                extendValue = customOptions.get("extend");
+            }
+        }
+
         Map<String, Object> ocrResult = new LinkedHashMap<>();
-        ocrResult.put("business_id", "None");
-        ocrResult.put("extend", new HashMap<>());
+        if (businessId != null) {
+            ocrResult.put("business_id", businessId);
+        }
+        if (extendValue != null) {
+            ocrResult.put("extend", extendValue);
+        }
         ocrResult.put("url", map.get("url"));
         ocrResult.put("data", ocrEntries);
 
