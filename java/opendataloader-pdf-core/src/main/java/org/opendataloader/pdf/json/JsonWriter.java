@@ -668,6 +668,8 @@ public class JsonWriter {
         // 在已生成的 JSON 数据上识别 catalog_bookmarks 与 page_bookmarks，
         // page_bookmarks 的 relatedId 直接复用 JSON item 的 id。
         if (config != null) {
+            // 记录 BookmarkQualitySelector 选中的来源键名；未选中(null)时三个原始键全部保留。
+            String selectedSource = null;
             List<Map<String, Object>> data = (List<Map<String, Object>>) map.get(JsonName.DATA);
             if (data != null) {
                 resolveSelfBookmarkRelatedIds(mapper, map, data);
@@ -689,6 +691,8 @@ public class JsonWriter {
                     map.put("catalog_page_range_start", catalogStartPage + 1);
                     map.put("catalog_page_range_end", catalogEndPage + 1);
                 }
+                map.put("catalog_bookmarks", catalogBookmarks);
+                map.put("page_bookmarks", pageBookmarks);
 
                 writeCollectedPageBookmarkMarkdown(outputFolder, inputPdfName, data,
                     catalogStartPage, catalogEndPage);
@@ -700,12 +704,16 @@ public class JsonWriter {
                 BookmarkQualitySelector.Selection selection = BookmarkQualitySelector.select(
                     catalogBookmarks, pageBookmarks, selfBookmarks, pageItemIds);
                 map.put("bookmarks", selection.getBookmarks());
+                // 只移除被选中的来源；未选中的(或全部被淘汰时 selectedSource 为 null)
+                // 仍保留在 map 中，以便写入 json。
+                selectedSource = selection.getSource();
             } else {
                 map.put("bookmarks", new ArrayList<>());
+                // data 为空时无法做来源选择，三个原始键保留在输出中。
             }
-            map.remove("self_bookmarks");
-            map.remove("catalog_bookmarks");
-            map.remove("page_bookmarks");
+            if (selectedSource != null) {
+                map.remove(selectedSource);
+            }
 
             // 把更新后的内容重新写回 json 文件
             mapper.writerWithDefaultPrettyPrinter().writeValue(new File(jsonFileName), map);
