@@ -33,16 +33,26 @@ import com.fasterxml.jackson.databind.JsonNode;
  */
 public class ProcessingResult {
 
-    private static final ProcessingResult EMPTY = new ProcessingResult(null, 0, 0);
+    private static final ProcessingResult EMPTY = new ProcessingResult(null, 0, 0, null, null);
 
     private final JsonNode hybridTimings;
     private final long extractionNs;
     private final long outputNs;
+    private final String jsonUrlOrPath;
+    private final String ocrJsonLocalPath;
 
-    public ProcessingResult(JsonNode hybridTimings, long extractionNs, long outputNs) {
+    public ProcessingResult(JsonNode hybridTimings, long extractionNs, long outputNs,
+                            String jsonUrlOrPath, String ocrJsonLocalPath) {
         this.hybridTimings = hybridTimings;
         this.extractionNs = extractionNs;
         this.outputNs = outputNs;
+        this.jsonUrlOrPath = jsonUrlOrPath;
+        this.ocrJsonLocalPath = ocrJsonLocalPath;
+    }
+
+    /** Legacy constructor: keeps backward compatibility for callers that do not produce output paths. */
+    public ProcessingResult(JsonNode hybridTimings, long extractionNs, long outputNs) {
+        this(hybridTimings, extractionNs, outputNs, null, null);
     }
 
     /** Returns an empty result. */
@@ -76,5 +86,23 @@ public class ProcessingResult {
     /** Output generation time in milliseconds. */
     public long getOutputMs() {
         return outputNs / 1_000_000;
+    }
+
+    /**
+     * URL of the main JSON file after uploading to OBS, or its local absolute path
+     * when OSS upload is not configured. {@code null} when the caller did not supply
+     * this information.
+     */
+    public String getJsonUrlOrPath() {
+        return jsonUrlOrPath;
+    }
+
+    /**
+     * Local absolute path of the generated {@code _ocr.json} file, or an empty
+     * string if it was not generated. {@code null} when the caller did not supply
+     * this information.
+     */
+    public String getOcrJsonLocalPath() {
+        return ocrJsonLocalPath;
     }
 }
