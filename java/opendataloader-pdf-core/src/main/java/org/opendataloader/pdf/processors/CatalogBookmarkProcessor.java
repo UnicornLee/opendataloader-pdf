@@ -19,12 +19,14 @@ import org.opendataloader.pdf.api.Config;
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.custom.entities.Bookmark;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
+import org.opendataloader.pdf.custom.utils.BookmarkPrefixClassifier;
 import org.opendataloader.pdf.json.JsonName;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.content.TextLine;
 import org.verapdf.wcag.algorithms.semanticalgorithms.containers.StaticContainers;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -647,17 +649,244 @@ public class CatalogBookmarkProcessor {
     }
 
     /**
-     * Assigns a hierarchy level to each candidate based on left indentation.
+     * Assigns a hierarchy level to each candidate based on left indentation and
+     * prefix-type continuity. L1 entries have the smallest leftX (within a
+     * tolerance of 2). Larger leftX clusters are detected automatically using
+     * a data-driven gap threshold. When indentation is ambiguous, prefix types
+     * from {@link BookmarkConstant} are used to disambiguate and to keep
+     * same-prefix consecutive entries at the same level.
      */
     private static void assignLevels(List<Candidate> candidates) {
-        double minLeftX = candidates.stream().mapToDouble(c -> c.leftX).min().orElse(0.0);
-        double avgFontSize = candidates.stream().mapToDouble(c -> c.bookmark.getFontSize()).average().orElse(12.0);
-        double levelStep = avgFontSize * 1.5;
-
-        for (Candidate candidate : candidates) {
-            int level = 1 + (int) Math.floor((candidate.leftX - minLeftX) / levelStep);
-            candidate.level = Math.max(1, Math.min(level, 3));
+        if (candidates.isEmpty()) {
+            return;
         }
+
+        int n = candidates.size();
+        for (Candidate c : candidates) {
+            c.prefixType = BookmarkPrefixClassifier.classify(c.bookmark.getText());
+        }
+
+        // Step 1: cluster by leftX.
+        int[] clusters = clusterByLeftX(candidates);
+        boolean multiCluster = Arrays.stream(clusters).anyMatch(c -> c > 0);
+
+        // Step 2: initial levels from clusters when indentation is clear,
+        // otherwise fall back to prefix depth.
+        int[] levels = new int[n];
+        if (multiCluster) {
+            for (int i = 0; i < n; i++) {
+                levels[i] = clusters[i] + 1;
+            }
+        } else {
+            for (int i = 0; i < n; i++) {
+                levels[i] = prefixDepth(candidates.get(i).prefixType) + 1;
+            }
+        }
+
+        // Step 3: prefix-based corrections.
+        correctLevelsByPrefix(candidates, levels);
+
+        // Step 4: apply clamped levels.
+        for (int i = 0; i < n; i++) {
+            candidates.get(i).level = Math.max(1, Math.min(levels[i], 3));
+        }
+    }
+
+    /**
+     * Clusters candidates by leftX using automatic breakpoint detection.
+     * Returns a 0-based cluster index for each candidate. At most 3 clusters
+     * are produced, since the catalog tree is limited to three levels.
+     */
+    private static int[] clusterByLeftX(List<Candidate> candidates) {
+        int n = candidates.size();
+        int[] clusters = new int[n];
+        if (n == 0) {
+            return clusters;
+        }
+
+        double[] unique = candidates.stream()
+                .mapToDouble(c -> c.leftX)
+                .distinct()
+                .sorted()
+                .toArray();
+        if (unique.length == 1) {
+            return clusters;
+        }
+
+        double[] gaps = new double[unique.length - 1];
+        for (int i = 0; i < gaps.length; i++) {
+            gaps[i] = unique[i + 1] - unique[i];
+        }
+
+        double avgFontSize = candidates.stream()
+                .mapToDouble(c -> c.bookmark.getFontSize())
+                .average()
+                .orElse(12.0);
+        // A gap is significant when it exceeds both a minimum tolerance and a
+        // fraction of the average font size. This adapts to different document
+        // scales while still catching obvious indentation.
+        double threshold = Math.max(3.0, avgFontSize * 0.45);
+
+        List<Integer> breakpoints = new ArrayList<>();
+        for (int i = 0; i < gaps.length; i++) {
+            if (gaps[i] >= threshold) {
+                breakpoints.add(i + 1);
+            }
+        }
+        if (breakpoints.size() > 2) {
+            // Keep the two largest gaps when there are too many breakpoints.
+            breakpoints.sort((a, b) -> Double.compare(gaps[b - 1], gaps[a - 1]));
+            breakpoints = breakpoints.subList(0, 2);
+            Collections.sort(breakpoints);
+        }
+
+        for (int i = 0; i < n; i++) {
+            double leftX = candidates.get(i).leftX;
+            int cluster = 0;
+            for (int bp : breakpoints) {
+                if (leftX >= unique[bp] - 1e-6) {
+                    cluster++;
+                } else {
+                    break;
+                }
+            }
+            clusters[i] = cluster;
+        }
+        return clusters;
+    }
+
+    /**
+     * A rough depth prior for prefix types, used only when leftX alone does not
+     * separate levels. Prefix types that typically introduce major sections are
+     * shallower; enumerated sub-items are deeper.
+     */
+    private static int prefixDepth(BookmarkPrefixClassifier.PrefixType prefixType) {
+        if (prefixType == null) {
+            return 0;
+        }
+        String template = prefixType.getTemplate();
+        switch (template) {
+            case "第#章":
+            case "第#节":
+            case "第#条":
+                return 0;
+            case "#、":
+            case "（#）":
+            case "(#)":
+                return 1;
+            case "#":
+            case "#）":
+            case "#)":
+                return 2;
+            default:
+                return 1;
+        }
+    }
+
+    /**
+     * Applies prefix-based corrections:
+     * <ol>
+     *   <li>Prefix-less entries at the beginning and end are forced to L1.</li>
+     *   <li>Consecutive runs of the same prefix type are reconciled to a single
+     *       level (the most common level within the run).</li>
+     *   <li>Candidates whose level differs from the typical level of their prefix
+     *       type are moved one step toward that typical level.</li>
+     * </ol>
+     */
+    private static void correctLevelsByPrefix(List<Candidate> candidates, int[] levels) {
+        int n = candidates.size();
+        if (n == 0) {
+            return;
+        }
+
+        // 1. Prefix-less entries at the beginning and end are L1.
+        int firstPrefixIndex = -1;
+        int lastPrefixIndex = -1;
+        for (int i = 0; i < n; i++) {
+            if (candidates.get(i).prefixType != null) {
+                if (firstPrefixIndex == -1) {
+                    firstPrefixIndex = i;
+                }
+                lastPrefixIndex = i;
+            }
+        }
+        if (firstPrefixIndex >= 0) {
+            for (int i = 0; i < firstPrefixIndex; i++) {
+                levels[i] = 1;
+            }
+            for (int i = lastPrefixIndex + 1; i < n; i++) {
+                levels[i] = 1;
+            }
+        }
+
+        // 2. Reconcile consecutive runs of the same prefix type.
+        int runStart = 0;
+        for (int i = 1; i <= n; i++) {
+            BookmarkPrefixClassifier.PrefixType prev = i <= n ? candidates.get(runStart).prefixType : null;
+            BookmarkPrefixClassifier.PrefixType curr = i < n ? candidates.get(i).prefixType : null;
+            if (i == n || !Objects.equals(prev, curr)) {
+                int runEnd = i - 1;
+                int modeLevel = modeLevel(levels, runStart, runEnd);
+                for (int j = runStart; j <= runEnd; j++) {
+                    levels[j] = modeLevel;
+                }
+                runStart = i;
+            }
+        }
+
+        // 3. Move candidates toward the typical level of their prefix type,
+        // but only by one level at a time to avoid unstable jumps.
+        Map<BookmarkPrefixClassifier.PrefixType, Integer> typicalLevels = computeTypicalLevels(candidates, levels);
+        for (int i = 0; i < n; i++) {
+            Candidate c = candidates.get(i);
+            if (c.prefixType == null) {
+                continue;
+            }
+            Integer typical = typicalLevels.get(c.prefixType);
+            if (typical == null || typical.equals(levels[i])) {
+                continue;
+            }
+            if (Math.abs(typical - levels[i]) == 1) {
+                levels[i] = typical;
+            }
+        }
+    }
+
+    private static int modeLevel(int[] levels, int start, int end) {
+        int[] counts = new int[4]; // levels 1..3
+        for (int i = start; i <= end; i++) {
+            int level = Math.max(1, Math.min(levels[i], 3));
+            counts[level]++;
+        }
+        int bestLevel = 1;
+        int bestCount = counts[1];
+        for (int level = 2; level <= 3; level++) {
+            if (counts[level] > bestCount) {
+                bestCount = counts[level];
+                bestLevel = level;
+            }
+        }
+        return bestLevel;
+    }
+
+    private static Map<BookmarkPrefixClassifier.PrefixType, Integer> computeTypicalLevels(
+            List<Candidate> candidates, int[] levels) {
+        Map<BookmarkPrefixClassifier.PrefixType, int[]> sums = new HashMap<>();
+        for (int i = 0; i < candidates.size(); i++) {
+            Candidate c = candidates.get(i);
+            if (c.prefixType == null) {
+                continue;
+            }
+            int[] s = sums.computeIfAbsent(c.prefixType, k -> new int[2]);
+            s[0] += levels[i];
+            s[1]++;
+        }
+        Map<BookmarkPrefixClassifier.PrefixType, Integer> result = new HashMap<>();
+        for (Map.Entry<BookmarkPrefixClassifier.PrefixType, int[]> e : sums.entrySet()) {
+            int avg = Math.round((float) e.getValue()[0] / e.getValue()[1]);
+            result.put(e.getKey(), Math.max(1, Math.min(avg, 3)));
+        }
+        return result;
     }
 
     /**
@@ -1361,13 +1590,14 @@ public class CatalogBookmarkProcessor {
         }
     }
 
-    private static class Candidate {
+    static class Candidate {
         final Bookmark bookmark;
         final double leftX;
         final double topY;
         final int pageIndex;
         final int relatedId;
         int level = 1;
+        BookmarkPrefixClassifier.PrefixType prefixType;
 
         Candidate(Bookmark bookmark, double leftX, double topY, int pageIndex) {
             this(bookmark, leftX, topY, pageIndex, 0);

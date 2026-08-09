@@ -85,7 +85,8 @@ public class FlowchartProcessor {
         boolean[] skipped = new boolean[groupedShapeChunks.size()];
         for (int i = 0; i < groupedShapeChunks.size(); i++) {
             List<IObject> group = groupedShapeChunks.get(i);
-            if (skipped[i] || group == null || group.isEmpty() || containsBarChart(group)) {
+            if (skipped[i] || group == null || group.isEmpty()
+                    || BoundingBoxGroupUtils.containsBarChart(group)) {
                 continue;
             }
             Cluster cluster = collectCluster(pageContents, group, pageNumber);
@@ -111,7 +112,7 @@ public class FlowchartProcessor {
                         if (laterGroup == null || laterGroup.isEmpty()) {
                             continue;
                         }
-                        BoundingBox laterBox = unionShapeBoundingBoxes(laterGroup, pageNumber);
+                        BoundingBox laterBox = BoundingBoxGroupUtils.unionShapeBoundingBoxes(laterGroup, pageNumber);
                         if (laterBox == null || !screenshotBox.overlaps(laterBox)) {
                             continue;
                         }
@@ -136,18 +137,8 @@ public class FlowchartProcessor {
         }
     }
 
-    private static boolean containsBarChart(List<IObject> group) {
-        for (IObject obj : group) {
-            if (obj instanceof ShapeChunk
-                    && ShapeChunk.TYPE_BAR_CHART.equals(((ShapeChunk) obj).getShapeType())) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     private static Cluster collectCluster(List<IObject> pageContents, List<IObject> shapeGroup, int pageNumber) {
-        BoundingBox shapeBox = unionShapeBoundingBoxes(shapeGroup, pageNumber);
+        BoundingBox shapeBox = BoundingBoxGroupUtils.unionShapeBoundingBoxes(shapeGroup, pageNumber);
         if (shapeBox == null || shapeBox.isEmpty()) {
             return null;
         }
@@ -182,21 +173,6 @@ public class FlowchartProcessor {
                 clusterBox.union(contentBox);
             }
         }
-    }
-
-    private static BoundingBox unionShapeBoundingBoxes(List<IObject> shapeGroup, int pageNumber) {
-        BoundingBox union = new BoundingBox(pageNumber);
-        boolean hasValid = false;
-        for (IObject obj : shapeGroup) {
-            if (obj instanceof ShapeChunk) {
-                BoundingBox bbox = obj.getBoundingBox();
-                if (bbox != null && !bbox.isEmpty()) {
-                    union.union(bbox);
-                    hasValid = true;
-                }
-            }
-        }
-        return hasValid ? union : null;
     }
 
     private static BoundingBox expandHorizontally(BoundingBox box, double xMargin, double yMargin) {
