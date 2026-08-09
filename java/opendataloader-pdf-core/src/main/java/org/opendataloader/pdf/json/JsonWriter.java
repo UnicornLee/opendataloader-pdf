@@ -74,6 +74,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -665,6 +666,14 @@ public class JsonWriter {
             new TypeReference<Map<String, Object>>() {}
         );
 
+        // 扫描每一页，识别符合 OCR 条件的页面，写入 <pdfname>_ocr.json，
+        // 并在命中页上将 is_ocr 置为 true（由后续 bookmarks 写回主 JSON 时一起持久化）。
+        try {
+            writeOcrDetectionJson(mapper, map, outputFolder, inputPDF.getName());
+        } catch (Exception ocrEx) {
+            LOGGER.log(Level.WARNING, "Unable to create OCR detection JSON: " + ocrEx.getMessage());
+        }
+
         // 在已生成的 JSON 数据上识别 catalog_bookmarks 与 page_bookmarks，
         // page_bookmarks 的 relatedId 直接复用 JSON item 的 id。
         if (config != null) {
@@ -793,6 +802,136 @@ public class JsonWriter {
         String sourceType = (String) item.get(JsonName.SOURCE_TYPE);
         return JsonName.SOURCE_TYPE_PARAGRAPH.equals(sourceType)
             || JsonName.SOURCE_TYPE_HEADING.equals(sourceType);
+    }
+
+    /**
+     * 扫描主 JSON 的每一页，对符合 OCR 条件的页面：
+     * <ul>
+     *     <li>将页面对象上的 {@code is_ocr} 置为 {@code true}（由后续 bookmarks 写回时一起持久化到主 JSON）</li>
+     *     <li>把命中页汇总后写入 {@code <pdfname>_ocr.json}（紧凑 JSON，与样例格式一致）</li>
+     * </ul>
+     *
+     * <p>OCR 命中条件：
+     * <ol>
+     *     <li>页面 items 数量不超过 4</li>
+     *     <li>页面内不含 lattice_table / stream_table</li>
+     *     <li>页面内至少包含一张图片</li>
+     *     <li>存在某张图片，其 {@code height / page.height > 0.8}（同一页内有多张满足条件时取比例最大的那张）</li>
+     * </ol>
+     *
+     * @param mapper       已用于读写主 JSON 的 ObjectMapper
+     * @param map          主 JSON 反序列化得到的内存 Map（其内 {@code data} 列表会被原地更新 is_ocr）
+     * @param outputFolder 输出目录（与主 JSON 同目录）
+     * @param pdfFileName  原始 PDF 文件名（含扩展名），用于推导 {@code <pdfname>_ocr.json}
+     */
+    private static void writeOcrDetectionJson(ObjectMapper mapper,
+                                              Map<String, Object> map,
+                                              String outputFolder,
+                                              String pdfFileName) throws IOException {
+        Object dataObj = map.get(JsonName.DATA);
+        if (!(dataObj instanceof List)) {
+            return;
+        }
+        List<Map<String, Object>> data = (List<Map<String, Object>>) dataObj;
+        List<Map<String, Object>> ocrEntries = new ArrayList<>();
+
+        for (Map<String, Object> page : data) {
+            Object itemsObj = page.get(JsonName.ITEMS);
+            if (!(itemsObj instanceof List)) {
+                continue;
+            }
+            List<Map<String, Object>> items = (List<Map<String, Object>>) itemsObj;
+
+            // 条件1：items 数量不超过 4
+            if (items.size() > 4) {
+                continue;
+            }
+
+            // 条件2：无表格
+            boolean hasTable = false;
+            for (Map<String, Object> item : items) {
+                String itemType = (String) item.get(JsonName.ITEM_TYPE);
+                if ("lattice_table".equals(itemType) || "stream_table".equals(itemType)) {
+                    hasTable = true;
+                    break;
+                }
+            }
+            if (hasTable) {
+                continue;
+            }
+
+            // 条件3 + 4：包含图片，且有图片 height / page.height > 0.8
+            Object pageHeightObj = page.get(JsonName.HEIGHT);
+            if (!(pageHeightObj instanceof Number)) {
+                continue;
+            }
+            double pageHeight = ((Number) pageHeightObj).doubleValue();
+            if (pageHeight <= 0) {
+                continue;
+            }
+
+            Map<String, Object> bestImage = null;
+            double bestRatio = 0.0;
+            for (Map<String, Object> item : items) {
+                String itemType = (String) item.get(JsonName.ITEM_TYPE);
+                if (!"image".equals(itemType)) {
+                    continue;
+                }
+                Object imageHeightObj = item.get(JsonName.HEIGHT);
+                if (!(imageHeightObj instanceof Number)) {
+                    continue;
+                }
+                double imageHeight = ((Number) imageHeightObj).doubleValue();
+                double ratio = imageHeight / pageHeight;
+                if (ratio > bestRatio) {
+                    bestRatio = ratio;
+                    bestImage = item;
+                }
+            }
+            if (bestImage == null || bestRatio <= 0.8) {
+                continue;
+            }
+
+            // 命中：标记 is_ocr=true，并收集到 ocrEntries
+            page.put(JsonName.IS_OCR, true);
+
+            String imageUrl = "";
+            Object contentObj = bestImage.get(JsonName.CONTENT);
+            if (contentObj instanceof List && !((List<?>) contentObj).isEmpty()) {
+                Object first = ((List<?>) contentObj).get(0);
+                if (first != null) {
+                    imageUrl = first.toString();
+                }
+            }
+
+            Object pageWidthObj = page.get(JsonName.WIDTH);
+            double pageWidth = pageWidthObj instanceof Number ? ((Number) pageWidthObj).doubleValue() : 0.0;
+
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put(JsonName.PAGE_INDEX, page.get(JsonName.PAGE_INDEX));
+            entry.put("image_url", imageUrl);
+            entry.put("image_height", pageHeight);
+            entry.put("image_width", pageWidth);
+            ocrEntries.add(entry);
+        }
+
+        // 即使 ocrEntries 为空，也写出文件（保持流程可预测）
+        Map<String, Object> ocrResult = new LinkedHashMap<>();
+        ocrResult.put("business_id", "None");
+        ocrResult.put("extend", new HashMap<>());
+        ocrResult.put("url", map.get("url"));
+        ocrResult.put("data", ocrEntries);
+
+        // 文件名：与主 JSON 同前缀（去掉尾部因 length()-3 残留的 '.'），后缀改为 "_ocr.json"
+        String ocrBaseName = pdfFileName.substring(0, pdfFileName.length() - 3);
+        if (ocrBaseName.endsWith(".")) {
+            ocrBaseName = ocrBaseName.substring(0, ocrBaseName.length() - 1);
+        }
+        String ocrFileName = outputFolder + File.separator + ocrBaseName + "_ocr.json";
+
+        // 紧凑 JSON（与样例 202604231785283947722051256_ocr.json 单行格式一致）
+        mapper.writeValue(new File(ocrFileName), ocrResult);
+        LOGGER.log(Level.INFO, "Created {0}", ocrFileName);
     }
 
     /**
