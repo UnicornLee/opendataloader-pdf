@@ -18,7 +18,6 @@ package org.opendataloader.pdf.processors;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.opendataloader.pdf.entities.content.ShapeChunk;
-import org.opendataloader.pdf.utils.ImagesUtils;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.content.ImageChunk;
 import org.verapdf.wcag.algorithms.entities.content.TextChunk;
@@ -284,12 +283,4 @@ class FlowchartProcessorTest {
         Assertions.assertEquals(2, pageContents.size(), "Two independent screenshots should remain");
     }
 
-    private static class CapturingImagesUtils extends ImagesUtils {
-        final List<ImageChunk> saved = new ArrayList<>();
-
-        @Override
-        public void saveImageChunk(ImageChunk chunk) {
-            saved.add(chunk);
-        }
-    }
 }
