@@ -18,11 +18,13 @@ package org.opendataloader.pdf.server;
 import lombok.extern.slf4j.Slf4j;
 import org.opendataloader.pdf.api.Config;
 import org.opendataloader.pdf.api.OpenDataLoaderPDF;
+import org.opendataloader.pdf.api.RebuildBookmarksResult;
+import org.opendataloader.pdf.processors.ProcessingResult;
 import org.opendataloader.pdf.server.config.BasicProperties;
 import org.opendataloader.pdf.server.config.OssProperties;
-import org.opendataloader.pdf.server.config.OutputProperties;
 import org.opendataloader.pdf.server.config.PaddleProperties;
 import org.opendataloader.pdf.server.config.PdfProperties;
+import org.opendataloader.pdf.server.config.PulsarProperties;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -37,6 +39,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Stream;
@@ -51,21 +54,30 @@ public class PdfProcessService {
     private final OssProperties ossProperties;
     private final PaddleProperties paddleProperties;
     private final PdfProperties pdfProperties;
-    private final OutputProperties outputProperties;
+    private final PulsarProperties pulsarProperties;
 
     public PdfProcessService(BasicProperties basicProperties,
                              OssProperties ossProperties,
                              PaddleProperties paddleProperties,
                              PdfProperties pdfProperties,
-                             OutputProperties outputProperties) {
+                             PulsarProperties pulsarProperties) {
         this.basicProperties = basicProperties;
         this.ossProperties = ossProperties;
         this.paddleProperties = paddleProperties;
         this.pdfProperties = pdfProperties;
-        this.outputProperties = outputProperties;
+        this.pulsarProperties = pulsarProperties;
     }
 
     public record ProcessedResult(byte[] content, String fileName, MediaType mediaType) {
+    }
+
+    /**
+     * Minimal projection of {@link ProcessingResult} for Pulsar consumer paths.
+     * {@code ocrJsonLocalPath} is an empty string when the OCR detection step
+     * produced no file (matches {@code ProcessingResult.getOcrJsonLocalPath()}
+     * semantics; we normalize null to empty here so callers don't need to).
+     */
+    public record PulsarProcessResult(String jsonUrlOrPath, byte[] ocrJsonBytes, Path outputDir) {
     }
 
     public ProcessedResult process(String url, Long businessId, Map<String, Object> extend,
@@ -73,11 +85,11 @@ public class PdfProcessService {
             throws IOException, InterruptedException {
         OutputSpec outputSpec = OutputSpec.of(format);
         log.info("processing pdf, url={}, businessId={}, extend={}, env={}, outputPath={}",
-                url, businessId, extend, basicProperties.env(), outputProperties.path());
+                url, businessId, extend, basicProperties.env(), pdfProperties.output().path());
 
         Path inputBase = resolveBaseDir(pdfProperties.temp() == null ? "" : pdfProperties.temp().path(),
                 "pdf.temp.path (input staging)");
-        Path outputBase = resolveBaseDir(outputProperties.path(), "output.path");
+        Path outputBase = resolveBaseDir(pdfProperties.output() == null ? "" : pdfProperties.output().path(), "output.path");
         Path inputDir = Files.createTempDirectory(inputBase, "in-");
         Path outputDir = Files.createTempDirectory(outputBase, "out-");
         try {
@@ -125,6 +137,124 @@ public class PdfProcessService {
             deleteRecursively(inputDir);
             deleteRecursively(outputDir);
         }
+    }
+
+    /**
+     * Runs {@link OpenDataLoaderPDF#processFile(String, Config)} against a
+     * previously downloaded PDF and returns the URLs/paths the Pulsar consumer
+     * layer needs. Compared to {@link #process}, this method:
+     * <ul>
+     *   <li>always enables JSON output (so the OCR-detection step in
+     *       {@code JsonWriter.writeToCustomJson} can produce a {@code _ocr.json});</li>
+     *   <li>populates {@code Config.customOptions} with the OSS upload keys so
+     *       the generated main JSON is uploaded to the OBS temp bucket and the
+     *       local files are cleaned up by {@code DocumentProcessor};</li>
+     *   <li>does not download the input (the Pulsar consumer handles that with
+     *       its own retry loop) and does not return any HTTP bytes.</li>
+     * </ul>
+     *
+     * <p>The {@code outputDir} is <strong>not</strong> deleted on success - the
+     * Pulsar consumer needs to read the {@code _ocr.json} out of it for the OCR
+     * step, and the OCR JSON bytes are returned in the result so the consumer
+     * can safely delete the directory afterwards. On failure the directory is
+     * cleaned up here because the consumer has nothing to clean.</p>
+     *
+     * @param inputPdf   absolute path of the already-downloaded PDF
+     * @param businessId echoed back into the OSS upload keys; coerced to string
+     *                   (may be {@link Long} / {@link Integer} / {@link String} from
+     *                   Pulsar map deserialization)
+     * @param fileUrl    optional original URL of the PDF; currently logged for
+     *                   traceability but not forwarded to OBS
+     * @param extend     optional {@code extend} map from the inbound Pulsar message;
+     *                   currently logged for traceability but not forwarded to OBS
+     * @return {@link PulsarProcessResult} carrying the OSS/local URLs, the OCR
+     *         JSON bytes (empty array when no OCR JSON was produced), and the
+     *         {@code outputDir} the caller must delete after publishing
+     * @throws IOException if {@code processFile} fails
+     */
+    public PulsarProcessResult processForPulsar(String inputPdf, Object businessId, String fileUrl,
+                                                Map<String, Object> extend) throws IOException {
+        Path outputBase = resolveBaseDir(pdfProperties.output() == null ? "" : pdfProperties.output().path(), "output.path");
+        Path outputDir = Files.createTempDirectory(outputBase, "out-");
+        boolean succeeded = false;
+        try {
+            Config config = new Config();
+            config.setOutputFolder(outputDir.toString());
+            config.setGenerateJSON(true);
+            config.setCustomOptions(buildOssCustomOptions(businessId, extend));
+            config.getCustomOptions().put("url", fileUrl);
+
+            log.info("processing pdf for pulsar, input={}, businessId={}, fileUrl={}, extend={}, env={}",
+                    inputPdf, businessId, fileUrl, extend, basicProperties.env());
+            ProcessingResult result = OpenDataLoaderPDF.processFile(inputPdf, config);
+            String jsonUrlOrPath = result.getJsonUrlOrPath() == null ? "" : result.getJsonUrlOrPath();
+            String ocrJsonLocalPath = result.getOcrJsonLocalPath();
+            byte[] ocrJsonBytes = (ocrJsonLocalPath == null || ocrJsonLocalPath.isEmpty())
+                    ? new byte[0]
+                    : Files.readAllBytes(Path.of(ocrJsonLocalPath));
+            succeeded = true;
+            return new PulsarProcessResult(jsonUrlOrPath, ocrJsonBytes, outputDir);
+        } finally {
+            if (!succeeded) {
+                deleteRecursively(outputDir);
+            }
+        }
+    }
+
+    /**
+     * Runs {@link OpenDataLoaderPDF#rebuildBookmarks(String, Config)} on a
+     * previously downloaded OCR JSON and returns its final URL/path. The
+     * {@code Config.customOptions} carries the same OSS upload keys as
+     * {@link #processForPulsar}, so the rebuilt JSON is uploaded to the OBS
+     * temp bucket and the local file is deleted by {@code JsonWriter} on success.
+     *
+     * @param inputJson        absolute path of the OCR-result JSON
+     * @param businessId       used as the OSS object-key suffix
+     * @param extend           currently unused; reserved for parity with the
+     *                         downstream contract
+     * @param originalJsonUrl  reserved for parity with the downstream contract
+     *                         (not currently consumed by {@code rebuildBookmarks})
+     * @return the JSON's OSS URL, or its local absolute path when OSS upload
+     *         is not configured; never {@code null}
+     * @throws IOException if rebuild or upload fails
+     */
+    public String rebuildBookmarksForPulsar(String inputJson, Object businessId,
+                                             Map<String, Object> extend, String originalJsonUrl)
+            throws IOException {
+        Config config = new Config();
+        config.setCustomOptions(buildOssCustomOptions(businessId, extend));
+        log.info("rebuilding bookmarks for pulsar, input={}, businessId={}, extend={}, originalJsonUrl={}",
+                inputJson, businessId, extend, originalJsonUrl);
+        RebuildBookmarksResult result = OpenDataLoaderPDF.rebuildBookmarks(inputJson, config);
+        return result.getJsonUrlOrPath() == null ? "" : result.getJsonUrlOrPath();
+    }
+
+    /**
+     * Builds the {@code customOptions} map that drives OSS upload inside the
+     * core module. All keys are required (see {@code OssUploadConfig} in
+     * opendataloader-pdf-core); missing or blank values cause the core to fall
+     * back to local-output mode, which is fine - {@code jsonUrlOrPath} then
+     * becomes a local absolute path.
+     */
+    private Map<String, Object> buildOssCustomOptions(Object businessId, Map<String, Object> extend) {
+        Map<String, Object> customOptions = new HashMap<>();
+        if (businessId != null) {
+            customOptions.put("businessId", businessId);
+        }
+        if (extend != null) {
+            customOptions.put("extend", extend);
+        }
+        customOptions.put("basicEnv", basicProperties.env());
+        customOptions.put("basicParseStreamTable", basicProperties.parseStreamTable());
+        customOptions.put("pulsarReceiveTopicName", pulsarProperties.receiveTopicName());
+        customOptions.put("ossTempBucketName", ossProperties.tempBucketName());
+        customOptions.put("ossPermanentBucketName", ossProperties.permanentBucketName());
+        customOptions.put("ossEndpoint", ossProperties.endpoint());
+        customOptions.put("ossAccessKey", ossProperties.accessKey());
+        customOptions.put("ossSecretKey", ossProperties.secretKey());
+        customOptions.put("ossDomainName", ossProperties.domainName());
+        customOptions.put("paddleUrl", paddleProperties.url());
+        return customOptions;
     }
 
     private static Path resolveBaseDir(String configured, String label) {

@@ -27,18 +27,20 @@ basic:
 pulsar:
     servers: pulsar://node01.public.pulsar.prod:6650,node02.public.pulsar.prod:6650,node03.public.pulsar.prod:6650
     token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwdWxzYXItdXNlciJ9.dCSlOU2r55_Lr8ABbHQgjTONjv7Lq_ZuqpNCa9iJJMg
-    receive_topic_name: capital/pdf_parse_common/pdf_parse_increment
-    send_topic_name: capital/pdf_parse_common/pdf_parse_result
-    ocr_send_topic_name: capital/pdf_parse_common/pdf_parse_ocr_image_analysis
-    ocr_receive_topic_name: capital/pdf_parse_common/pdf_parse_ocr_image_analysis_result
+    receive_topic_name: capital/pdf_parse/announcement_parse_increment
+    send_topic_name: capital/pdf_parse/announcement_increment_parse_result
+    count: 3
+    ocr_send_topic_name: capital/pdf_parse/announcement_ocr_image_analysis_increment
+    ocr_receive_topic_name: capital/pdf_parse/announcement_ocr_image_analysis_increment_result
+    ocrCount: 2
 
 oss:
     temp_bucket_name: stock-temp-bucket
-    permanent_bucket_name: common-pdf-bucket
+    permanent_bucket_name: announcement-pdf-bucket
     endpoint: https://obs.cn-north-1.myhuaweicloud.com
     access_key: EUD3T68PPED8VI2ZHX2K
     secret_key: qOe8kcPGpJk0ZTIo1baWqQubShQoiyfOZThbp5dE
-    domain_name: https://common-pdf-bucket.obs.cn-north-1.myhuaweicloud.com/
+    domain_name: https://announcement-pdf-bucket.obs.cn-north-1.myhuaweicloud.com/
 
 paddle:
     url: http://node02.public.vllm.prod:80/layout-parsing

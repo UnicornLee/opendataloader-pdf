@@ -23,5 +23,5 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * {@code paddle} block.
  */
 @ConfigurationProperties("paddle")
-public record PaddleProperties(@DefaultValue String url) {
+public record PaddleProperties(@DefaultValue("") String url) {
 }
