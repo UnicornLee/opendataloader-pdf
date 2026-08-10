@@ -22,6 +22,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.core.util.DefaultPrettyPrinter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.opendataloader.pdf.api.Config;
+import org.opendataloader.pdf.api.RebuildBookmarksResult;
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.custom.constants.GlobalConstant;
 import org.opendataloader.pdf.custom.dto.PageItem;
@@ -119,6 +120,116 @@ public class JsonWriter {
                                           Map<String, Object> hybridInfo,
                                           boolean includeHeaderFooter) throws IOException {
         return writeToCustomJson(inputPdfName, outputFolder, contents, elementMetadata, hybridInfo, includeHeaderFooter, null);
+    }
+
+    /**
+     * 从已有的 JSON 文件中读取 {@code self_bookmarks}（缺失则回退到 {@code bookmarks}），
+     * 复用 {@link #writeToCustomJson(String, String, List, Map, Map, boolean, Config)} 中
+     * 的目录识别 / 页面书签抽取 / 质量选型三条流水线，重新生成 {@code catalog_bookmarks}、
+     * {@code page_bookmarks} 与 {@code bookmarks}，写回 JSON；按 customOptions 是否
+     * 包含 OSS 8 项配置（不含 {@code ossPermanentBucketName}），决定本地保留还是上传到
+     * OBS 临时桶。
+     *
+     * <p>仅刷新书签相关字段（{@code self_bookmarks}、{@code catalog_bookmarks}、
+     * {@code page_bookmarks}、{@code bookmarks}、{@code catalog_page_range_start/end}）；
+     * 其余字段（{@code url}、{@code data}、{@code extend}、{@code is_ocr} 等）一律保留不动。
+     * 不做图片上传、不做 OCR 检测、不重命名 / 移动 JSON。</p>
+     *
+     * @param inputJsonName 待重建的 JSON 文件绝对路径
+     * @param config        配置对象；customOptions 驱动是否启用 OSS 上传
+     * @return {@link RebuildBookmarksResult}，包含 OBS URL 或本地绝对路径以及是否上传成功
+     * @throws IOException 读写或上传 JSON 失败时抛出
+     */
+    public static RebuildBookmarksResult rebuildBookmarksFromJson(String inputJsonName, Config config) throws IOException {
+        File jsonFile = new File(inputJsonName);
+        ObjectMapper mapper = new ObjectMapper();
+        Map<String, Object> map = mapper.readValue(jsonFile, new TypeReference<Map<String, Object>>() {});
+
+        // self_bookmarks from JSON, fallback to bookmarks, fallback to empty list
+        List<Bookmark> selfBookmarks;
+        Object selfObj = map.get("self_bookmarks");
+        if (selfObj instanceof List) {
+            selfBookmarks = mapper.convertValue(selfObj, new TypeReference<List<Bookmark>>() {});
+        } else {
+            Object bookmarksObj = map.get("bookmarks");
+            if (bookmarksObj instanceof List) {
+                selfBookmarks = mapper.convertValue(bookmarksObj, new TypeReference<List<Bookmark>>() {});
+            } else {
+                selfBookmarks = new ArrayList<>();
+            }
+        }
+        map.put("self_bookmarks", selfBookmarks);
+
+        // OSS config & client
+        OssUploadConfig ossConfig = OssUploadConfig.fromCustomOptionsForJsonUpload(config);
+        boolean ossEnabled = ossConfig.isEnabled();
+        HuaweiObsClient obsClient = null;
+        try {
+            // Resolve self_bookmarks related_ids
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> data = (List<Map<String, Object>>) map.get(JsonName.DATA);
+
+            if (data != null) {
+                resolveSelfBookmarkRelatedIds(mapper, map, data);
+                CatalogBookmarkProcessor.CatalogResult catalogResult =
+                    CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, config);
+                List<Bookmark> catalogBookmarks = catalogResult.getBookmarks();
+                int catalogStartPage = catalogResult.getStartPage();
+                int catalogEndPage = catalogResult.getEndPage();
+
+                List<Bookmark> pageBookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(
+                    data, catalogStartPage, catalogEndPage);
+
+                CatalogBookmarkProcessor.fillCatalogChildrenFromPageData(
+                    data, catalogStartPage, catalogEndPage, catalogBookmarks, pageBookmarks);
+
+                if (catalogStartPage >= 0 && catalogEndPage >= catalogStartPage) {
+                    map.put("catalog_page_range_start", catalogStartPage + 1);
+                    map.put("catalog_page_range_end", catalogEndPage + 1);
+                }
+                map.put("catalog_bookmarks", catalogBookmarks);
+                map.put("page_bookmarks", pageBookmarks);
+
+                Map<Integer, Set<Integer>> pageItemIds = BookmarkQualitySelector.buildPageItemIds(data);
+                BookmarkQualitySelector.Selection selection = BookmarkQualitySelector.select(
+                    catalogBookmarks, pageBookmarks, selfBookmarks, pageItemIds);
+                map.put("bookmarks", selection.getBookmarks());
+                String selectedSource = selection.getSource();
+                if (selectedSource != null) {
+                    map.remove(selectedSource);
+                }
+            } else {
+                map.put("bookmarks", new ArrayList<>());
+                // data is null: keep all three sources as-is (catalog_bookmarks/page_bookmarks/self_bookmarks)
+            }
+
+            // Write back to JSON
+            mapper.writerWithDefaultPrettyPrinter().writeValue(jsonFile, map);
+
+            String jsonUrlOrPath;
+            boolean ossUploadSuccess = false;
+            if (ossEnabled) {
+                obsClient = new HuaweiObsClient(ossConfig.getEndpoint(), ossConfig.getAccessKey(), ossConfig.getSecretKey());
+                String jsonObjectKey = buildJsonObjectKeyForRebuild(ossConfig);
+                jsonUrlOrPath = obsClient.uploadFile(ossConfig.getTempBucketName(), jsonObjectKey, jsonFile, ossConfig.getDomainName());
+                LOGGER.log(Level.INFO, "Uploaded rebuilt JSON to OBS: {0}", jsonUrlOrPath);
+                ossUploadSuccess = true;
+                Files.delete(jsonFile.toPath());
+                LOGGER.log(Level.INFO, "Deleted local JSON after OSS upload: {0}", inputJsonName);
+            } else {
+                jsonUrlOrPath = jsonFile.getAbsolutePath();
+            }
+
+            return new RebuildBookmarksResult(jsonUrlOrPath, ossUploadSuccess);
+        } finally {
+            if (obsClient != null) {
+                try {
+                    obsClient.close();
+                } catch (IOException closeEx) {
+                    LOGGER.log(Level.WARNING, "Failed to close OBS client: " + closeEx.getMessage());
+                }
+            }
+        }
     }
 
     public static CustomOutputResult writeToCustomJson(String inputPdfName, String outputFolder, List<List<IObject>> contents,
@@ -1137,6 +1248,44 @@ public class JsonWriter {
             );
         }
 
+        /**
+         * 仅校验重建书签场景所需的 8 项配置（不含 {@code ossPermanentBucketName}），
+         * 与 {@link #fromCustomOptions(Config)} 共用同一字段集，便于在仅重建 JSON
+         * 时不强制要求永久桶配置。其它语义完全一致。
+         */
+        static OssUploadConfig fromCustomOptionsForJsonUpload(Config config) {
+            if (config == null) {
+                return disabled();
+            }
+            Map<String, Object> options = config.getCustomOptions();
+            if (options == null) {
+                return disabled();
+            }
+            String[] requiredKeys = {
+                "businessId", "basicEnv", "pulsarReceiveTopicName", "ossTempBucketName",
+                "ossEndpoint", "ossAccessKey", "ossSecretKey", "ossDomainName"
+            };
+            for (String key : requiredKeys) {
+                if (!options.containsKey(key) || options.get(key) == null) {
+                    return disabled();
+                }
+            }
+            String topicName = String.valueOf(options.get("pulsarReceiveTopicName"));
+            int lastSlash = topicName.lastIndexOf('/');
+            String topicLastPart = lastSlash >= 0 ? topicName.substring(lastSlash + 1) : topicName;
+            return new OssUploadConfig(
+                String.valueOf(options.get("businessId")),
+                String.valueOf(options.get("basicEnv")),
+                topicLastPart,
+                String.valueOf(options.get("ossTempBucketName")),
+                null,
+                String.valueOf(options.get("ossEndpoint")),
+                String.valueOf(options.get("ossAccessKey")),
+                String.valueOf(options.get("ossSecretKey")),
+                String.valueOf(options.get("ossDomainName"))
+            );
+        }
+
         private static OssUploadConfig disabled() {
             return new OssUploadConfig(null, null, null, null, null, null, null, null, null);
         }
@@ -1224,6 +1373,17 @@ public class JsonWriter {
         if (baseName.endsWith(".")) {
             baseName = baseName.substring(0, baseName.length() - 1);
         }
+        return String.format("public/%s/%s_%s.json",
+            ossConfig.getBasicEnv(),
+            ossConfig.getPulsarReceiveTopicName(),
+            ossConfig.getBusinessId());
+    }
+
+    /**
+     * 构造重建书签后上传到临时桶时使用的 object key（与 {@link #buildJsonObjectKey} 格式
+     * 一致，但不需要 PDF 文件名参数）。
+     */
+    private static String buildJsonObjectKeyForRebuild(OssUploadConfig ossConfig) {
         return String.format("public/%s/%s_%s.json",
             ossConfig.getBasicEnv(),
             ossConfig.getPulsarReceiveTopicName(),
