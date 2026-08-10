@@ -231,7 +231,6 @@ public class PaddleOcrProcessor {
      * 将Base64字符串转换为本地图片文件
      * @param base64Str Base64编码的图片字符串（可带/不带data:image/xxx;base64,前缀）
      * @param filePath  要保存的图片文件完整路径（如：D:/images/test.png）
-     * @throws Exception 处理过程中的异常（如IO异常、解码异常）
      */
     public static void convertBase64ToImage(String base64Str, String filePath) {
         // 1. 处理Base64前缀（如果有）
