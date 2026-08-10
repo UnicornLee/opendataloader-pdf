@@ -211,7 +211,7 @@ public class JsonWriter {
             if (ossEnabled) {
                 obsClient = new HuaweiObsClient(ossConfig.getEndpoint(), ossConfig.getAccessKey(), ossConfig.getSecretKey());
                 String jsonObjectKey = buildJsonObjectKeyForRebuild(ossConfig);
-                jsonUrlOrPath = obsClient.uploadFile(ossConfig.getTempBucketName(), jsonObjectKey, jsonFile, ossConfig.getDomainName());
+                jsonUrlOrPath = obsClient.uploadFile(ossConfig.getTempBucketName(), jsonObjectKey, jsonFile, ossConfig.getTempDomainName());
                 LOGGER.log(Level.INFO, "Uploaded rebuilt JSON to OBS: {0}", jsonUrlOrPath);
                 ossUploadSuccess = true;
                 Files.delete(jsonFile.toPath());
@@ -870,7 +870,7 @@ public class JsonWriter {
             boolean ossUploadSuccess = false;
             if (ossEnabled) {
                 String jsonObjectKey = buildJsonObjectKey(ossConfig, inputPDF.getName());
-                jsonUrlOrPath = obsClient.uploadFile(ossConfig.getTempBucketName(), jsonObjectKey, new File(jsonFileName), ossConfig.getDomainName());
+                jsonUrlOrPath = obsClient.uploadFile(ossConfig.getTempBucketName(), jsonObjectKey, new File(jsonFileName), ossConfig.getTempDomainName());
                 LOGGER.log(Level.INFO, "Uploaded main JSON to OBS: {0}", jsonUrlOrPath);
                 ossUploadSuccess = true;
 
@@ -1307,6 +1307,19 @@ public class JsonWriter {
         String getAccessKey() { return accessKey; }
         String getSecretKey() { return secretKey; }
         String getDomainName() { return domainName; }
+
+        /**
+         * Returns a domain name suitable for the temporary bucket by replacing
+         * the permanent bucket name with the temporary bucket name.
+         */
+        String getTempDomainName() {
+            if (domainName == null || domainName.isBlank()
+                    || tempBucketName == null || tempBucketName.isBlank()
+                    || permanentBucketName == null || permanentBucketName.isBlank()) {
+                return domainName;
+            }
+            return domainName.replace(permanentBucketName, tempBucketName);
+        }
     }
 
     /**
