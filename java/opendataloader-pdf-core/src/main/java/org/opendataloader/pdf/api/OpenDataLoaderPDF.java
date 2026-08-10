@@ -16,6 +16,7 @@
 package org.opendataloader.pdf.api;
 
 import org.opendataloader.pdf.hybrid.HybridClientFactory;
+import org.opendataloader.pdf.json.JsonWriter;
 import org.opendataloader.pdf.processors.DocumentProcessor;
 import org.opendataloader.pdf.processors.ProcessingResult;
 
@@ -40,6 +41,32 @@ public final class OpenDataLoaderPDF {
      */
     public static ProcessingResult processFile(String inputPdfName, Config config) throws IOException {
         return DocumentProcessor.processFileWithResult(inputPdfName, config);
+    }
+
+    /**
+     * Rebuilds the bookmark sections (self_bookmarks, catalog_bookmarks, page_bookmarks,
+     * and the quality-selected bookmarks) of an existing JSON file produced by
+     * {@link #processFile(String, Config)}.
+     *
+     * <p>The processing pipeline (catalog detection, page bookmark extraction,
+     * catalog-page complement, and three-source quality selection) is the same as
+     * the one used during full PDF parsing. Other fields in the JSON file
+     * (e.g., url, data, extend) are left untouched.</p>
+     *
+     * <p>If {@link Config#getCustomOptions()} supplies the OBS upload configuration
+     * (businessId, basicEnv, pulsarReceiveTopicName, ossTempBucketName, ossEndpoint,
+     * ossAccessKey, ossSecretKey, ossDomainName), the rebuilt JSON is uploaded to the
+     * OBS temp bucket and the local file is deleted on success. Otherwise the JSON
+     * remains on local disk.</p>
+     *
+     * @param inputJsonName Absolute path of the JSON file to rebuild.
+     * @param config        The configuration object. Custom options drive OSS upload.
+     * @return A {@link RebuildBookmarksResult} containing the OBS URL or local
+     *         absolute path and whether OBS upload succeeded.
+     * @throws IOException If the JSON cannot be read, written, or uploaded.
+     */
+    public static RebuildBookmarksResult rebuildBookmarks(String inputJsonName, Config config) throws IOException {
+        return JsonWriter.rebuildBookmarksFromJson(inputJsonName, config);
     }
 
     /**
