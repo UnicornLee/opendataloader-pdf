@@ -21,6 +21,7 @@ import org.opendataloader.pdf.custom.entities.Bookmark;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
 import org.opendataloader.pdf.custom.utils.BookmarkPrefixClassifier;
 import org.opendataloader.pdf.json.JsonName;
+import org.verapdf.wcag.algorithms.entities.IDocument;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.content.TextLine;
 import org.verapdf.wcag.algorithms.semanticalgorithms.containers.StaticContainers;
@@ -133,7 +134,8 @@ public class CatalogBookmarkProcessor {
 
         StaticLayoutContainers.setCatalogBookmarkPageRange(bestRange.startPage, bestRange.endPage);
 
-        List<Bookmark> roots = extractBookmarks(contents, bestRange, pageLabels);
+        int totalPages = contents.size();
+        List<Bookmark> roots = extractBookmarks(contents, bestRange, pageLabels, totalPages);
         int total = countAllBookmarks(roots);
         LOGGER.log(Level.INFO,
                 "[CatalogBookmark] extracted {0} bookmarks ({1} top-level) from range {2}-{3}",
@@ -174,7 +176,8 @@ public class CatalogBookmarkProcessor {
                 new Object[]{bestRange.startPage + 1, bestRange.endPage + 1,
                         bestRange.pageCount(), bestRange.totalTocLines});
 
-        List<Bookmark> roots = extractBookmarksFromJson(data, bestRange, pageLabels);
+        int totalPages = data.size();
+        List<Bookmark> roots = extractBookmarksFromJson(data, bestRange, pageLabels, totalPages);
         resolveCatalogBookmarkTargets(roots, data, bestRange.startPage, bestRange.endPage);
         int total = countAllBookmarks(roots);
         LOGGER.log(Level.INFO,
@@ -325,12 +328,23 @@ public class CatalogBookmarkProcessor {
 
     /**
      * Collects all page labels defined in the PDF document.
+     *
+     * <p>Returns an empty set when no PDF document is registered in
+     * {@link StaticContainers} (e.g. the JSON-only rebuild path that does
+     * not re-parse the PDF). In that case custom page labels cannot be
+     * recovered from the JSON, so Roman-numeral and label-suffix matching
+     * simply degrades to no-match, while Arabic-numeral TOC detection is
+     * unaffected.</p>
      */
     private static Set<String> collectPageLabels() {
         Set<String> labels = new HashSet<>();
-        int totalPages = StaticContainers.getDocument().getNumberOfPages();
+        IDocument document = StaticContainers.getDocument();
+        if (document == null) {
+            return labels;
+        }
+        int totalPages = document.getNumberOfPages();
         for (int i = 0; i < totalPages; i++) {
-            String label = StaticContainers.getDocument().getPage(i).getPageLabel();
+            String label = document.getPage(i).getPageLabel();
             if (label != null) {
                 labels.add(label);
             }
@@ -501,9 +515,13 @@ public class CatalogBookmarkProcessor {
     /**
      * Parses TOC lines inside the selected range into hierarchical bookmarks,
      * merging continuation lines for multi-line titles.
+     *
+     * @param totalPages physical page count used for Arabic page-number
+     *                   resolution; pass {@code contents.size()} when the
+     *                   PDF document is not registered in {@link StaticContainers}
      */
     private static List<Bookmark> extractBookmarks(List<List<IObject>> contents, PageRange range,
-                                                   Set<String> pageLabels) {
+                                                   Set<String> pageLabels, int totalPages) {
         List<LineInfo> allLines = collectAllLines(contents, range, pageLabels);
         if (allLines.isEmpty()) {
             return Collections.emptyList();
@@ -547,7 +565,7 @@ public class CatalogBookmarkProcessor {
                 Bookmark bookmark = new Bookmark();
                 bookmark.setText(title);
                 bookmark.setOriginalPageNum(parseOriginalPageNum(info.rawPage));
-                bookmark.setPageNum(resolvePageIndex(info.rawPage, pageLabels) + 1);
+                bookmark.setPageNum(resolvePageIndex(info.rawPage, pageLabels, totalPages) + 1);
                 bookmark.setFontSize((float) info.line.getFontSize());
                 bookmark.setSingleLine(true);
                 bookmark.setChildren(new ArrayList<>());
@@ -926,10 +944,12 @@ public class CatalogBookmarkProcessor {
 
     /**
      * Resolves a TOC page number/label to a physical page index.
+     *
+     * @param totalPages physical page count of the document (or JSON-derived
+     *                   page count when no PDF document is registered)
      */
-    private static int resolvePageIndex(String rawPage, Set<String> pageLabels) {
-        int totalPages = StaticContainers.getDocument().getNumberOfPages();
-        Map<String, Integer> labelToIndex = buildPageLabelMap(pageLabels);
+    private static int resolvePageIndex(String rawPage, Set<String> pageLabels, int totalPages) {
+        Map<String, Integer> labelToIndex = buildPageLabelMap(pageLabels, totalPages);
         Integer pageIndex = labelToIndex.get(rawPage.toUpperCase(Locale.ROOT));
         if (pageIndex != null) {
             return pageIndex;
@@ -945,9 +965,8 @@ public class CatalogBookmarkProcessor {
     /**
      * Builds a map from page labels (and 1-based numbers) to physical page indices.
      */
-    private static Map<String, Integer> buildPageLabelMap(Set<String> pageLabels) {
+    private static Map<String, Integer> buildPageLabelMap(Set<String> pageLabels, int totalPages) {
         Map<String, Integer> map = new HashMap<>();
-        int totalPages = StaticContainers.getDocument().getNumberOfPages();
         for (int i = 0; i < totalPages; i++) {
             if (pageLabels != null) {
                 for (String label : pageLabels) {
@@ -1105,7 +1124,7 @@ public class CatalogBookmarkProcessor {
 
     private static List<Bookmark> extractBookmarksFromJson(List<Map<String, Object>> data,
                                                            JsonPageRange range,
-                                                           Set<String> pageLabels) {
+                                                           Set<String> pageLabels, int totalPages) {
         List<JsonLineInfo> allLines = collectJsonLines(data, range, pageLabels);
         if (allLines.isEmpty()) {
             return Collections.emptyList();
@@ -1149,7 +1168,7 @@ public class CatalogBookmarkProcessor {
                 Bookmark bookmark = new Bookmark();
                 bookmark.setText(title);
                 bookmark.setOriginalPageNum(parseOriginalPageNum(info.rawPage));
-                bookmark.setPageNum(resolvePageIndex(info.rawPage, pageLabels) + 1);
+                bookmark.setPageNum(resolvePageIndex(info.rawPage, pageLabels, totalPages) + 1);
                 bookmark.setFontSize((float) info.fontSize);
                 bookmark.setSingleLine(true);
                 bookmark.setRelatedId(info.relatedId);
