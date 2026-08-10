@@ -20,14 +20,21 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 
 /**
  * Working-directory settings bound from the {@code pdf} block. The nested
- * {@code pdf.temp} group exposes the directory used to stage input PDFs.
+ * {@code pdf.temp} group exposes the directory used to stage input PDFs and
+ * {@code pdf.output} group exposes the directory used for generated outputs.
  */
 @ConfigurationProperties("pdf")
-public record PdfProperties(@DefaultValue PdfTemp temp) {
+public record PdfProperties(@DefaultValue PdfTemp temp, @DefaultValue PdfOutput output) {
 
     /**
      * {@code pdf.temp} sub-group; currently only the path is used.
      */
-    public record PdfTemp(@DefaultValue String path) {
+    public record PdfTemp(@DefaultValue("") String path) {
+    }
+
+    /**
+     * {@code pdf.output} sub-group; currently only the path is used.
+     */
+    public record PdfOutput(@DefaultValue("") String path) {
     }
 }

@@ -23,10 +23,10 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  */
 @ConfigurationProperties("oss")
 public record OssProperties(
-        @DefaultValue String templateBucketName,
-        @DefaultValue String permanentBucketName,
-        @DefaultValue String endpoint,
-        @DefaultValue String accessKey,
-        @DefaultValue String secretKey,
-        @DefaultValue String domainName) {
+        @DefaultValue("") String tempBucketName,
+        @DefaultValue("") String permanentBucketName,
+        @DefaultValue("") String endpoint,
+        @DefaultValue("") String accessKey,
+        @DefaultValue("") String secretKey,
+        @DefaultValue("") String domainName) {
 }

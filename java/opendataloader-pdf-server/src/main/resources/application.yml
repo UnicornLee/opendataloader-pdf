@@ -5,10 +5,6 @@ server:
 spring:
   application:
     name: opendataloader-pdf-server
-
-logging:
-  level:
-    org.opendataloader.pdf.server: DEBUG
   profiles:
       active: dev
   main:
@@ -32,6 +28,10 @@ logging:
               watch:
                   enabled: true
               acl-token: ${consul.acl-token}
+
+logging:
+  level:
+    org.opendataloader.pdf.server: DEBUG
 
 http:
     rest-template:
