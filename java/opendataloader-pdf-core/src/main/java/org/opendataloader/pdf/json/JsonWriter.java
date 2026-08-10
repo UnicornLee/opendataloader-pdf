@@ -242,7 +242,11 @@ public class JsonWriter {
         String jsonFileName = outputFolder + File.separator + inputPDF.getName().substring(0, inputPDF.getName().length() - 3) + "json";
         try (JsonGenerator jsonGenerator = getJsonGenerator(jsonFileName)) {
             jsonGenerator.writeStartObject();
-            jsonGenerator.writeStringField("url", inputPdfName);
+            if (config.getCustomOptions().containsKey("url") && !"".equals(config.getCustomOptions().get("url"))) {
+                jsonGenerator.writeStringField("url", (String) config.getCustomOptions().get("url"));
+            } else {
+                jsonGenerator.writeStringField("url", inputPdfName);
+            }
             jsonGenerator.writeArrayFieldStart("self_bookmarks");
             for (Bookmark bookmark : BookmarkUtils.getSelfBookmarks(inputPdfName)) {
                 jsonGenerator.writePOJO(bookmark);
