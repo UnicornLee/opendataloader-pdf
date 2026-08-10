@@ -348,9 +348,17 @@ public class DocumentProcessor {
         } else {
             paddleUrl = null;
         }
-        boolean isImmediateOcr = false;
+        boolean basicParseStreamTable;
+        if (config.getCustomOptions() != null && config.getCustomOptions().containsKey("basicParseStreamTable")) {
+            basicParseStreamTable = Boolean.valueOf(config.getCustomOptions().get("basicParseStreamTable").toString());
+        } else {
+            basicParseStreamTable = false;
+        }
+        boolean isImmediateOcr;
         if (config.getCustomOptions() != null && config.getCustomOptions().containsKey("is_immediate_ocr")) {
             isImmediateOcr = Boolean.valueOf(config.getCustomOptions().get("is_immediate_ocr").toString());
+        } else {
+            isImmediateOcr = false;
         }
 
         try {
@@ -460,7 +468,7 @@ public class DocumentProcessor {
                     pageContents.sort(Comparator.comparingDouble(item -> item.getTopY()));
                     Collections.reverse(pageContents);
                     // 无线表格识别 (skip for pages already replaced by fallback OCR to avoid double OCR)
-                    if (paddleUrl != null && !"".equals(paddleUrl) && !ocrFallbackPages.contains(pageNumber)) {
+                    if (basicParseStreamTable && paddleUrl != null && !"".equals(paddleUrl) && !ocrFallbackPages.contains(pageNumber)) {
                         try {
                             pageContents = StreamTableProcessor.processStreamTables(inputPdfName, pageContents, pageNumber, width, height, paddleUrl);
                         } catch (IOException e) {
