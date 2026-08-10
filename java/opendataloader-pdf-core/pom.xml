@@ -60,7 +60,7 @@
             <groupId>org.verapdf</groupId>
             <artifactId>wcag-validation</artifactId>
             <version>${verapdf.version}</version>
-            <scope>compile</scope>
+<!--            <scope>compile</scope>-->
             <exclusions>
                 <exclusion>
                     <groupId>org.jacoco</groupId>
@@ -72,7 +72,7 @@
             <groupId>org.verapdf</groupId>
             <artifactId>wcag-algorithms</artifactId>
             <version>${verapdf.wcag.algs.version}</version>
-            <scope>compile</scope>
+<!--            <scope>compile</scope>-->
             <exclusions>
                 <exclusion>
                     <groupId>org.jacoco</groupId>
