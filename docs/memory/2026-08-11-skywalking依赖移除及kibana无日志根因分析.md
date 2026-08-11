@@ -4,8 +4,8 @@
 - 任务：
   1. 用户已修改 `logback-spring.xml`（commit `c211b78` 后），所有 `org.apache.skywalking.*` 引用已移除。
   2. 询问 `opendataloader-pdf-server/pom.xml` 中的 `org.apache.skywalking:apm-toolkit-logback-1.x:8.2.0` 依赖是否可以删除 → **可以，已删除**。
-  3. 排查 Kibana 仍看不到日志的问题，**与 SkyWalking 是否使用无关**，根因在 Logstash/ES / Kibana 服务端链路。
-- 状态：pom 已清理；客户端无需再改；服务端待 Logstash 运维介入。
+  3. 排查 Kibana 仍看不到日志的问题 → **与 SkyWalking 无关，与 Logstash/ES 也无关；真正根因是 Kibana 端数据视图选错**（应选 `logs-jetty-default` 而不是 `logs-tomcat-default`）。
+- 状态：pom 已清理；客户端无需再改；服务端无需排查；Kibana 切数据视图即可恢复。
 
 ## 目标（Goal）
 - 让 `opendataloader-pdf-server` fat jar 不再依赖 `apm-toolkit-logback-1.x`，避免无用的运行时类。
@@ -58,7 +58,16 @@
 LogstashTcpSocketAppender → TCP 连接 node01.public.logstash.test:9999 → connection established ✓
 Started ServerApplication in 6.292 seconds ✓
 ```
-应用侧**确实把日志推到 Logstash**——所以不是"SkyWalking 让日志发不出去"，而是"Logstash → ES → Kibana 这一段没把日志呈现出来"。
+应用侧**确实把日志推到 Logstash**，所以"日志送没送到 Logstash"这层没问题。
+
+### 5) Kibana 无日志的最终定位（**真正根因**）
+- **根因不在服务端任何配置**：Logstash → ES → Kibana 链路正常，应用发出的 JSON（带 `type:"jetty_log"`、`program:"opendataloader-pdf-server"` 等字段）已被正常索引到 `logs-jetty-default` 索引。
+- **真正根因在 Kibana UI 的数据视图（Data View）选择错误**：
+  - 用户之前选的是 `logs-tomcat-default`；
+  - 而本服务通过 `LogstashTcpSocketAppender` 发出的日志 JSON 带 `type:"jetty_log"`，落到的是 `logs-jetty-default` 索引；
+  - `logs-tomcat-default` 与 `logs-jetty-default` 是两个完全不同的 Elasticsearch 索引模式，查询前者永远查不到本服务的日志。
+- **修复**：在 Kibana 顶栏把数据视图从 `logs-tomcat-default` 切到 `logs-jetty-default`，即可立即看到 `opendataloader-pdf-server` 的日志。
+- 与 SkyWalking 是否启用、Logstash pipeline 配置、ES 索引模板、Kibana 时间窗口都**无关**。
 
 ## 实现（Implementation）
 
@@ -86,28 +95,22 @@ Started ServerApplication in 6.292 seconds ✓
 
 ## 关键决策（Key Decisions）
 - **删除 SkyWalking 依赖**：当前配置不再需要，保留只会增加 fat jar 体积且误导后续维护者。
-- **不修复 Kibana 无日志问题**：该问题在服务端（Logstash/ES/Kibana），不在客户端 Java 代码；强行在客户端加 SkyWalking 反而增加维护成本。
+- **不修复 Kibana 无日志问题**：该问题不在 Java 端，客户端无须任何改动；服务端也无需改动；只要在 Kibana UI 上把数据视图从 `logs-tomcat-default` 切到 `logs-jetty-default` 即可。
 - **保留 logstash-logback-encoder 依赖**：stash appender 仍依赖其提供的 `LogstashTcpSocketAppender` / `LogstashEncoder` 类。
-- **保留依赖注释的删除**：原注释解释 SkyWalking 必要性，依赖删除后注释失去上下文，一并清理。
+- **删除解释用注释**：原注释解释 SkyWalking 必要性，依赖删除后注释失去上下文，一并清理。
 
-## 服务端排查建议（移交 Logstash 运维）
+## Kibana 端修复（不是服务端排查）
 
-按可能性排序排查：
+只需一步：
+1. 打开 Kibana，顶部"Data View"下拉框中，把当前的 `logs-tomcat-default` 切换为 **`logs-jetty-default`**。
+2. 切完之后搜索条件无需改（默认 `*`），时间窗口保持"最近 15 分钟"或更大范围，即可看到 `opendataloader-pdf-server` 的日志条目（每条都有 `type:"jetty_log"` 和 `program:"opendataloader-pdf-server"`）。
 
-| 假设 | 验证手段 |
-|---|---|
-| A. Logstash input codec 与发送端不匹配 | `tcpdump -i any port 9999 -A -nn` 看 raw 包；`/var/log/logstash/logstash-plain.log` 看 parse 错误 |
-| B. Logstash filter 假设了 trace 字段 | `grep -RnE 'traceId\|spanId\|TID\|skywalking' /etc/logstash/conf.d/` 查 pipeline 中相关 if 分支 |
-| C. ES 索引未创建 / 索引名不匹配 | `curl -s 'http://es-host:9200/_cat/indices?v' \| grep -i jetty`；对照 Logstash `output.elasticsearch.index` |
-| D. Kibana 时间窗口不对 | 推送时间是否在当前 Kibana 时间选择器内 |
-| E. ES 写失败 | Logstash 日志中搜索 `[status_code]` |
-
-**特别注意假设 B**：若 SkyWalking 时代的 Logstash pipeline 写过 `if [traceId]` 这类条件，移除 SkyWalking 后字段缺失，filter 行为可能改变。但根因是 Logstash pipeline 的设计选择，不是 Java 端问题。
+无需联系 Logstash/ES 运维，无需改动任何服务端配置，无需回滚 SkyWalking。
 
 ## 验证结果
 - `mvn -q -o dependency:tree -Dincludes=org.apache.skywalking`：无输出 → SkyWalking 已从依赖树移除 ✓
 - `mvn -q -o compile`：编译通过 ✓
-- 未启动应用做端到端验证（已确认 SkyWalking 与 Kibana 无日志无因果关系，无需改动客户端即可恢复；恢复需服务端介入）。
+- 真实环境验证（用户反馈）：Kibana 数据视图从 `logs-tomcat-default` 切到 `logs-jetty-default` 后即可看到日志 ✓，无需改动服务端或客户端 Java 代码。
 
 ## 相关文件
 - `java/opendataloader-pdf-server/pom.xml`：删除 `org.apache.skywalking:apm-toolkit-logback-1.x` 依赖及解释注释。
@@ -125,7 +128,7 @@ Started ServerApplication in 6.292 seconds ✓
   cd D:\Code\JavaCode\opendataloader-pdf\java\opendataloader-pdf-server
   mvn clean package -DskipTests
   ```
-- 服务端（Logstash 端）抓包验证：
-  ```bash
-  tcpdump -i any port 9999 -A -nn | head -100
-  ```
+- Kibana 端确认日志（无需服务端抓包）：
+  1. Kibana 顶栏 Data View 选 `logs-jetty-default`。
+  2. 时间窗口设"Last 15 minutes"。
+  3. 搜索 `program:"opendataloader-pdf-server"` 即可看到日志。
