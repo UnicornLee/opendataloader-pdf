@@ -587,6 +587,12 @@ public class PageBookmarkProcessor {
      * Cleans a list of candidates of the same template by splitting at each
      * value-1 restart and trimming each run to a contiguous "from-1" sequence.
      * Duplicate values are resolved by keeping the latest occurrence.
+     *
+     * <p>After trimming, each section is checked with the same TOC-like
+     * adjacency filter used for deeper levels ({@link #isTocLikeGroup});
+     * sections that look like a table-of-contents residue are discarded.
+     * Among the surviving sections only the largest contiguous run is kept,
+     * matching the level-2/3 behaviour of picking the widest valid chain.</p>
      */
     private static List<Candidate> cleanCandidates(List<Candidate> candidates) {
         if (candidates.isEmpty()) {
@@ -597,14 +603,33 @@ public class PageBookmarkProcessor {
             .comparingInt((Candidate c) -> c.pageIndex)
             .thenComparing((Candidate c) -> -c.topY));
         List<List<Candidate>> sections = splitByValueOne(sorted);
-        List<Candidate> trimmed = new ArrayList<>();
+
+        List<Candidate> bestSection = null;
+        int bestLength = 0;
+        int bestStartPage = Integer.MAX_VALUE;
+
         for (List<Candidate> section : sections) {
             List<Candidate> trimmedSection = trimContiguousSection(section);
-            if (trimmedSection != null && !trimmedSection.isEmpty()) {
-                trimmed.addAll(trimmedSection);
+            if (trimmedSection == null || trimmedSection.isEmpty()) {
+                continue;
+            }
+            if (isTocLikeGroup(trimmedSection)) {
+                continue;
+            }
+            int length = trimmedSection.size();
+            int startPage = trimmedSection.stream()
+                .mapToInt(c -> c.pageIndex)
+                .min()
+                .orElse(Integer.MAX_VALUE);
+            if (length > bestLength
+                || (length == bestLength && startPage < bestStartPage)) {
+                bestLength = length;
+                bestStartPage = startPage;
+                bestSection = trimmedSection;
             }
         }
-        return trimmed;
+
+        return bestSection != null ? bestSection : Collections.emptyList();
     }
 
     /**
