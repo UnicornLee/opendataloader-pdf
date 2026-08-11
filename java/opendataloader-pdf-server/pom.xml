@@ -117,11 +117,12 @@
             <artifactId>apm-toolkit-logback-1.x</artifactId>
             <version>8.2.0</version>
         </dependency>
-        <!--<dependency>
+        <dependency>
             <groupId>net.logstash.logback</groupId>
             <artifactId>logstash-logback-encoder</artifactId>
             <version>7.4</version>
-        </dependency>-->
+        </dependency>
+
         <dependency>
             <groupId>org.apache.pulsar</groupId>
             <artifactId>pulsar-client</artifactId>
