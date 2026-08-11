@@ -105,18 +105,6 @@
             <version>${lombok.version}</version>
             <scope>provided</scope>
         </dependency>
-        <!--
-          logback-spring.xml references SkyWalking and Logstash appenders /
-          layouts that must be on the runtime classpath, otherwise logback
-          aborts startup. apm-toolkit-logback-1.x 8.2.0 ships the
-          org.apache.skywalking...toolkit.log.logback.v1.x.* package
-          referenced by the existing configuration.
-        -->
-        <dependency>
-            <groupId>org.apache.skywalking</groupId>
-            <artifactId>apm-toolkit-logback-1.x</artifactId>
-            <version>8.2.0</version>
-        </dependency>
         <dependency>
             <groupId>net.logstash.logback</groupId>
             <artifactId>logstash-logback-encoder</artifactId>
