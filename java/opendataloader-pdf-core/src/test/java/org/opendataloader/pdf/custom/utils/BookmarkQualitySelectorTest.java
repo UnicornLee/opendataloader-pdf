@@ -56,8 +56,8 @@ class BookmarkQualitySelectorTest {
     }
 
     @Test
-    void comparableQualityFallsBackToCatalogPriority() {
-        // catalog 与 page 质量相当（数量接近、无惩罚）时应按优先级选 catalog
+    void comparableQualityKeepsCatalogByDefault() {
+        // catalog 与 page 数量接近、无惩罚；page/catalog ≈ 0.86，远低于 2.0 强胜率阈值，catalog 保留
         List<Bookmark> catalog = flat("甲", "乙", "丙", "丁");
         List<Bookmark> page = flat("一", "二", "三");
         BookmarkQualitySelector.Selection selection = BookmarkQualitySelector.select(
@@ -150,5 +150,130 @@ class BookmarkQualitySelectorTest {
         Assertions.assertEquals(1, metrics.effectiveCount);
         Assertions.assertTrue(metrics.dupRatio > 0.6);
         Assertions.assertTrue(metrics.strangeRatio > 0.3);
+    }
+
+    // ---------- trimOverlongNodes ----------
+
+    @Test
+    void trimOverlongNodesRemovesOverlongL1() {
+        StringBuilder big = new StringBuilder();
+        for (int i = 0; i < 250; i++) {
+            big.append('x');
+        }
+        Bookmark l1Bad = bookmark(big.toString(), 1, 1);
+        Bookmark l1Ok = bookmark("短标题", 2, 2);
+        l1Ok.getChildren().add(bookmark("短子", 2, 3));
+
+        List<Bookmark> roots = new ArrayList<>();
+        roots.add(l1Bad);
+        roots.add(l1Ok);
+
+        BookmarkUtils.trimOverlongNodes(roots);
+
+        Assertions.assertEquals(1, roots.size());
+        Assertions.assertEquals("短标题", roots.get(0).getText());
+    }
+
+    @Test
+    void trimOverlongNodesRemovesAllL2WhenAnyL2Overlong() {
+        StringBuilder big = new StringBuilder();
+        for (int i = 0; i < 250; i++) {
+            big.append('y');
+        }
+        Bookmark parent = bookmark("第一章", 1, 1);
+        parent.getChildren().add(bookmark("第一节", 1, 2));
+        parent.getChildren().add(bookmark(big.toString(), 1, 3));
+        parent.getChildren().add(bookmark("第三节", 1, 4));
+
+        List<Bookmark> roots = new ArrayList<>();
+        roots.add(parent);
+
+        BookmarkUtils.trimOverlongNodes(roots);
+
+        Assertions.assertEquals(1, roots.size());
+        Assertions.assertEquals("第一章", roots.get(0).getText());
+        Assertions.assertTrue(roots.get(0).getChildren().isEmpty());
+    }
+
+    @Test
+    void trimOverlongNodesRemovesAllL3WhenAnyL3Overlong() {
+        StringBuilder big = new StringBuilder();
+        for (int i = 0; i < 250; i++) {
+            big.append('z');
+        }
+        Bookmark l1 = bookmark("第一章", 1, 1);
+        Bookmark l2 = bookmark("第一节", 1, 2);
+        l2.getChildren().add(bookmark("1.1", 1, 3));
+        l2.getChildren().add(bookmark(big.toString(), 1, 4));
+        l2.getChildren().add(bookmark("1.3", 1, 5));
+        l1.getChildren().add(l2);
+
+        List<Bookmark> roots = new ArrayList<>();
+        roots.add(l1);
+
+        BookmarkUtils.trimOverlongNodes(roots);
+
+        Assertions.assertEquals(1, roots.size());
+        Bookmark keptL1 = roots.get(0);
+        Assertions.assertEquals("第一章", keptL1.getText());
+        Assertions.assertEquals(1, keptL1.getChildren().size());
+        Bookmark keptL2 = keptL1.getChildren().get(0);
+        Assertions.assertEquals("第一节", keptL2.getText());
+        Assertions.assertTrue(keptL2.getChildren().isEmpty());
+    }
+
+    @Test
+    void trimOverlongNodesHandlesNullAndEmpty() {
+        Assertions.assertNull(BookmarkUtils.trimOverlongNodes(null));
+        List<Bookmark> empty = new ArrayList<>();
+        Assertions.assertSame(empty, BookmarkUtils.trimOverlongNodes(empty));
+    }
+
+    @Test
+    void trimOverlongNodesKeepsAllWhenAllShort() {
+        Bookmark l1 = bookmark("第一章", 1, 1);
+        Bookmark l2 = bookmark("第一节", 1, 2);
+        Bookmark l3 = bookmark("1.1", 1, 3);
+        l2.getChildren().add(l3);
+        l1.getChildren().add(l2);
+
+        List<Bookmark> roots = new ArrayList<>();
+        roots.add(l1);
+
+        BookmarkUtils.trimOverlongNodes(roots);
+
+        Assertions.assertEquals(1, roots.size());
+        Assertions.assertEquals("第一章", roots.get(0).getText());
+        Assertions.assertEquals(1, roots.get(0).getChildren().size());
+        Assertions.assertEquals(1, roots.get(0).getChildren().get(0).getChildren().size());
+    }
+
+    // ---------- catalog strong-win rule (2.0x) ----------
+
+    @Test
+    void catalogWinsByDefaultWhenNonCatalogIsBelow2x() {
+        // catalog 3 条 → ln(4) ≈ 1.386；page 10 条 → ln(11) ≈ 2.398；
+        // ratio page/catalog ≈ 1.73 < 2.0 → catalog 仍赢
+        List<Bookmark> catalog = flat("甲", "乙", "丙");
+        List<Bookmark> page = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            page.add(bookmark("条目" + (i + 1), i + 1, i + 1));
+        }
+        BookmarkQualitySelector.Selection selection = BookmarkQualitySelector.select(
+            catalog, page, new ArrayList<>(), null);
+        Assertions.assertEquals(BookmarkQualitySelector.SOURCE_CATALOG, selection.getSource());
+    }
+
+    @Test
+    void nonCatalogWinsWhenAtLeast2xCatalog() {
+        // catalog 4 条，page 大量 → page score 远高于 catalog×2 → page 赢
+        List<Bookmark> catalog = flat("甲", "乙", "丙", "丁");
+        List<Bookmark> page = new ArrayList<>();
+        for (int i = 0; i < 400; i++) {
+            page.add(bookmark("条目" + (i + 1), i + 1, i + 1));
+        }
+        BookmarkQualitySelector.Selection selection = BookmarkQualitySelector.select(
+            catalog, page, new ArrayList<>(), null);
+        Assertions.assertEquals(BookmarkQualitySelector.SOURCE_PAGE, selection.getSource());
     }
 }
