@@ -95,7 +95,7 @@ public final class LineArtProcessor {
             // Pull overlapping elements already added to result (the "before" neighbours).
             for (int j = result.size() - 1; j >= 0; j--) {
                 IObject candidate = result.get(j);
-                if (candidate instanceof ShapeChunk) {
+                if (candidate instanceof ShapeChunk || HeaderFooterProcessor.isHeaderOrFooter(candidate)) {
                     continue;
                 }
                 if (BoundingBoxGroupUtils.hasSignificantOverlap(candidate.getBoundingBox(), lineArtBox)) {
@@ -111,7 +111,7 @@ public final class LineArtProcessor {
             int forwardCount = 0;
             for (int j = i + 1; j < pageContents.size(); j++) {
                 IObject candidate = pageContents.get(j);
-                if (candidate instanceof ShapeChunk) {
+                if (candidate instanceof ShapeChunk || HeaderFooterProcessor.isHeaderOrFooter(candidate)) {
                     continue;
                 }
                 if (BoundingBoxGroupUtils.hasSignificantOverlap(candidate.getBoundingBox(), lineArtBox)) {
