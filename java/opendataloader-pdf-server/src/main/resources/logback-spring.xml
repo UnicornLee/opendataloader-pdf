@@ -15,7 +15,7 @@
 		</encoder>
     </appender>
 
-	<springProfile name="dev,test">
+	<springProfile name="dev">
 	    <appender name="file" class="ch.qos.logback.core.rolling.RollingFileAppender">
 	        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
 	            <fileNamePattern>${log.home}/%d{yyyy-MM-dd}.log</fileNamePattern>
@@ -29,7 +29,7 @@
 	    </appender>
     </springProfile>
 
-    <springProfile name="prepub-sz,prepub-hk,prepub,prod">
+    <springProfile name="test,prepub-sz,prepub-hk,prepub,prod">
 	    <appender name="stash" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
 			<destination>${log.stash.addresses}</destination>
 			<keepAliveDuration>5 minutes</keepAliveDuration>
@@ -67,16 +67,16 @@
     </root>
 
 	<!-- 配置对应包显示日志级别 -->
-    <logger name="org.eclipse.jetty" level="ERROR"></logger>
     <logger name="org.springframework" level="WARN"></logger>
     <logger name="com.netflix" level="WARN"></logger>
     <logger name="org.dozer" level="WARN"></logger>
     <logger name="org.hibernate" level="WARN"></logger>
     <logger name="org.mybatis" level="WARN"></logger>
     <logger name="org.apache" level="WARN"></logger>
-    <logger name="springfox.documentation" level="WARN"></logger>
     <logger name="io.lettuce" level="WARN"></logger>
-    <logger name="io.netty" level="WARN"></logger>
-    <logger name="druid.sql" level="WARN"></logger>
+    <logger name="reactor.netty.http.server" level="WARN"></logger>
+    <logger name="ma.glasnost.orika" level="WARN"></logger>
+    <logger name="org.eclipse.jetty.http" level="WARN"></logger>
+    <logger name="reactor.util" level="WARN"></logger>
 
 </configuration>
