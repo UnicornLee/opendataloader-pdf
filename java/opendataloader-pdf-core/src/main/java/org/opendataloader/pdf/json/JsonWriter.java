@@ -1290,7 +1290,7 @@ public class JsonWriter {
                 return disabled();
             }
             String[] requiredKeys = {
-                "businessId", "basicEnv", "pulsarReceiveTopicName", "ossTempBucketName",
+                "businessId", "basicEnv", "pulsarReceiveTopicName", "ossTempBucketName", "ossPermanentBucketName",
                 "ossEndpoint", "ossAccessKey", "ossSecretKey", "ossDomainName"
             };
             for (String key : requiredKeys) {
@@ -1306,7 +1306,7 @@ public class JsonWriter {
                 String.valueOf(options.get("basicEnv")),
                 topicLastPart,
                 String.valueOf(options.get("ossTempBucketName")),
-                null,
+                String.valueOf(options.get("ossPermanentBucketName")),
                 String.valueOf(options.get("ossEndpoint")),
                 String.valueOf(options.get("ossAccessKey")),
                 String.valueOf(options.get("ossSecretKey")),
