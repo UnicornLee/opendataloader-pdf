@@ -907,38 +907,4 @@ public class PageBookmarkProcessorTest {
                 ">5 entry chain with same-page and page-boundary adjacency must be dropped");
     }
 
-    /**
-     * Two separate Chinese-number sections exist: page 0 has 一..六 with a
-     * same-page run of three consecutive ids (三/四/五), and page 1 has 一..八
-     * that are all adjacent. Both sections are TOC-like under the same filter
-     * used for deeper levels, so level 1 must be empty and the caller will fall
-     * back to another bookmark source (e.g. catalog_bookmarks).
-     */
-    @Test
-    public void testLevelOneDropsTocLikeSections() {
-        List<Map<String, Object>> data = jsonDoc(
-                jsonPage(
-                        jsonItem(1, "一、会议召集人", 900.0),
-                        jsonItem(2, "二、会议召开时间", 880.0),
-                        jsonItem(3, "（一）现场会议时间", 860.0),
-                        jsonItem(4, "（二）网络投票时间", 840.0),
-                        jsonItem(5, "三、现场会议地点", 820.0),
-                        jsonItem(6, "四、会议主持人", 800.0),
-                        jsonItem(7, "五、会议审议事项", 780.0),
-                        jsonItem(8, "六、会议议程", 760.0)),
-                jsonPage(
-                        jsonItem(1, "一、须知一", 900.0),
-                        jsonItem(2, "二、须知二", 880.0),
-                        jsonItem(3, "三、须知三", 860.0),
-                        jsonItem(4, "四、须知四", 840.0),
-                        jsonItem(5, "五、须知五", 820.0),
-                        jsonItem(6, "六、须知六", 800.0),
-                        jsonItem(7, "七、须知七", 780.0),
-                        jsonItem(8, "八、须知八", 760.0)));
-
-        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
-        Assertions.assertTrue(bookmarks.isEmpty(),
-                "Both level-1 sections are TOC-like and must be dropped");
-    }
-
 }

@@ -565,13 +565,18 @@ public class PageBookmarkProcessor {
             if (fontCmp != 0) {
                 return fontCmp;
             }
-            int indentCmp = Double.compare(a.averageLeftX, b.averageLeftX);
-            if (indentCmp != 0) {
-                return indentCmp;
-            }
+            // Count-before-indent: a template that survives cleaning with more
+            // entries is more likely to be the real chapter spine than a
+            // template with fewer entries that happens to be slightly less
+            // indented (e.g. body-text paragraphs starting with "1、" that
+            // share the body text margin).
             int countCmp = Integer.compare(b.candidates.size(), a.candidates.size());
             if (countCmp != 0) {
                 return countCmp;
+            }
+            int indentCmp = Double.compare(a.averageLeftX, b.averageLeftX);
+            if (indentCmp != 0) {
+                return indentCmp;
             }
             int pageCmp = Integer.compare(a.firstPageIndex, b.firstPageIndex);
             if (pageCmp != 0) {
@@ -588,11 +593,18 @@ public class PageBookmarkProcessor {
      * value-1 restart and trimming each run to a contiguous "from-1" sequence.
      * Duplicate values are resolved by keeping the latest occurrence.
      *
-     * <p>After trimming, each section is checked with the same TOC-like
-     * adjacency filter used for deeper levels ({@link #isTocLikeGroup});
-     * sections that look like a table-of-contents residue are discarded.
-     * Among the surviving sections only the largest contiguous run is kept,
-     * matching the level-2/3 behaviour of picking the widest valid chain.</p>
+     * <p>After trimming, each section is checked for the overlong-entry rule
+     * shared with {@link #isTocLikeGroup}: a section containing any entry whose
+     * full text exceeds {@value #MAX_ENTRY_TEXT_LENGTH} characters is treated
+     * as a numbered body paragraph (not a heading) and discarded. This stops
+     * long numbered paragraphs ("1、品牌营销服务网络拓展项目：受外部环境...")
+     * from masquerading as level-1 bookmarks.
+     *
+     * <p>Among the surviving sections only the largest contiguous run is kept,
+     * which removes duplicate value-restart groups (e.g. two interleaved
+     * {@code 一/二/...} sequences from a TOC page and a body page) without
+     * touching the deeper-level TOC-residue filter, which remains the job of
+     * {@link #cleanCandidatesLocal}.</p>
      */
     private static List<Candidate> cleanCandidates(List<Candidate> candidates) {
         if (candidates.isEmpty()) {
@@ -613,7 +625,7 @@ public class PageBookmarkProcessor {
             if (trimmedSection == null || trimmedSection.isEmpty()) {
                 continue;
             }
-            if (isTocLikeGroup(trimmedSection)) {
+            if (hasOverlongEntry(trimmedSection)) {
                 continue;
             }
             int length = trimmedSection.size();
@@ -630,6 +642,22 @@ public class PageBookmarkProcessor {
         }
 
         return bestSection != null ? bestSection : Collections.emptyList();
+    }
+
+    /**
+     * Returns true when any candidate in {@code section} has a full text that
+     * exceeds {@value #MAX_ENTRY_TEXT_LENGTH} characters. Mirrors Rule 1 of
+     * {@link #isTocLikeGroup} so it can be reused by the level-1 path without
+     * pulling in the adjacency-based rules, which would over-drop legitimate
+     * Chinese-style level-1 sequences.
+     */
+    private static boolean hasOverlongEntry(List<Candidate> section) {
+        for (Candidate c : section) {
+            if (c.fullText != null && c.fullText.length() > MAX_ENTRY_TEXT_LENGTH) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
