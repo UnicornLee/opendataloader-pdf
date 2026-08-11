@@ -2,71 +2,75 @@
 
 <configuration debug="true" scan="true">
 
-	<springProperty scope="context" name="log.level" source="log.level" defaultValue=""/>
-	<springProperty scope="context" name="log.appender" source="log.appender" defaultValue=""/>
-	<springProperty scope="context" name="log.home" source="log.home" defaultValue=""/>
-	<springProperty scope="context" name="log.stash.addresses" source="log.stash.addresses" defaultValue=""/>
+    <springProperty scope="context" name="log.level" source="log.level" defaultValue="DEBUG"/>
+    <springProperty scope="context" name="log.appender" source="log.appender" defaultValue="file"/>
+    <springProperty scope="context" name="log.home" source="log.home" defaultValue="service_ticket"/>
+    <springProperty scope="context" name="log.stash.addresses" source="log.stash.addresses" defaultValue=""/>
 
     <appender name="console" class="ch.qos.logback.core.ConsoleAppender">
-        <encoder charset="UTF-8" class="ch.qos.logback.core.encoder.LayoutWrappingEncoder">
-			<layout class="org.apache.skywalking.apm.toolkit.log.logback.v1.x.mdc.TraceIdMDCPatternLogbackLayout">
-				<pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%-5level] [%X{tid}] %logger %M - %msg%n</pattern>
-			</layout>
-		</encoder>
+        <encoder charset="UTF-8">
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%-5level] [%X{tid}] %logger %M - %msg%n</pattern>
+        </encoder>
     </appender>
 
-	<springProfile name="dev">
-	    <appender name="file" class="ch.qos.logback.core.rolling.RollingFileAppender">
-	        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
-	            <fileNamePattern>${log.home}/%d{yyyy-MM-dd}.log</fileNamePattern>
-	            <maxHistory>60</maxHistory>
-	        </rollingPolicy>
-	        <encoder charset="UTF-8" class="ch.qos.logback.core.encoder.LayoutWrappingEncoder">
-				<layout class="org.apache.skywalking.apm.toolkit.log.logback.v1.x.mdc.TraceIdMDCPatternLogbackLayout">
-					<pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%-5level] [%X{tid}] %logger %M - %msg%n</pattern>
-				</layout>
-			</encoder>
-	    </appender>
+    <springProfile name="dev">
+        <appender name="file" class="ch.qos.logback.core.rolling.RollingFileAppender">
+            <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+                <fileNamePattern>${log.home}/%d{yyyy-MM-dd}.log</fileNamePattern>
+                <maxHistory>60</maxHistory>
+            </rollingPolicy>
+            <encoder charset="UTF-8">
+                <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%-5level] [%X{tid}] %logger %M - %msg%n</pattern>
+            </encoder>
+        </appender>
     </springProfile>
 
-    <springProfile name="test,prepub-sz,prepub-hk,prepub,prod">
-	    <appender name="stash" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
-			<destination>${log.stash.addresses}</destination>
-			<keepAliveDuration>5 minutes</keepAliveDuration>
-			<reconnectionDelay>1 second</reconnectionDelay>
-			<writeBufferSize>16384</writeBufferSize>
-			<encoder class="net.logstash.logback.encoder.LogstashEncoder">
-			    <provider class="org.apache.skywalking.apm.toolkit.log.logback.v1.x.logstash.TraceIdJsonProvider"></provider>
-				<includeCallerData>true</includeCallerData>
-				<includeMdcKeyName>TID</includeMdcKeyName>
-				<customFields>{"type":"jetty_log","program":"opendataloader-pdf-server"}
-				</customFields>
-			</encoder>
-		</appender>
-	</springProfile>
+    <springProfile name="prod">
+        <appender name="stash" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
+            <destination>${log.stash.addresses}</destination>
+            <keepAliveDuration>5 minutes</keepAliveDuration>
+            <reconnectionDelay>1 second</reconnectionDelay>
+            <writeBufferSize>16384</writeBufferSize>
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <includeCallerData>true</includeCallerData>
+                <customFields>{"type":"jetty_log","program":"opendataloader-pdf-server"}
+                </customFields>
+            </encoder>
+        </appender>
+    </springProfile>
+    <springProfile name="prepub-sz">
+        <appender name="stash" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
+            <destination>${log.stash.addresses}</destination>
+            <keepAliveDuration>5 minutes</keepAliveDuration>
+            <reconnectionDelay>1 second</reconnectionDelay>
+            <writeBufferSize>16384</writeBufferSize>
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <includeCallerData>true</includeCallerData>
+                <customFields>{"type":"jetty_log","program":"opendataloader-pdf-server"}
+                </customFields>
+            </encoder>
+        </appender>
+    </springProfile>
 
-	<springProfile name="sim">
-		<appender name="stash" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
-			<destination>${log.stash.addresses}</destination>
-			<keepAliveDuration>5 minutes</keepAliveDuration>
-			<reconnectionDelay>1 second</reconnectionDelay>
-			<writeBufferSize>16384</writeBufferSize>
-			<encoder class="net.logstash.logback.encoder.LogstashEncoder">
-			    <provider class="org.apache.skywalking.apm.toolkit.log.logback.v1.x.logstash.TraceIdJsonProvider"></provider>
-				<includeCallerData>true</includeCallerData>
-				<includeMdcKeyName>TID</includeMdcKeyName>
-				<customFields>{"type":"jetty_log","program":"opendataloader-pdf-server"}
-				</customFields>
-			</encoder>
-		</appender>
-	</springProfile>
+    <springProfile name="sim">
+        <appender name="stash" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
+            <destination>${log.stash.addresses}</destination>
+            <keepAliveDuration>5 minutes</keepAliveDuration>
+            <reconnectionDelay>1 second</reconnectionDelay>
+            <writeBufferSize>16384</writeBufferSize>
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <includeCallerData>true</includeCallerData>
+                <customFields>{"type":"jetty_log","program":"opendataloader-pdf-server-sim"}
+                </customFields>
+            </encoder>
+        </appender>
+    </springProfile>
 
     <root level="${log.level}">
         <appender-ref ref="console" />
         <appender-ref ref="${log.appender}" />
     </root>
 
-	<!-- 配置对应包显示日志级别 -->
     <logger name="org.springframework" level="WARN"></logger>
     <logger name="com.netflix" level="WARN"></logger>
     <logger name="org.dozer" level="WARN"></logger>
@@ -78,5 +82,7 @@
     <logger name="ma.glasnost.orika" level="WARN"></logger>
     <logger name="org.eclipse.jetty.http" level="WARN"></logger>
     <logger name="reactor.util" level="WARN"></logger>
+
+    <!--    <logger name="org.apache.http" level="WARN"></logger>-->
 
 </configuration>
