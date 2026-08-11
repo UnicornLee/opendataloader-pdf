@@ -24,8 +24,10 @@ import java.util.logging.Logger;
  * </ul>
  *
  * <p>评分：score = ln(1 + effectiveCount) × (1 − penalty)，penalty 为上述 5 项比率之和（封顶 1）。
- * 空来源最差；penalty ≥ {@link #BAD_PENALTY} 淘汰；最高分与次高分相对差 &lt; {@link #COMPARABLE_THRESHOLD}
- * 时按优先级 catalog &gt; page &gt; self 决胜；全部淘汰则返回空列表。</p>
+ * 空来源最差；penalty ≥ {@link #BAD_PENALTY} 淘汰。当 {@code catalog_bookmarks} 通过淘汰线时，
+ * 其它来源必须 score ≥ catalog.score × {@value #CATALOG_STRONG_WIN_RATIO} 才能击败 catalog
+ * （强胜率规则）；catalog 缺席时，最高分与次高分相对差 &lt; {@link #COMPARABLE_THRESHOLD}
+ * 时按优先级 page &gt; self 决胜。全部淘汰则返回空列表。</p>
  */
 public class BookmarkQualitySelector {
 
@@ -41,6 +43,12 @@ public class BookmarkQualitySelector {
     private static final double COMPARABLE_THRESHOLD = 0.10;
     /** 文本中连续出现该数量的 Latin-1 补充区字符即视为乱码。 */
     private static final int MOJIBAKE_RUN_LENGTH = 2;
+    /**
+     * 当 {@code catalog_bookmarks} 存在且通过淘汰线时，其它来源的 score
+     * 必须至少是 catalog 的 {@code CATALOG_STRONG_WIN_RATIO} 倍才能赢。
+     * 1.0 关闭强胜率（沿用旧规则），2.0 要求其它来源 ≥ catalog×2 才获胜。
+     */
+    static final double CATALOG_STRONG_WIN_RATIO = 2.0;
 
     private BookmarkQualitySelector() {
     }
@@ -115,6 +123,14 @@ public class BookmarkQualitySelector {
         List<Bookmark> page = pageBookmarks != null ? pageBookmarks : new ArrayList<>();
         List<Bookmark> self = selfBookmarks != null ? selfBookmarks : new ArrayList<>();
 
+        // Drop overlong nodes from every source before scoring so the metrics
+        // and downstream JSON reflect the cleaned tree. Mirrors the rule that
+        // a bookmark entry longer than MAX_TITLE_LENGTH chars is body text,
+        // not a real heading.
+        BookmarkUtils.trimOverlongNodes(catalog);
+        BookmarkUtils.trimOverlongNodes(page);
+        BookmarkUtils.trimOverlongNodes(self);
+
         QualityMetrics catalogMetrics = evaluate(catalog, pageItemIds);
         QualityMetrics pageMetrics = evaluate(page, pageItemIds);
         QualityMetrics selfMetrics = evaluate(self, pageItemIds);
@@ -153,18 +169,53 @@ public class BookmarkQualitySelector {
             return cmp != 0 ? cmp : Integer.compare(a.priority, b.priority);
         });
 
-        Candidate winner = alive.get(0);
+        Candidate winner;
         String reason;
-        if (alive.size() == 1) {
-            reason = String.format("only surviving source (eliminated: %s)",
+        Candidate catalogCandidate = findCandidate(alive, SOURCE_CATALOG);
+        if (catalogCandidate != null) {
+            // catalog 存在并通过淘汰线，应用"强胜率"规则：其它来源必须
+            // score >= catalog.score * CATALOG_STRONG_WIN_RATIO 才能击败 catalog。
+            Candidate strongestNonCatalog = null;
+            for (Candidate c : alive) {
+                if (!SOURCE_CATALOG.equals(c.source)) {
+                    strongestNonCatalog = c;
+                    break;
+                }
+            }
+            if (strongestNonCatalog == null) {
+                winner = catalogCandidate;
+                reason = String.format("only catalog survives (eliminated: %s)",
+                    eliminated.isEmpty() ? "none" : String.join(", ", eliminated));
+            } else {
+                double catalogScore = catalogCandidate.metrics.score;
+                double otherScore = strongestNonCatalog.metrics.score;
+                double ratio = otherScore / Math.max(catalogScore, 1e-9);
+                if (ratio >= CATALOG_STRONG_WIN_RATIO) {
+                    winner = strongestNonCatalog;
+                    reason = String.format(
+                        "non-catalog %s score %.3f is %.2fx catalog %.3f (>=%.1fx threshold), wins",
+                        strongestNonCatalog.source, otherScore, ratio, catalogScore,
+                        CATALOG_STRONG_WIN_RATIO);
+                } else {
+                    winner = catalogCandidate;
+                    reason = String.format(
+                        "catalog %.3f wins by default (strongest non-catalog %s %.3f, ratio %.2fx < %.1fx threshold)",
+                        catalogScore, strongestNonCatalog.source, otherScore, ratio,
+                        CATALOG_STRONG_WIN_RATIO);
+                }
+            }
+        } else if (alive.size() == 1) {
+            winner = alive.get(0);
+            reason = String.format("only surviving source, no catalog (eliminated: %s)",
                 eliminated.isEmpty() ? "none" : String.join(", ", eliminated));
         } else {
+            // 无 catalog：沿用旧规则——score 相差 <10% 时按 page>self 优先级决胜。
+            winner = alive.get(0);
             double best = winner.metrics.score;
             double second = alive.get(1).metrics.score;
             double base = Math.max(Math.abs(best), Math.abs(second));
             boolean comparable = base == 0.0 || (best - second) / base < COMPARABLE_THRESHOLD;
             if (comparable) {
-                // 质量相当：在 score 相差不足阈值的候选中按优先级（catalog > page > self）选择
                 Candidate byScore = winner;
                 for (Candidate candidate : alive) {
                     double diff = base == 0.0 ? 0.0 : (best - candidate.metrics.score) / base;
@@ -173,14 +224,14 @@ public class BookmarkQualitySelector {
                     }
                 }
                 reason = String.format(
-                    "top scores comparable (best=%.3f[%s], runner-up=%.3f, diff %.1f%% < %.0f%% threshold), "
-                        + "priority catalog>page>self applied -> %s",
+                    "no catalog; top scores comparable (best=%.3f[%s], runner-up=%.3f, diff %.1f%% < %.0f%% threshold), "
+                        + "priority page>self applied -> %s",
                     best, byScore.source, second,
                     base == 0.0 ? 0.0 : (best - second) / base * 100.0,
                     COMPARABLE_THRESHOLD * 100.0, winner.source);
             } else {
                 reason = String.format(
-                    "highest score %.3f, runner-up %s %.3f (diff %.1f%% >= %.0f%% threshold, clear win)",
+                    "no catalog; highest score %.3f, runner-up %s %.3f (diff %.1f%% >= %.0f%% threshold, clear win)",
                     best, alive.get(1).source, second,
                     (best - second) / base * 100.0, COMPARABLE_THRESHOLD * 100.0);
             }
@@ -189,6 +240,15 @@ public class BookmarkQualitySelector {
         LOGGER.info(String.format("[BookmarkQualitySelector] selected %s (score=%.3f): %s",
             winner.source, winner.metrics.score, reason));
         return new Selection(winner.source, winner.bookmarks, winner.metrics);
+    }
+
+    private static Candidate findCandidate(List<Candidate> candidates, String source) {
+        for (Candidate c : candidates) {
+            if (source.equals(c.source)) {
+                return c;
+            }
+        }
+        return null;
     }
 
     /**
