@@ -18,6 +18,7 @@ package org.opendataloader.pdf.processors;
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.custom.dto.TextInOcrAnalysisResultDto;
 import org.opendataloader.pdf.custom.dto.TextInOcrDetailDto;
+import org.opendataloader.pdf.custom.entities.Bookmark;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
 import org.opendataloader.pdf.entities.content.ShapeChunk;
 import org.opendataloader.pdf.hybrid.ElementMetadata;
@@ -78,6 +79,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ForkJoinPool;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -308,6 +310,13 @@ public class DocumentProcessor {
         final boolean useStructTree = StaticLayoutContainers.isUseStructTree();
         final var embeddedImageBytesMap = StaticLayoutContainers.getEmbeddedImageBytesMap();
         final var replacementCharRatiosMap = StaticLayoutContainers.getReplacementCharRatiosMap();
+        // Bookmark ThreadLocals added by catalog/page-bookmark feature (commits 9fe705b / fceeb31).
+        // Without propagation, worker threads would see null/0 and either NPE or behave as if no
+        // bookmark range was set — see CLAUDE.md "StaticLayoutContainers ThreadLocal" gotcha.
+        final List<Bookmark> catalogBookmarks = StaticLayoutContainers.getCatalogBookmarks();
+        final List<Bookmark> pageBookmarks = StaticLayoutContainers.getPageBookmarks();
+        final int catalogBookmarkStartPage = StaticLayoutContainers.getCatalogBookmarkStartPage();
+        final int catalogBookmarkEndPage = StaticLayoutContainers.getCatalogBookmarkEndPage();
 
         // Runnable that propagates ThreadLocal state to the current (worker) thread
         final Runnable propagateState = () -> {
@@ -329,6 +338,13 @@ public class DocumentProcessor {
             StaticLayoutContainers.setIsUseStructTree(useStructTree);
             StaticLayoutContainers.setEmbeddedImageBytesMap(embeddedImageBytesMap);
             StaticLayoutContainers.setReplacementCharRatiosMap(replacementCharRatiosMap);
+            // *Map variants share the main-thread list reference (see CLAUDE.md gotcha); the
+            // plain setCatalogBookmarks / setPageBookmarks APIs do clear+addAll copy semantics
+            // and would leave each worker seeing its own ThreadLocal-initial LinkedList instead
+            // of the main thread's data, defeating the point of propagation.
+            StaticLayoutContainers.setCatalogBookmarksMap(catalogBookmarks);
+            StaticLayoutContainers.setPageBookmarksMap(pageBookmarks);
+            StaticLayoutContainers.setCatalogBookmarkPageRange(catalogBookmarkStartPage, catalogBookmarkEndPage);
         };
 
         // Pre-fetch all page artifacts on main thread (document access is ThreadLocal)
@@ -560,7 +576,16 @@ public class DocumentProcessor {
                 LevelProcessor.detectLevels(contents);
             }
         } catch (Exception e) {
-            throw new IOException("Parallel page processing failed", e);
+            // Unwrap ForkJoinPool's ExecutionException so the IO message names the real cause
+            // (NPE from a missed ThreadLocal propagation, UncheckedIOException from
+            // ContentFilterProcessor, RuntimeException from StreamTableProcessor, etc.).
+            // Without this, PulsarService only sees "Parallel page processing failed" with no
+            // hint at which sub-step failed — making the ELK error.stack_trace field the only
+            // way to triage. surfacing the cause class+message here lets Kibana message-only
+            // queries narrow it down.
+            Throwable cause = (e instanceof ExecutionException && e.getCause() != null) ? e.getCause() : e;
+            throw new IOException("Parallel page processing failed ("
+                    + cause.getClass().getSimpleName() + ": " + cause.getMessage() + ")", e);
         } finally {
             pool.shutdown();
         }
