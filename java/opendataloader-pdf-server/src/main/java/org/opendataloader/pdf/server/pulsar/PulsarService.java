@@ -317,13 +317,13 @@ public class PulsarService {
     private void handleOcrReceiveMessage(Consumer<byte[]> consumer, Message<byte[]> pulsarMsg) {
         Object businessId = null;
         String jsonUrl = "";
+        Map<String, Object> extend = null;
         Path inputDir = null;
         try {
             Map<String, Object> inbound = objectMapper.readValue(
                     pulsarMsg.getValue(), new TypeReference<Map<String, Object>>() {});
             businessId = inbound.get("businessId");
-            @SuppressWarnings("unchecked")
-            Map<String, Object> extend = (Map<String, Object>) inbound.get("extend");
+            extend = (Map<String, Object>) inbound.get("extend");
             Boolean hasError = asBoolean(inbound.get("hasError"));
             String receivedJsonUrl = resolveObsJsonUrl(asString(inbound.get("jsonUrl")));
             String errorMsg = asString(inbound.get("errorMsg"));
@@ -350,7 +350,7 @@ public class PulsarService {
 
         // Per task step 3 the OCR consumer always publishes to send_topic_name
         // (no complete_display branch). On any failure jsonUrl stays "".
-        sendResultMessage(jsonUrl, businessId, null);
+        sendResultMessage(jsonUrl, businessId, extend);
 
         // Local cleanup runs AFTER downstream messages have been published
         if (inputDir != null) {
