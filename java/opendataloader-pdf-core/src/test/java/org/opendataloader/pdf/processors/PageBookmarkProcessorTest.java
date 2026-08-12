@@ -1044,4 +1044,123 @@ public class PageBookmarkProcessorTest {
                 "An orphan with value != 1 must not trigger the prepend pass");
     }
 
+    /**
+     * When the L3 candidates inside an L2 anchor's range share the L2
+     * template (e.g. nested "一、" items under an "一、" L2 anchor), the L3
+     * selection must be allowed to pick that template. Previously the L2
+     * templateKey was added to {@code usedTemplates} when recursing into L3,
+     * which silently dropped all "一、" candidates and let an unrelated
+     * "（一）" template win on count.
+     *
+     * <p>Layout mirrors the production failure in
+     * {@code 202303251679660111823147.pdf}: a single chapter
+     * ({@code 第1章}) carries an orphan {@code 一、X} L2 entry, a sibling
+     * value=1..6 {@code 一、} chain that gets DROPPED at L2 (because it
+     * loses the widest-chain race), and a wider value=2..6 {@code 一、}
+     * chain. The orphan L2 entry survives only because the value=2 chain
+     * absorbs it via the value=1-prepend pass; we then verify the L3
+     * selection under that anchor correctly reuses the L2 {@code 一、}
+     * template for the value=1..6 candidates living in its range.</p>
+     */
+    @Test
+    public void testLevel3ReusesLevel2TemplateWhenSameTemplateLivesInRange() {
+        // Single chapter 第1章 (font 20, value=1).
+        // Page 0: orphan 一、X (font 12, value=1) — the L2 anchor.
+        // Page 1: L3 candidates 一、A...六、F (font 9, value 1..6) AND
+        // the "（一）" pair (font 9, value 1..2) live in 一、X's range.
+        // Page 2: L2 siblings 二、Y...八、W (font 12, value 2..8) — this
+        // wider chain absorbs 一、X via the value=1-prepend pass and
+        // gives the L2 result a strict-width lead over the page-1 chain.
+        //
+        // Critical: the page-1 value=1 item ("一、A") must NOT be followed
+        // by a value=2 item on the same page, otherwise Step-2 merges them
+        // into one group and the page-1 chain absorbs the value=2..8 chain.
+        List<List<IObject>> contents = multiPage(
+                0, "第1章 测试", 20.0f, 1100.0,
+                0, "一、X", 12.0f, 950.0,
+                1, "一、A", 9.0f, 850.0,
+                1, "二、B", 9.0f, 820.0,
+                1, "三、C", 9.0f, 790.0,
+                1, "四、D", 9.0f, 760.0,
+                1, "五、E", 9.0f, 730.0,
+                1, "六、F", 9.0f, 700.0,
+                1, "（一）P", 9.0f, 600.0,
+                1, "（二）Q", 9.0f, 570.0,
+                2, "二、Y", 12.0f, 900.0,
+                2, "三、Z", 12.0f, 870.0,
+                2, "四、W", 12.0f, 840.0,
+                2, "五、V", 12.0f, 810.0,
+                2, "六、U", 12.0f, 780.0,
+                2, "七、T", 12.0f, 750.0,
+                2, "八、S", 12.0f, 720.0);
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(1, bookmarks.size());
+        Bookmark chapter = bookmarks.get(0);
+        Assertions.assertEquals("第1章 测试", chapter.getText());
+        // L2 selection: 一、X (prepended onto value=2..8 chain) → 8 entries.
+        Assertions.assertEquals(8, chapter.getChildren().size());
+
+        Bookmark x = chapter.getChildren().get(0);
+        Assertions.assertEquals("一、X", x.getText());
+
+        // L3 selection under 一、X: the value=1..6 chain (font 9) AND the
+        // "（一）" pair (font 9) live in this range. The "一、" group has 6
+        // candidates vs 2 for "（一）"; with the L3-reuses-L2 fix the
+        // "一、" group is no longer filtered out, so it must win.
+        List<String> texts = new ArrayList<>();
+        for (Bookmark child : x.getChildren()) {
+            texts.add(child.getText());
+        }
+        Assertions.assertEquals(
+                Arrays.asList("一、A", "二、B", "三、C", "四、D", "五、E", "六、F"), texts,
+                "L3 must reuse the L2 '一、' template when it forms a wider run than the alternative");
+    }
+
+    /**
+     * Reverse of {@link #testLevel3ReusesLevel2TemplateWhenSameTemplateLivesInRange}:
+     * even after the L3 selection is allowed to reuse the L2 template, a
+     * deeper-hierarchy alternative with strictly more candidates must still
+     * win. This guards against a future change that would always prefer the
+     * L2 template at L3 regardless of count.
+     */
+    @Test
+    public void testLevel3PicksDeeperTemplateWhenL2TemplateHasFewerCandidates() {
+        // Same L1 + L2 layout as the forward test (orphan 一、X survives
+        // via prepend). Page 1 under 一、X carries a "1、..5、" run (5
+        // items) — no "一、" candidate at all. The "1、" group must win
+        // even though it differs from the L2 templateKey.
+        List<List<IObject>> contents = multiPage(
+                0, "第1章 测试", 20.0f, 1100.0,
+                0, "一、X", 12.0f, 950.0,
+                1, "1、B", 9.0f, 820.0,
+                1, "2、C", 9.0f, 790.0,
+                1, "3、D", 9.0f, 760.0,
+                1, "4、E", 9.0f, 730.0,
+                1, "5、F", 9.0f, 700.0,
+                2, "二、Y", 12.0f, 900.0,
+                2, "三、Z", 12.0f, 870.0,
+                2, "四、W", 12.0f, 840.0,
+                2, "五、V", 12.0f, 810.0,
+                2, "六、U", 12.0f, 780.0,
+                2, "七、T", 12.0f, 750.0,
+                2, "八、S", 12.0f, 720.0);
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(1, bookmarks.size());
+        Bookmark chapter = bookmarks.get(0);
+        // L2 result: 一、X + the value=2..8 chain (8 entries total).
+        Assertions.assertEquals(8, chapter.getChildren().size());
+
+        Bookmark x = chapter.getChildren().get(0);
+        Assertions.assertEquals("一、X", x.getText());
+        List<String> texts = new ArrayList<>();
+        for (Bookmark child : x.getChildren()) {
+            texts.add(child.getText());
+        }
+        Assertions.assertEquals(
+                Arrays.asList("1、B", "2、C", "3、D", "4、E", "5、F"), texts,
+                "L3 still prefers a deeper template with strictly more candidates");
+    }
+
 }
