@@ -1,6 +1,9 @@
 *.class
 tmp_output
 .agents
+.claude
+.omc
+data/
 
 # OS specific files
 .DS_Store
@@ -88,4 +91,7 @@ verification/verification-report-ci.txt
 # Local fixture generator (kept out of the repo: fixtures are committed
 # binaries; regeneration is rare and the generator needs pikepdf/reportlab)
 scripts/generate-test-fixtures.py
+
+java/opendataloader-pdf-core/*.txt
+java/opendataloader-pdf-core/*.cmd
 

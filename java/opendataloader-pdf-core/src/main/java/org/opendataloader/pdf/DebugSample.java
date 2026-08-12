@@ -14,32 +14,24 @@ public class DebugSample {
         config.setGenerateMarkdown(true);
         config.getFilterConfig().setHalfWidthToFullWidth(true);
         Map<String, Object> customOptions = new HashMap<>();
-//        customOptions.put("paddleUrl", "http://192.168.1.97:8088/layout-parsing");
+        customOptions.put("paddleUrl", "http://192.168.1.97:8088/layout-parsing");
         customOptions.put("businessId", 123456789);
         customOptions.put("extend", new HashMap<String, Object>(){});
-        customOptions.put("basicEnv", "test");
+        /*customOptions.put("basicEnv", "test");
         customOptions.put("pulsarReceiveTopicName", "pdf_parse_increment");
         customOptions.put("ossTempBucketName", "stock-temp-bucket");
         customOptions.put("ossPermanentBucketName", "common-pdf-bucket");
         customOptions.put("ossEndpoint", "https://obs.cn-north-1.myhuaweicloud.com");
         customOptions.put("ossAccessKey", "EUD3T68PPED8VI2ZHX2K");
         customOptions.put("ossSecretKey", "qOe8kcPGpJk0ZTIo1baWqQubShQoiyfOZThbp5dE");
-        customOptions.put("ossDomainName", "https://common-pdf-bucket.obs.cn-north-1.myhuaweicloud.com/");
+        customOptions.put("ossDomainName", "https://common-pdf-bucket.obs.cn-north-1.myhuaweicloud.com/");*/
         config.setCustomOptions(customOptions);
 
-//        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202302281677505819604328-272.pdf", config);
-//        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202303181679059838994480-452.pdf", config);
-//        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202303181679059838994480-252(公式).pdf", config);
 //        OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202302281677505819604328.pdf", config);
 //        OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202303181679059838994480-197.pdf", config);
-        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202604291777459885575001342.pdf", config);
+        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202303251679660111823147.pdf", config);
         System.out.println("JSON URL / local path: " + result.getJsonUrlOrPath());
         System.out.println("OCR JSON local path: " + result.getOcrJsonLocalPath());
-//        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\带中文的公式.pdf", config);
-//        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202303181679059838994480-314(公式).pdf", config);
-//        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202304191681815910199312-95(图表).pdf", config);
-//        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202303181679059838994480-31.pdf", config);
-//        OpenDataLoaderPDF.processFile("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\202303181679059838994480_1-13.pdf", config);
         OpenDataLoaderPDF.shutdown();
     }
 }
