@@ -120,6 +120,30 @@ public class StaticLayoutContainers {
         }
     }
 
+    /**
+     * Map-level accessors used by {@code DocumentProcessor.propagateState} so worker
+     * threads share the main thread's list instance. The default {@link #setCatalogBookmarks}
+     * uses copy semantics (clear + addAll), which is fine for "load fresh data" but
+     * breaks propagation — workers would see their own ThreadLocal-initial LinkedList,
+     * not the main thread's reference. Mirrors the pattern established by
+     * {@link #setReplacementCharRatiosMap} and {@link #setEmbeddedImageBytesMap}.
+     */
+    public static List<Bookmark> getCatalogBookmarksMap() {
+        return catalogBookmarks.get();
+    }
+
+    public static void setCatalogBookmarksMap(List<Bookmark> bookmarks) {
+        catalogBookmarks.set(bookmarks);
+    }
+
+    public static List<Bookmark> getPageBookmarksMap() {
+        return pageBookmarks.get();
+    }
+
+    public static void setPageBookmarksMap(List<Bookmark> bookmarks) {
+        pageBookmarks.set(bookmarks);
+    }
+
     public static void setCatalogBookmarkPageRange(int startPage, int endPage) {
         catalogBookmarkStartPage.set(startPage);
         catalogBookmarkEndPage.set(endPage);
