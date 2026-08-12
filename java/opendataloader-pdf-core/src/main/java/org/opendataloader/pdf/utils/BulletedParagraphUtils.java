@@ -138,6 +138,11 @@ public class BulletedParagraphUtils {
         BULLET_REGEXES.add(Pattern.compile("^\\d+、.*"));
         // Chinese full-width comma (，, U+FF0C): e.g. "1，风险说明".
         BULLET_REGEXES.add(Pattern.compile("^\\d+，.*"));
+        // Chinese numerals (一–九十九) + Chinese enumeration mark (、, U+3001):
+        // e.g. "一、xxx", "十二、xxx", "二十三、xxx". PageBookmarkProcessor already
+        // uses a similar "CHINESE_NUMBERS_WITH_COMMA_1_TO_100" pattern for bookmarks,
+        // so the semantics are consistent across processors.
+        BULLET_REGEXES.add(Pattern.compile("^[一二三四五六七八九十]+、.*"));
         BULLET_REGEXES.add(Pattern.compile("^[ㄱㄴㄷㄹㅁㅂㅅㅇㅈㅊㅋㅌㅍㅎ][\\.\\)\\]>]"));
         BULLET_REGEXES.add(Pattern.compile("^" + KOREAN_NUMBERS_REGEX + "\\..+"));
         BULLET_REGEXES.add(Pattern.compile("^" + KOREAN_NUMBERS_REGEX + "[)\\]>]"));

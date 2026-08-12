@@ -331,6 +331,12 @@ public class ParagraphProcessor {
                 } else if (nextTwoFontSize != null && nextMargin != null && nextTwoLeftX != null &&
                     Math.abs(nextFontSize - nextTwoFontSize) < 2 && Math.abs(margin - nextMargin) < 5 && nextFirstLineLeftX - nextTwoLeftX > 10) {
                     newBlocks.add(nextBlock);
+                } else if (BulletedParagraphUtils.isLabeledLine(nextBlock.getFirstLine())) {
+                    // Next line is a list label (e.g. "1.", "1、", "一、"). Even when
+                    // geometry alone wouldn't force a break (same leftX, similar margin,
+                    // no indentation in following line), a labeled first line should
+                    // start its own paragraph rather than be appended to the previous one.
+                    newBlocks.add(nextBlock);
                 } else {
                     previousBlock.add(nextBlock.getLines());
                     previousBlock.setTextAlignment(TextAlignment.LEFT);
