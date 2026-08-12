@@ -746,6 +746,23 @@ public class PageBookmarkProcessor {
         // bookmarks.
         chains.removeIf(chain -> isTocLikeGroup(flattenChain(chain)));
 
+        // Step 4.7: Recover orphaned "value=1" singletons by prepending them
+        // onto chains that start at value=2. When the same template carries
+        // both a leading "一、" entry (e.g. "一、审计报告") AND a sibling "一、"
+        // entry that begins a longer sub-chain (e.g. "一、审计意见", "二、形成…"
+        // etc.), Step 2 splits those value=1 candidates into separate groups
+        // and Step 4 builds them as competing chains. The chain starting at
+        // value=2 (e.g. "二、财务报表") is then a separate chain. Without this
+        // pass, the widest-chain rule would still pick a value=2 chain over a
+        // shorter value=1-only chain, dropping the leading "一、" entry from
+        // the resulting bookmark set.
+        //
+        // Prepending a value=1 orphan onto a value=2 chain extends its value
+        // range from [2..max] to [1..max] (length grows by one), making it
+        // more competitive against the sibling value=1 sub-chain and recovering
+        // the leading "一、" as the first L2 child of the parent section.
+        prependValueOneOrphansOntoValueTwoChains(chains);
+
         // Step 5: Pick the chain with the widest value range. Tie-break by the
         // earliest start page of the chain's first candidate (closest to the
         // parent's start page).
@@ -929,6 +946,72 @@ public class PageBookmarkProcessor {
             flattened.addAll(group);
         }
         return flattened;
+    }
+
+    /**
+     * Recovers orphaned {@code value=1} singleton chains by prepending them
+     * onto chains that start at {@code value=2}.
+     *
+     * <p>An "orphan" here is a chain consisting of a single group holding a
+     * single candidate whose value equals 1. Such orphans arise when the same
+     * template carries two leading value=1 candidates (e.g. "一、审计报告"
+     * followed by "一、审计意见"): Step 2 splits them into distinct groups, so
+     * neither chain can merge with the other. A separate chain later starting
+     * at value=2 (e.g. "二、财务报表") remains a value=2 chain instead of a
+     * value=1 chain, dropping the leading "一、" entry from the final bookmark
+     * set.</p>
+     *
+     * <p>This pass moves each orphan onto the first chain whose first group
+     * starts at value=2 (mutating that chain in place), thereby shifting the
+     * chain's value range from [2..max] to [1..max] and gaining one entry of
+     * width. The mutation is value-disjoint by construction: Step 2 forbids
+     * any chain from containing both value=1 and value=2 inside the same
+     * group, so prepending value=1 can never conflict with the value=2 chain's
+     * existing values.</p>
+     *
+     * <p>If multiple orphans exist, each is matched against the next available
+     * value=2 chain in chain-list order; surplus orphans stay as their own
+     * value=1 chains and compete normally in Step 5.</p>
+     */
+    private static void prependValueOneOrphansOntoValueTwoChains(
+            List<List<List<Candidate>>> chains) {
+        if (chains == null || chains.size() < 2) {
+            return;
+        }
+        List<List<Candidate>> valueOneOrphans = new ArrayList<>();
+        List<List<List<Candidate>>> nonOrphans = new ArrayList<>(chains.size());
+        for (List<List<Candidate>> chain : chains) {
+            if (chain.size() == 1 && chain.get(0).size() == 1
+                    && chain.get(0).get(0).value == 1) {
+                valueOneOrphans.add(chain.get(0));
+            } else {
+                nonOrphans.add(chain);
+            }
+        }
+        if (valueOneOrphans.isEmpty()) {
+            return;
+        }
+        for (List<Candidate> orphan : valueOneOrphans) {
+            List<List<Candidate>> target = null;
+            for (List<List<Candidate>> chain : nonOrphans) {
+                if (!chain.isEmpty() && !chain.get(0).isEmpty()
+                        && chain.get(0).get(0).value == 2) {
+                    target = chain;
+                    break;
+                }
+            }
+            if (target == null) {
+                // No eligible target: keep the orphan as-is so Step 5 can
+                // still consider it as a standalone value=1 chain.
+                List<List<Candidate>> wrapped = new ArrayList<>();
+                wrapped.add(orphan);
+                nonOrphans.add(0, wrapped);
+                continue;
+            }
+            target.add(0, orphan);
+        }
+        chains.clear();
+        chains.addAll(nonOrphans);
     }
 
     private static List<Candidate> collectCandidates(List<List<IObject>> contents) {
