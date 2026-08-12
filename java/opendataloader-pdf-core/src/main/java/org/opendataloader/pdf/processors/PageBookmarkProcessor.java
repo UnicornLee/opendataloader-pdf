@@ -346,7 +346,12 @@ public class PageBookmarkProcessor {
             if (levelTwoTemplate == null) {
                 return Collections.emptyList();
             }
-            usedTemplates.add(levelTwoTemplate);
+            // Same rationale as extractLevel: do NOT push levelTwoTemplate
+            // into usedTemplates. L3 may legitimately reuse the L2 template
+            // (e.g. nested "一、" items under an "一、" L2 anchor) and the
+            // parent anchor is already excluded from the child range by
+            // index slicing. extractLevel no longer propagates level-N
+            // templates either, so both entry points stay consistent.
             List<Integer> levelTwoIndices = cleanedIndicesOf(
                 all, parentLevelOneIndex + 1, levelOneEnd, levelTwoTemplate, 2);
             childEnd = nextIndexAfter(levelTwoIndices, anchorIndex, levelOneEnd);
@@ -491,8 +496,18 @@ public class PageBookmarkProcessor {
             .thenComparing((Integer i) -> -candidates.get(i).topY));
 
         List<Bookmark> bookmarks = new ArrayList<>();
+        // Only level-1's selected template is propagated to deeper levels. L1
+        // selects across the whole document, so re-selecting it inside a
+        // descendant range would recreate the L1 anchors as L2/L3 nodes. L2/L3
+        // selections are range-bounded and the parent anchor is already
+        // excluded from the child range by index slicing, so a template that
+        // happens to also appear in the child range (e.g. nested "一、" items
+        // under an "一、" L2 anchor) is a legitimate L3 candidate and must
+        // not be filtered out here.
         Set<TemplateKey> newUsed = new HashSet<>(usedTemplates);
-        newUsed.add(selectedTemplate);
+        if (level == 1) {
+            newUsed.add(selectedTemplate);
+        }
 
         for (int i = 0; i < cleanedIndices.size(); i++) {
             int idx = cleanedIndices.get(i);
