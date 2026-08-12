@@ -32,6 +32,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.ListIterator;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -81,6 +82,15 @@ public class ShapeRecognizer {
     private static final int MIN_BAR_COUNT = 3;
     /** Minimum number of segments to classify a connected line group as a polyline. */
     private static final int MIN_POLYLINE_SEGMENTS = 2;
+    /**
+     * Maximum number of line segments of a single color that will be fed into
+     * chain building. Pages with extremely dense vector art (e.g. patterns or
+     * highly fragmented strokes) can produce tens of thousands of segments;
+     * trying to connect all of them is prohibitively expensive and rarely
+     * produces useful chart shapes. Colors exceeding this limit are skipped
+     * for polyline/connector recognition only.
+     */
+    private static final int MAX_LINES_PER_COLOR_FOR_CHAIN_RECOGNITION = 5000;
     /** Margin used when deciding a single line segment connects two existing shapes. */
     private static final double CONNECTOR_MARGIN = 8.0;
     /** Maximum width (pt) across the shaft direction a filled region may have to be
@@ -411,6 +421,9 @@ public class ShapeRecognizer {
         List<ShapeChunk> shapes = new ArrayList<>();
 
         for (List<LineChunk> sameColorLines : byColor.values()) {
+            if (!shouldBuildChains(sameColorLines, pageNumber, "polyline")) {
+                continue;
+            }
             List<List<LineChunk>> chains = buildChains(sameColorLines);
             for (List<LineChunk> chain : chains) {
                 if (chain.size() < MIN_POLYLINE_SEGMENTS) {
@@ -448,6 +461,9 @@ public class ShapeRecognizer {
         List<ShapeChunk> connectors = new ArrayList<>();
 
         for (List<LineChunk> sameColorLines : byColor.values()) {
+            if (!shouldBuildChains(sameColorLines, pageNumber, "connector")) {
+                continue;
+            }
             List<List<LineChunk>> chains = buildChains(sameColorLines);
             for (List<LineChunk> chain : chains) {
                 if (chain.size() != 1) {
@@ -851,13 +867,18 @@ public class ShapeRecognizer {
 
     /**
      * Builds end-to-end connected chains of line segments for each color.
+     *
+     * <p>Uses a {@link LinkedList} walked with a {@link ListIterator} so that
+     * scanning and removing candidates are both O(1). The previous implementation
+     * used indexed access on a {@code LinkedList}, which made the scan O(n²) per
+     * chain and caused pathological runtimes for pages with many segments.</p>
      */
     private static List<List<LineChunk>> buildChains(List<LineChunk> lines) {
-        List<LineChunk> remaining = new LinkedList<>(lines);
+        LinkedList<LineChunk> remaining = new LinkedList<>(lines);
         List<List<LineChunk>> chains = new ArrayList<>();
 
         while (!remaining.isEmpty()) {
-            LineChunk seed = remaining.remove(0);
+            LineChunk seed = remaining.removeFirst();
             List<LineChunk> chain = new ArrayList<>();
             chain.add(seed);
             Vertex start = seed.getStart();
@@ -866,32 +887,33 @@ public class ShapeRecognizer {
             boolean extended = true;
             while (extended && !remaining.isEmpty()) {
                 extended = false;
-                    for (int i = 0; i < remaining.size(); i++) {
-                    LineChunk candidate = remaining.get(i);
+                ListIterator<LineChunk> it = remaining.listIterator();
+                while (it.hasNext()) {
+                    LineChunk candidate = it.next();
                     Vertex cStart = candidate.getStart();
                     Vertex cEnd = candidate.getEnd();
                     if (Vertex.areCloseVertexes(end, cStart, ADJACENCY_GAP)) {
+                        it.remove();
                         chain.add(candidate);
                         end = cEnd;
-                        remaining.remove(i);
                         extended = true;
                         break;
                     } else if (Vertex.areCloseVertexes(end, cEnd, ADJACENCY_GAP)) {
+                        it.remove();
                         chain.add(candidate);
                         end = cStart;
-                        remaining.remove(i);
                         extended = true;
                         break;
                     } else if (Vertex.areCloseVertexes(start, cEnd, ADJACENCY_GAP)) {
+                        it.remove();
                         chain.add(0, candidate);
                         start = cStart;
-                        remaining.remove(i);
                         extended = true;
                         break;
                     } else if (Vertex.areCloseVertexes(start, cStart, ADJACENCY_GAP)) {
+                        it.remove();
                         chain.add(0, candidate);
                         start = cEnd;
-                        remaining.remove(i);
                         extended = true;
                         break;
                     }
@@ -900,6 +922,30 @@ public class ShapeRecognizer {
             chains.add(chain);
         }
         return chains;
+    }
+
+    /**
+     * Guards the expensive chain-building step against pathological inputs.
+     *
+     * <p>When a single color produces thousands of line segments (typically
+     * dense vector patterns or heavily fragmented strokes), connecting them all
+     * is prohibitively expensive and almost never yields meaningful polylines
+     * or connectors. This check skips that color and logs a warning so the
+     * behavior is visible.</p>
+     *
+     * @param sameColorLines lines of one color group
+     * @param pageNumber     0-based page number for the log message
+     * @param kind           "polyline" or "connector", used in the warning
+     * @return true if chain building should proceed, false if it should be skipped
+     */
+    private static boolean shouldBuildChains(List<LineChunk> sameColorLines, int pageNumber, String kind) {
+        if (sameColorLines.size() <= MAX_LINES_PER_COLOR_FOR_CHAIN_RECOGNITION) {
+            return true;
+        }
+        LOGGER.log(Level.WARNING,
+                "Page {0}: skipping {1} recognition for color with {2} line segments (threshold {3})",
+                new Object[]{pageNumber + 1, kind, sameColorLines.size(), MAX_LINES_PER_COLOR_FOR_CHAIN_RECOGNITION});
+        return false;
     }
 
     /**
