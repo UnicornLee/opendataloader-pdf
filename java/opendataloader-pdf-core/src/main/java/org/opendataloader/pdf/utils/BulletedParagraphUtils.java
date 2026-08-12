@@ -131,6 +131,13 @@ public class BulletedParagraphUtils {
         ARABIC_NUMBER_REGEXES.add("^{\\d+}.*");
         ARABIC_NUMBER_REGEXES.add("^【\\d+】.*");
         BULLET_REGEXES.add(Pattern.compile("^\\d+[\\.\\)]\\s+"));
+        // Chinese enumeration mark (、, U+3001): e.g. "1、风险说明". Unlike the
+        // western counterparts above, Chinese typography rarely inserts a space
+        // after the separator, so this pattern deliberately allows zero or more
+        // whitespace chars after the separator.
+        BULLET_REGEXES.add(Pattern.compile("^\\d+、.*"));
+        // Chinese full-width comma (，, U+FF0C): e.g. "1，风险说明".
+        BULLET_REGEXES.add(Pattern.compile("^\\d+，.*"));
         BULLET_REGEXES.add(Pattern.compile("^[ㄱㄴㄷㄹㅁㅂㅅㅇㅈㅊㅋㅌㅍㅎ][\\.\\)\\]>]"));
         BULLET_REGEXES.add(Pattern.compile("^" + KOREAN_NUMBERS_REGEX + "\\..+"));
         BULLET_REGEXES.add(Pattern.compile("^" + KOREAN_NUMBERS_REGEX + "[)\\]>]"));
