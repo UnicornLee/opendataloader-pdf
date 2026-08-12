@@ -907,4 +907,141 @@ public class PageBookmarkProcessorTest {
                 ">5 entry chain with same-page and page-boundary adjacency must be dropped");
     }
 
+    /**
+     * Orphan singleton {@code value=1} candidates must be prepended onto a chain
+     * whose first group starts at {@code value=2}, so the leading "一、" entry
+     * survives the widest-chain selection. This mirrors the production failure
+     * where "一、审计报告" was dropped because the same template also contained
+     * "一、审计意见", forming a competing value=1-6 chain that lost to the
+     * value=2..18 chain starting at "二、财务报表".
+     */
+    @Test
+    public void testLonelyValueOnePrependsToValueTwoChain() {
+        List<List<IObject>> contents = multiPage(
+                // L1 chapter; use 第#章 with value=1 so that isValidGroup accepts
+                // a single candidate at level 1.
+                0, "第1章 财务报告", 20.0f, 1100.0,
+                // Sub-page-1 candidates: 一、审计报告 alone, then 一、审计意见
+                // and its value=2..6 sibling chain.
+                0, "一、审计报告", 12.0f, 850.0,
+                0, "一、审计意见", 9.12f, 800.0,
+                0, "二、形成审计意见的基础", 9.12f, 750.0,
+                0, "三、关键审计事项", 9.12f, 700.0,
+                0, "四、其他信息", 9.12f, 650.0,
+                0, "五、管理层和治理层的责任", 9.12f, 600.0,
+                0, "六、注册会计师的责任", 9.12f, 550.0,
+                // Page 2 starts the value=2..18 chain (二、财务报表...).
+                1, "二、财务报表", 12.0f, 900.0,
+                1, "三、公司基本情况", 12.0f, 850.0,
+                1, "四、财务报表的编制基础", 12.0f, 800.0,
+                1, "五、重要会计政策及会计估计", 12.0f, 750.0,
+                1, "六、税项", 12.0f, 700.0,
+                1, "七、合并财务报表项目注释", 12.0f, 650.0,
+                1, "八、合并范围的变更", 12.0f, 600.0,
+                1, "九、在其他主体中的权益", 12.0f, 550.0,
+                1, "十、与金融工具相关的风险", 12.0f, 500.0,
+                2, "十一、公允价值的披露", 12.0f, 900.0,
+                2, "十二、关联方及关联交易", 12.0f, 850.0,
+                2, "十三、股份支付", 12.0f, 800.0,
+                2, "十四、承诺及或有事项", 12.0f, 750.0,
+                2, "十五、资产负债表日后事项", 12.0f, 700.0,
+                2, "十六、其他重要事项", 12.0f, 650.0,
+                2, "十七、母公司财务报表主要项目注释", 12.0f, 600.0,
+                2, "十八、补充资料", 12.0f, 550.0);
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(1, bookmarks.size());
+        Bookmark section = bookmarks.get(0);
+        Assertions.assertEquals("第1章 财务报告", section.getText());
+
+        List<String> texts = new ArrayList<>();
+        for (Bookmark child : section.getChildren()) {
+            texts.add(child.getText());
+        }
+        // 一、审计报告 must be the FIRST child after the prepend pass; the
+        // value=1..6 sub-chain (一、审计意见..六、注册会计师的责任) is dropped
+        // because the merged value=1..18 chain (length 18) wins by width.
+        Assertions.assertEquals(
+                Arrays.asList(
+                        "一、审计报告",
+                        "二、财务报表",
+                        "三、公司基本情况",
+                        "四、财务报表的编制基础",
+                        "五、重要会计政策及会计估计",
+                        "六、税项",
+                        "七、合并财务报表项目注释",
+                        "八、合并范围的变更",
+                        "九、在其他主体中的权益",
+                        "十、与金融工具相关的风险",
+                        "十一、公允价值的披露",
+                        "十二、关联方及关联交易",
+                        "十三、股份支付",
+                        "十四、承诺及或有事项",
+                        "十五、资产负债表日后事项",
+                        "十六、其他重要事项",
+                        "十七、母公司财务报表主要项目注释",
+                        "十八、补充资料"),
+                texts,
+                "Orphan value=1 should be prepended onto the value=2 chain, producing values 1..18");
+    }
+
+    /**
+     * If a {@code value=1} singleton exists but no separate chain starts at
+     * {@code value=2} (e.g., the document's L2 sequence is just values
+     * 1..N), the merge pass must NOT fabricate a value=2 chain. The natural
+     * value-1..N chain keeps winning unchanged.
+     */
+    @Test
+    public void testLonelyValueOneNotMergedWhenNoValueTwoChain() {
+        List<List<IObject>> contents = multiPage(
+                0, "第1章 测试", 20.0f, 1100.0,
+                0, "一、A", 12.0f, 850.0,
+                0, "一、B", 12.0f, 800.0,
+                0, "二、C", 12.0f, 750.0,
+                0, "三、D", 12.0f, 700.0);
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(1, bookmarks.size());
+        Bookmark section = bookmarks.get(0);
+        List<String> texts = new ArrayList<>();
+        for (Bookmark child : section.getChildren()) {
+            texts.add(child.getText());
+        }
+        // No value=2 chain exists, so the merge pass leaves "一、A" out (it
+        // forms an orphan value=1 chain of length 1 while "一、B/二、C/三、D"
+        // forms a chain of length 3). The natural 1..3 chain is selected,
+        // matching pre-merge behavior for this input.
+        Assertions.assertEquals(Arrays.asList("一、B", "二、C", "三、D"), texts,
+                "Without a value=2 target chain, prepend pass is a no-op");
+    }
+
+    /**
+     * Only chains whose single-candidate group has {@code value == 1} are
+     * candidates for the prepend pass. An orphan with value != 1 (e.g. a lone
+     * value=3 left over after a gap) must remain untouched by the merge pass
+     * and compete normally in the widest-chain selection.
+     */
+    @Test
+    public void testLonelyNonOneNotMerged() {
+        // The 1..2 chain plus a separate value=5 candidate (with values 3 and
+        // 4 missing) gives two disjoint groups. The value=5 group is its own
+        // chain of length 1. The prepend pass must NOT treat it as a merge
+        // target because its value is 5, not 1; the 1..2 chain wins on width.
+        List<List<IObject>> contents = multiPage(
+                0, "第1章 测试", 20.0f, 1100.0,
+                0, "一、A", 12.0f, 850.0,
+                0, "二、B", 12.0f, 800.0,
+                0, "五、E", 12.0f, 750.0);
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(1, bookmarks.size());
+        Bookmark section = bookmarks.get(0);
+        List<String> texts = new ArrayList<>();
+        for (Bookmark child : section.getChildren()) {
+            texts.add(child.getText());
+        }
+        Assertions.assertEquals(Arrays.asList("一、A", "二、B"), texts,
+                "An orphan with value != 1 must not trigger the prepend pass");
+    }
+
 }
