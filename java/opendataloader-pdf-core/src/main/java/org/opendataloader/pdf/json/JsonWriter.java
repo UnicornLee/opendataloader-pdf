@@ -270,10 +270,13 @@ public class JsonWriter {
                     jsonGenerator.writeNumberField(JsonName.HEIGHT, height);
                     jsonGenerator.writeBooleanField(JsonName.IS_OCR, false);
                     List<IObject> pageContents = contents.get(pageNumber);
-                    List<Double> leftXList = pageContents.stream().map(IObject::getLeftX).collect(Collectors.toList());
-                    List<Double> rightXList = pageContents.stream().map(IObject::getRightX).collect(Collectors.toList());
-                    List<Double> topYList = pageContents.stream().map(IObject::getTopY).collect(Collectors.toList());
-                    List<Double> bottomYList = pageContents.stream().map(IObject::getBottomY).collect(Collectors.toList());
+                    List<IObject> layoutObjects = pageContents.stream()
+                            .filter(o -> !(o instanceof SemanticHeaderOrFooter))
+                            .collect(Collectors.toList());
+                    List<Double> leftXList = layoutObjects.stream().map(IObject::getLeftX).collect(Collectors.toList());
+                    List<Double> rightXList = layoutObjects.stream().map(IObject::getRightX).collect(Collectors.toList());
+                    List<Double> topYList = layoutObjects.stream().map(IObject::getTopY).collect(Collectors.toList());
+                    List<Double> bottomYList = layoutObjects.stream().map(IObject::getBottomY).collect(Collectors.toList());
                     double minX = leftXList.stream().min(Double::compare).orElse(0.0);
                     double maxX = rightXList.stream().max(Double::compare).orElse(0.0);
                     double maxY = topYList.stream().max(Double::compare).orElse(0.0);
@@ -287,11 +290,11 @@ public class JsonWriter {
                     jsonGenerator.writeNumberField(JsonName.MARGIN_TOP, marginTop);
                     jsonGenerator.writeNumberField(JsonName.MARGIN_BOTTOM, marginBottom);
                     jsonGenerator.writeArrayFieldStart(JsonName.ITEMS);
-                    final double[] prevBottomY = {pageContents.get(0).getTopY()};
+                    final double[] prevBottomY = {height};
                     int textId = 1;
                     for (IObject content : pageContents) {
                         final int finalTextId = textId;
-                        if (content instanceof LineArtChunk) {
+                        if (content instanceof LineArtChunk || content instanceof ShapeChunk) {
                             continue;
                         }
                         if (!includeHeaderFooter && content instanceof SemanticHeaderOrFooter) {
@@ -756,9 +759,6 @@ public class JsonWriter {
                             tableMap.put(JsonName.CONTENT, rowList);
                             jsonGenerator.writeObject(tableMap);
                         }
-                        /*if (content instanceof ShapeChunk) {
-                            jsonGenerator.writeObject(content);
-                        }*/
                         if (!(content instanceof ShapeChunk)) {
                             textId++;
                         }
