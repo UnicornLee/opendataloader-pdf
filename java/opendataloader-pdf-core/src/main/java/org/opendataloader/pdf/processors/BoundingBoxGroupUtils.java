@@ -85,6 +85,20 @@ final class BoundingBoxGroupUtils {
     }
 
     /**
+     * Returns true when at least one entry in {@code group} is a
+     * {@link ShapeChunk} whose type is {@link ShapeChunk#TYPE_ARROW}.
+     */
+    static boolean containsArrow(List<IObject> group) {
+        for (IObject obj : group) {
+            if (obj instanceof ShapeChunk
+                && ShapeChunk.TYPE_ARROW.equals(((ShapeChunk) obj).getShapeType())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Returns true when {@code inner} is mostly contained in {@code outer}
      * vertically (more than 50 % of its vertical extent is covered).
      */

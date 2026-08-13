@@ -264,6 +264,67 @@ class ShapeRecognizerTest {
     }
 
     @Test
+    void horizontalLineInsideSpanningShapeIsNotAnArrow() {
+        // Regression: a horizontal line whose bbox sits fully inside another shape's
+        // bbox is an internal structural line of that shape (e.g. a table row
+        // separator running between the table's left border and outline polyline),
+        // not a connector arrow. The previous connector heuristic only checked
+        // "two endpoints near DIFFERENT shapes" and misclassified every such row
+        // separator as an arrow.
+        List<IChunk> artifacts = new ArrayList<>();
+        double[] color = new double[]{0.0, 0.0, 0.0};
+        // A wide filled rectangle that anchors the start endpoint (left edge of table).
+        artifacts.add(new LineChunk(0, 50, 90, 170, 90, 80, color));
+        // The table outline polyline (reconstructed from 4 stroke segments here).
+        artifacts.add(new LineChunk(0, 50, 100, 530, 100, 1.0, color));   // top border
+        artifacts.add(new LineChunk(0, 50, 300, 530, 300, 1.0, color));   // bottom border
+        artifacts.add(new LineChunk(0, 50, 100, 50, 300, 1.0, color));   // left border
+        artifacts.add(new LineChunk(0, 530, 100, 530, 300, 1.0, color));  // right border
+        // A row separator whose bbox is fully inside the polyline's bbox.
+        artifacts.add(new LineChunk(0, 50, 150, 530, 150, 0.5, color));
+        // And another one for good measure.
+        artifacts.add(new LineChunk(0, 50, 200, 530, 200, 0.5, color));
+
+        List<ShapeChunk> shapes = ShapeRecognizer.recognizePage(0, artifacts);
+
+        long arrowCount = shapes.stream()
+                .filter(s -> ShapeChunk.TYPE_ARROW.equals(s.getShapeType()))
+                .count();
+        Assertions.assertEquals(0, arrowCount,
+                "Horizontal lines contained in a spanning shape are not connectors");
+        // Sanity: the row separators are not lost either — they collapse into the
+        // surrounding polyline rather than becoming arrows.
+        long polylineCount = shapes.stream()
+                .filter(s -> ShapeChunk.TYPE_POLYLINE.equals(s.getShapeType()))
+                .count();
+        Assertions.assertTrue(polylineCount >= 1,
+                "Table outline should still be recognized as a polyline");
+    }
+
+    @Test
+    void horizontalLineCoincidentEdgesWithSpanningShapeIsNotAnArrow() {
+        // Edge case: the line's bbox exactly matches the spanning shape's bbox on the
+        // short axis and lies on its border on the long axis (e.g. a row separator
+        // coincident with the table top). Strict containment must still hold.
+        List<IChunk> artifacts = new ArrayList<>();
+        double[] color = new double[]{0.0, 0.0, 0.0};
+        artifacts.add(new LineChunk(0, 50, 90, 170, 90, 80, color));     // left rectangle
+        artifacts.add(new LineChunk(0, 50, 100, 530, 100, 1.0, color)); // top border
+        artifacts.add(new LineChunk(0, 50, 300, 530, 300, 1.0, color)); // bottom border
+        artifacts.add(new LineChunk(0, 50, 100, 50, 300, 1.0, color)); // left border
+        artifacts.add(new LineChunk(0, 530, 100, 530, 300, 1.0, color));// right border
+        // Line whose bbox exactly coincides with the top border.
+        artifacts.add(new LineChunk(0, 50, 100, 530, 100, 0.5, color));
+
+        List<ShapeChunk> shapes = ShapeRecognizer.recognizePage(0, artifacts);
+        long arrowCount = shapes.stream()
+                .filter(s -> ShapeChunk.TYPE_ARROW.equals(s.getShapeType()))
+                .count();
+        Assertions.assertEquals(0, arrowCount,
+                "Lines coincident with a spanning shape border are not connectors");
+    }
+
+    @Test
     void arrowheadRecoveredFromPdfBoxFillWhenArtifactMerged() {
         List<IChunk> artifacts = new ArrayList<>();
         double[] color = new double[]{0.0, 0.0, 0.0};
