@@ -49,6 +49,12 @@ public final class LineArtProcessor {
 
     private static final Logger LOGGER = Logger.getLogger(LineArtProcessor.class.getCanonicalName());
 
+    /** Maximum number of attempts (initial + retries) when calling Paddle OCR. */
+    private static final int PADDLE_MAX_RETRIES = 3;
+
+    /** Sleep duration between failed Paddle OCR attempts, in seconds. */
+    private static final long PADDLE_RETRY_SLEEP_SECONDS = 3L;
+
     /** Minimum overlap ratio to treat a neighbouring element as intersecting a LineArtChunk. */
     private static final double MIN_LINE_ART_OVERLAP_PERCENT = 0.05;
 
@@ -134,9 +140,9 @@ public final class LineArtProcessor {
                         String imageFileName = String.format(MarkdownSyntax.IMAGE_FILE_NAME_FORMAT,
                                 StaticLayoutContainers.getImagesDirectory(), File.separator,
                                 imageChunk.getIndex(), StaticLayoutContainers.getImageFormat());
-                        try {
-                            TextInOcrAnalysisResultDto textInOcrAnalysisResultDto = PaddleOcrProcessor.getPaddleResponse(
-                                    new File(imageFileName), 1, paddleUrl);
+                        TextInOcrAnalysisResultDto textInOcrAnalysisResultDto = callPaddleWithRetry(
+                                new File(imageFileName), 1, paddleUrl);
+                        if (textInOcrAnalysisResultDto != null) {
                             LOGGER.log(Level.INFO, "Text in ocr analysis result: {}", textInOcrAnalysisResultDto);
                             TextChunk formulaChunk = tryCreateFormulaTextChunk(textInOcrAnalysisResultDto, union);
                             if (formulaChunk != null) {
@@ -153,10 +159,15 @@ public final class LineArtProcessor {
                                 }
                                 formulaChunk.setFontSize(fontSize);
                                 replacement = formulaChunk;
+                            } else {
+                                // OCR 成功但未识别到公式：撤销合并，把 group 里的原始元素全部放回 result
+                                // 按 topY 从大到小排序，与 processLineArtGroups 入口处 pageContents 的排序方向一致
+                                group.sort(Comparator.comparingDouble(IObject::getTopY).reversed());
+                                result.addAll(group);
+                                continue;
                             }
-                        } catch (IOException e) {
-                            LOGGER.log(Level.WARNING, "Failed to call Paddle OCR for image chunk: " + imageFileName, e);
                         }
+                        // null = 重试全部失败：ERROR 日志已在 callPaddleWithRetry 中打印，replacement 保持为 imageChunk
                     }
                     result.add(replacement);
                     continue;
@@ -166,6 +177,40 @@ public final class LineArtProcessor {
         }
         pageContents.clear();
         pageContents.addAll(result);
+    }
+
+    /**
+     * Wraps {@link PaddleOcrProcessor#getPaddleResponse} with retry logic: on
+     * failure, sleeps {@value #PADDLE_RETRY_SLEEP_SECONDS} seconds and retries up
+     * to {@value #PADDLE_MAX_RETRIES} times in total. If every attempt fails,
+     * logs an {@code ERROR}-level message and returns {@code null} without
+     * propagating the exception.
+     */
+    private static TextInOcrAnalysisResultDto callPaddleWithRetry(File imageFile, int fileType, String paddleUrl) {
+        IOException lastException = null;
+        for (int attempt = 1; attempt <= PADDLE_MAX_RETRIES; attempt++) {
+            try {
+                return PaddleOcrProcessor.getPaddleResponse(imageFile, fileType, paddleUrl);
+            } catch (IOException e) {
+                lastException = e;
+                LOGGER.log(Level.WARNING,
+                    "Paddle OCR call failed (attempt " + attempt + "/" + PADDLE_MAX_RETRIES
+                        + ") for image chunk: " + imageFile, e);
+                if (attempt < PADDLE_MAX_RETRIES) {
+                    try {
+                        Thread.sleep(PADDLE_RETRY_SLEEP_SECONDS * 1000L);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        LOGGER.log(Level.WARNING, "Paddle OCR retry sleep interrupted", ie);
+                        break;
+                    }
+                }
+            }
+        }
+        LOGGER.log(Level.SEVERE,
+            "Paddle OCR call failed after " + PADDLE_MAX_RETRIES + " attempts for image chunk: "
+                + imageFile + "; falling back to ImageChunk", lastException);
+        return null;
     }
 
     private static TextChunk tryCreateFormulaTextChunk(TextInOcrAnalysisResultDto resultDto, BoundingBox bbox) {
