@@ -10,7 +10,7 @@ public class Bookmark implements Serializable {
     private String text;
 
     @JsonProperty("page_num")
-    private Integer pageNum;
+    private Integer pageNum = 0;
 
     @JsonProperty("is_single_line")
     private Boolean isSingleLine = true;
