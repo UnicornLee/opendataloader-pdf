@@ -94,6 +94,12 @@ public class CatalogBookmarkProcessor {
 
     private static final Logger LOGGER = Logger.getLogger(CatalogBookmarkProcessor.class.getCanonicalName());
 
+    /**
+     * 若 self 来源目录中 page_num 为 0 的节点占比超过此阈值，则判定目录质量不可靠，
+     * 直接清空 selfBookmarks，避免低质量来源污染 {@link org.opendataloader.pdf.custom.utils.BookmarkQualitySelector} 选择。
+     */
+    private static final double SELF_BOOKMARK_ZERO_PAGE_RATIO_THRESHOLD = 0.30;
+
     private static final Pattern ARABIC_TOC_PATTERN = Pattern.compile("^(.*?)[\\s\\.]+(\\d{1,5})$");
     private static final Pattern ROMAN_TOC_PATTERN = Pattern.compile("^(.*?)[\\s\\.]+([IVXLCDMivxlcdm]+)$");
     private static final Pattern ROMAN_NUMERAL = Pattern.compile("^(?i)M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$");
@@ -1442,6 +1448,197 @@ public class CatalogBookmarkProcessor {
                 resolveSelfBookmarkRelatedIds(children, data);
             }
         }
+    }
+
+    /**
+     * 修复 self_bookmarks 中 page_num 为 0 的目录：
+     * <ol>
+     *   <li>按 DFS 先序递归遍历整棵树，统计 page_num 为 0 的占比；若超过
+     *       {@link #SELF_BOOKMARK_ZERO_PAGE_RATIO_THRESHOLD}（30%），判定 self 来源
+     *       不可靠，直接清空 selfBookmarks 并返回。</li>
+     *   <li>否则，对每个 page_num 为 0 的节点 B：按 DFS 先序扁平列表找到 B 之前/之后
+     *       pageNum 不为 0 的最近锚点（prev / next），搜索范围取
+     *       {@code [prev != null ? prev.pageNum : 1, next != null ? next.pageNum : data.size()]}。
+     *       在范围内按页遍历 heading/paragraph 文本项，复用
+     *       {@link #matchBookmarkTitle} 做 EXACT/PREFIX 匹配；匹配项的 related_id
+     *       受顺序约束：
+     *       <ul>
+     *         <li>若 match.pageNum == prev.pageNum：match.related_id 必须大于 prev.related_id；</li>
+     *         <li>若 match.pageNum == next.pageNum：match.related_id 必须小于 next.related_id；</li>
+     *         <li>其它情况下无 related_id 限制。</li>
+     *       </ul>
+     *       命中即设置 B.pageNum 与 B.relatedId；否则按回退规则（B.pageNum =
+     *       prev != null ? prev.pageNum + 1 : 1，related_id 保持 0）。</li>
+     * </ol>
+     *
+     * @param selfBookmarks self 来源目录（原地修改）
+     * @param data          每页 JSON 数据（含 items），用于按页检索标题文本
+     */
+    public static void repairSelfBookmarkPageNums(List<Bookmark> selfBookmarks,
+                                                  List<Map<String, Object>> data) {
+        if (selfBookmarks == null || selfBookmarks.isEmpty() || data == null || data.isEmpty()) {
+            return;
+        }
+        List<Bookmark> flat = new ArrayList<>();
+        flattenPreOrder(selfBookmarks, flat);
+        int total = flat.size();
+        if (total == 0) {
+            return;
+        }
+        int zeroCount = 0;
+        for (Bookmark b : flat) {
+            Integer p = b.getPageNum();
+            if (p == null || p == 0) {
+                zeroCount++;
+            }
+        }
+        if (zeroCount == 0) {
+            return;
+        }
+        double zeroRatio = (double) zeroCount / total;
+        if (zeroRatio > SELF_BOOKMARK_ZERO_PAGE_RATIO_THRESHOLD) {
+            LOGGER.log(Level.WARNING, String.format(
+                "[CatalogBookmarkProcessor] %d/%d (%.1f%%) self bookmarks have page_num=0, "
+                    + "exceeds %.0f%% threshold, clearing self_bookmarks",
+                zeroCount, total, zeroRatio * 100.0,
+                SELF_BOOKMARK_ZERO_PAGE_RATIO_THRESHOLD * 100.0));
+            selfBookmarks.clear();
+            return;
+        }
+        int repaired = 0;
+        int fallback = 0;
+        for (int i = 0; i < flat.size(); i++) {
+            Bookmark b = flat.get(i);
+            Integer currentPageNum = b.getPageNum();
+            if (currentPageNum != null && currentPageNum != 0) {
+                continue;
+            }
+            Bookmark prevAnchor = findAnchor(flat, i, -1);
+            Bookmark nextAnchor = findAnchor(flat, i, +1);
+            int startPage = prevAnchor != null ? prevAnchor.getPageNum() : 1;
+            int endPage = nextAnchor != null ? nextAnchor.getPageNum() : data.size();
+            if (startPage < 1) {
+                startPage = 1;
+            }
+            if (endPage > data.size()) {
+                endPage = data.size();
+            }
+            if (startPage > endPage) {
+                // 锚点反向（如 prev.pageNum > next.pageNum 的极端情形），退化为 prev.pageNum + 1
+                int fb = prevAnchor != null ? prevAnchor.getPageNum() + 1 : 1;
+                if (fb < 1) fb = 1;
+                if (fb > data.size()) fb = data.size();
+                b.setPageNum(fb);
+                fallback++;
+                continue;
+            }
+            String title = b.getText();
+            String normalizedTitle = normalizeBookmarkText(title);
+            if (normalizedTitle.isEmpty()) {
+                int fb = prevAnchor != null ? prevAnchor.getPageNum() + 1 : 1;
+                if (fb < 1) fb = 1;
+                if (fb > data.size()) fb = data.size();
+                b.setPageNum(fb);
+                fallback++;
+                continue;
+            }
+            int matchedPage = 0;
+            int matchedRelatedId = 0;
+            boolean found = false;
+            for (int p = startPage; p <= endPage && !found; p++) {
+                Map<String, Object> page = data.get(p - 1);
+                List<Map<String, Object>> items = (List<Map<String, Object>>) page.get(JsonName.ITEMS);
+                if (items == null) {
+                    continue;
+                }
+                MatchQuality bestQuality = null;
+                int bestRelatedId = 0;
+                for (Map<String, Object> item : items) {
+                    if (!isTextItem(item)) {
+                        continue;
+                    }
+                    String sourceType = (String) item.get(JsonName.SOURCE_TYPE);
+                    if (!JsonName.SOURCE_TYPE_HEADING.equals(sourceType)
+                            && !JsonName.SOURCE_TYPE_PARAGRAPH.equals(sourceType)) {
+                        continue;
+                    }
+                    String itemText = getJsonItemFullText(item);
+                    MatchQuality quality = matchBookmarkTitle(normalizedTitle, itemText);
+                    if (quality == null) {
+                        continue;
+                    }
+                    Object idObj = item.get(JsonName.ID);
+                    if (!(idObj instanceof Number)) {
+                        continue;
+                    }
+                    int relatedId = ((Number) idObj).intValue();
+                    if (relatedId == 0) {
+                        continue;
+                    }
+                    if (prevAnchor != null && p == prevAnchor.getPageNum()
+                            && relatedId <= prevAnchor.getRelatedId()) {
+                        continue;
+                    }
+                    if (nextAnchor != null && p == nextAnchor.getPageNum()
+                            && relatedId >= nextAnchor.getRelatedId()) {
+                        continue;
+                    }
+                    if (bestQuality == null || quality.ordinal() < bestQuality.ordinal()) {
+                        bestQuality = quality;
+                        bestRelatedId = relatedId;
+                    }
+                }
+                if (bestQuality != null) {
+                    matchedPage = p;
+                    matchedRelatedId = bestRelatedId;
+                    found = true;
+                }
+            }
+            if (found) {
+                b.setPageNum(matchedPage);
+                b.setRelatedId(matchedRelatedId);
+                repaired++;
+            } else {
+                int fb = prevAnchor != null ? prevAnchor.getPageNum() + 1 : 1;
+                if (fb < 1) fb = 1;
+                if (fb > data.size()) fb = data.size();
+                b.setPageNum(fb);
+                fallback++;
+            }
+        }
+        LOGGER.log(Level.INFO, String.format(
+            "[CatalogBookmarkProcessor] self_bookmarks repair: %d repaired by content match, "
+                + "%d by fallback page rule (zero ratio %.1f%% <= %.0f%%)",
+            repaired, fallback, zeroRatio * 100.0,
+            SELF_BOOKMARK_ZERO_PAGE_RATIO_THRESHOLD * 100.0));
+    }
+
+    /**
+     * 将 self_bookmarks 树按 DFS 先序扁平化追加到 out。
+     */
+    private static void flattenPreOrder(List<Bookmark> bookmarks, List<Bookmark> out) {
+        for (Bookmark bookmark : bookmarks) {
+            out.add(bookmark);
+            List<Bookmark> children = bookmark.getChildren();
+            if (children != null && !children.isEmpty()) {
+                flattenPreOrder(children, out);
+            }
+        }
+    }
+
+    /**
+     * 在 DFS 先序扁平列表中，从 {@code index + direction} 起沿 {@code direction}
+     * （-1=向前，+1=向后）找最近的 pageNum != 0 节点；找不到返回 null。
+     */
+    private static Bookmark findAnchor(List<Bookmark> flat, int index, int direction) {
+        for (int i = index + direction; i >= 0 && i < flat.size(); i += direction) {
+            Bookmark b = flat.get(i);
+            Integer p = b.getPageNum();
+            if (p != null && p != 0) {
+                return b;
+            }
+        }
+        return null;
     }
 
     private static void resolveSelfBookmarkRelatedId(Bookmark bookmark,
