@@ -19,6 +19,7 @@ import org.opendataloader.pdf.custom.constants.GlobalConstant;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
 import org.opendataloader.pdf.utils.BulletedParagraphUtils;
 import org.verapdf.wcag.algorithms.entities.IObject;
+import org.verapdf.wcag.algorithms.entities.content.LineArtChunk;
 import org.verapdf.wcag.algorithms.entities.content.TextBlock;
 import org.verapdf.wcag.algorithms.entities.content.TextColumn;
 import org.verapdf.wcag.algorithms.entities.content.TextLine;
@@ -40,9 +41,13 @@ public class ParagraphProcessor {
     public static List<IObject> processParagraphs(List<IObject> contents, double width) {
         DocumentProcessor.setIndexesForContentsList(contents);
         List<TextBlock> blocks = new ArrayList<>();
+        List<LineArtChunk> lineArts = new ArrayList<>();
         for (IObject content : contents) {
             if (content instanceof TextLine) {
                 blocks.add(new TextBlock((TextLine) content));
+            }
+            if (content instanceof LineArtChunk) {
+                lineArts.add((LineArtChunk) content);
             }
         }
         List<Double> leftXList = blocks.stream().map(block -> block.getBoundingBox().getLeftX()).collect(Collectors.toList());
@@ -65,14 +70,14 @@ public class ParagraphProcessor {
             }
         }
 
-        blocks = detectParagraphsWithJustifyAlignments(blocks, leftX, rightX, width);
-        blocks = detectFirstAndLastLinesOfParagraphsWithJustifyAlignments(blocks, leftX, rightX, width);
-        blocks = detectParagraphsWithLeftAlignments(blocks, true, leftX, rightX, width);
-        blocks = detectFirstLinesOfParagraphWithLeftAlignments(blocks, leftX, rightX, width);
-        blocks = detectParagraphsWithCenterAlignments(blocks, leftX, rightX, width);
-        blocks = detectParagraphsWithRightAlignments(blocks, leftX, rightX, width);
-        blocks = detectTwoLinesParagraphs(blocks, leftX, rightX, width);
-        blocks = processOtherLines(blocks, leftX, rightX, width);
+        blocks = detectParagraphsWithJustifyAlignments(blocks, leftX, rightX, width, lineArts);
+        blocks = detectFirstAndLastLinesOfParagraphsWithJustifyAlignments(blocks, leftX, rightX, width, lineArts);
+        blocks = detectParagraphsWithLeftAlignments(blocks, true, leftX, rightX, width, lineArts);
+        blocks = detectFirstLinesOfParagraphWithLeftAlignments(blocks, leftX, rightX, width, lineArts);
+        blocks = detectParagraphsWithCenterAlignments(blocks, leftX, rightX, width, lineArts);
+        blocks = detectParagraphsWithRightAlignments(blocks, leftX, rightX, width, lineArts);
+        blocks = detectTwoLinesParagraphs(blocks, leftX, rightX, width, lineArts);
+        blocks = processOtherLines(blocks, leftX, rightX, width, lineArts);
         return getContentsWithDetectedParagraphs(contents, blocks);
     }
 
@@ -114,7 +119,7 @@ public class ParagraphProcessor {
         return newContents;
     }
 
-    private static List<TextBlock> detectParagraphsWithJustifyAlignments(List<TextBlock> textBlocks, double leftX, double rightX, double width) {
+    private static List<TextBlock> detectParagraphsWithJustifyAlignments(List<TextBlock> textBlocks, double leftX, double rightX, double width, List<LineArtChunk> lineArts) {
         List<TextBlock> newBlocks = new ArrayList<>();
         if (!textBlocks.isEmpty()) {
             newBlocks.add(textBlocks.get(0));
@@ -125,7 +130,7 @@ public class ParagraphProcessor {
                 TextBlock nextBlock = textBlocks.get(i);
                 TextAlignment textAlignment = ChunksMergeUtils.getAlignment(previousBlock.getLastLine(), nextBlock.getFirstLine());
                 double probability = getDifferentLinesProbability(previousBlock, nextBlock, false, false);
-                if (prejudgeParagraphs(textBlocks, newBlocks, i, leftX, rightX, width)) {
+                if (prejudgeParagraphs(textBlocks, newBlocks, i, leftX, rightX, width, lineArts)) {
                 } else if (textAlignment == TextAlignment.JUSTIFY && probability > DIFFERENT_LINES_PROBABILITY &&
                     areTextBlocksHaveSameTextSize(previousBlock, nextBlock)) {
                     previousBlock.add(nextBlock.getLines());
@@ -161,7 +166,7 @@ public class ParagraphProcessor {
         return newBlocks;
     }
 
-    private static List<TextBlock> detectParagraphsWithCenterAlignments(List<TextBlock> textBlocks, double leftX, double rightX, double width) {
+    private static List<TextBlock> detectParagraphsWithCenterAlignments(List<TextBlock> textBlocks, double leftX, double rightX, double width, List<LineArtChunk> lineArts) {
         List<TextBlock> newBlocks = new ArrayList<>();
         if (!textBlocks.isEmpty()) {
             newBlocks.add(textBlocks.get(0));
@@ -170,7 +175,7 @@ public class ParagraphProcessor {
             for (int i = 1; i < textBlocks.size(); i++) {
                 TextBlock previousBlock = newBlocks.get(newBlocks.size() - 1);
                 TextBlock nextBlock = textBlocks.get(i);
-                if (prejudgeParagraphs(textBlocks, newBlocks, i, leftX, rightX, width)) {
+                if (prejudgeParagraphs(textBlocks, newBlocks, i, leftX, rightX, width, lineArts)) {
                 } else if (areLinesOfParagraphsWithCenterAlignments(previousBlock, nextBlock)) {
                     previousBlock.add(nextBlock.getLines());
                     previousBlock.setTextAlignment(TextAlignment.CENTER);
@@ -217,7 +222,7 @@ public class ParagraphProcessor {
         return true;
     }
 
-    private static List<TextBlock> detectFirstAndLastLinesOfParagraphsWithJustifyAlignments(List<TextBlock> textBlocks, double leftX, double rightX, double width) {
+    private static List<TextBlock> detectFirstAndLastLinesOfParagraphsWithJustifyAlignments(List<TextBlock> textBlocks, double leftX, double rightX, double width, List<LineArtChunk> lineArts) {
         List<TextBlock> newBlocks = new ArrayList<>();
         if (!textBlocks.isEmpty()) {
             newBlocks.add(textBlocks.get(0));
@@ -228,7 +233,7 @@ public class ParagraphProcessor {
                 TextBlock nextBlock = textBlocks.get(i);
                 TextAlignment textAlignment = ChunksMergeUtils.getAlignment(previousBlock.getLastLine(), nextBlock.getFirstLine());
                 double probability = getDifferentLinesProbability(previousBlock, nextBlock, false, false);
-                if (prejudgeParagraphs(textBlocks, newBlocks, i, leftX, rightX, width)) {
+                if (prejudgeParagraphs(textBlocks, newBlocks, i, leftX, rightX, width, lineArts)) {
                 } else if (isFirstLineOfBlock(previousBlock, nextBlock, textAlignment, probability)) {
                     previousBlock.add(nextBlock.getLines());
                     previousBlock.setTextAlignment(TextAlignment.JUSTIFY);
@@ -272,7 +277,7 @@ public class ParagraphProcessor {
         return newBlocks;
     }
 
-    private static boolean prejudgeParagraphs(List<TextBlock> textBlocks, List<TextBlock> newBlocks, int index, double leftX, double rightX, double width) {
+    private static boolean prejudgeParagraphs(List<TextBlock> textBlocks, List<TextBlock> newBlocks, int index, double leftX, double rightX, double width, List<LineArtChunk> lineArts) {
         boolean hasJudge = false;
         if (textBlocks.size() > 1) {
             TextBlock previousBlock = newBlocks.get(newBlocks.size() - 1);
@@ -292,6 +297,10 @@ public class ParagraphProcessor {
             double nextTopY = nextBlock.getFirstLine().getTopY();
             double nextBottomY = nextBlock.getFirstLine().getBottomY();
             double margin = prevBottomY - nextTopY;
+            Double prevMargin = null;
+            if (newBlocks.size() > 2) {
+                prevMargin = newBlocks.get(newBlocks.size() - 2).getLastLine().getBottomY() - previousBlock.getFirstLine().getTopY();
+            }
             Double nextTwoFontSize = null;
             Double nextTwoLeftX = null;
             Double nextTwoTopY = null;
@@ -312,7 +321,17 @@ public class ParagraphProcessor {
                 nextMargin = nextBottomY - nextTwoTopY;
             }
 
-            if (Math.abs(prevFontSize - nextFontSize) >= 2) {
+            // 夹在 previousBlock 和 nextBlock 之间的 lineArts
+            // 视觉上横跨两行的水平线（如下划线、装饰横线）应作为段落分隔符，
+            // 命中条件：垂直方向位于两行之间，且水平方向横跨两段文本范围。
+            if (hasLineArtBetween(previousBlock, nextBlock, lineArts)) {
+                newBlocks.add(nextBlock);
+                hasJudge = true;
+                return hasJudge;
+            } else if (Math.abs(prevFontSize - nextFontSize) >= 2) {
+                newBlocks.add(nextBlock);
+                hasJudge = true;
+            } else if (prevMargin != null && margin - prevMargin >= 5) {
                 newBlocks.add(nextBlock);
                 hasJudge = true;
             } else if (nextMargin != null && margin - nextMargin >= 5) {
@@ -352,7 +371,29 @@ public class ParagraphProcessor {
         return hasJudge;
     }
 
-    private static List<TextBlock> detectParagraphsWithLeftAlignments(List<TextBlock> textBlocks, boolean checkStyle, double leftX, double rightX, double width) {
+    /**
+     * 检测是否存在 lineArt 视觉上夹在 previousBlock 与 nextBlock 之间。
+     * 命中条件：lineArt 垂直方向位于 prevBottomY 与 nextTopY 之间，
+     * 且水平方向横跨 previousBlock 左边界与 nextBlock 右边界。
+     * 这种情况通常意味着两行之间存在装饰线/分隔线，应作为段落分隔符。
+     */
+    private static boolean hasLineArtBetween(TextBlock previousBlock, TextBlock nextBlock, List<LineArtChunk> lineArts) {
+        if (lineArts == null || lineArts.isEmpty()) {
+            return false;
+        }
+        double prevBottomY = previousBlock.getLastLine().getBottomY();
+        double nextTopY = nextBlock.getFirstLine().getTopY();
+        for (LineArtChunk lineArt : lineArts) {
+            double lineArtBottomY = lineArt.getBottomY();
+            double lineArtTopY = lineArt.getTopY();
+            if (lineArtBottomY >= nextTopY && lineArtTopY <= prevBottomY) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static List<TextBlock> detectParagraphsWithLeftAlignments(List<TextBlock> textBlocks, boolean checkStyle, double leftX, double rightX, double width, List<LineArtChunk> lineArts) {
         List<TextBlock> newBlocks = new ArrayList<>();
         if (!textBlocks.isEmpty()) {
             newBlocks.add(textBlocks.get(0));
@@ -361,7 +402,7 @@ public class ParagraphProcessor {
             for (int i = 1; i < textBlocks.size(); i++) {
                 TextBlock previousBlock = newBlocks.get(newBlocks.size() - 1);
                 TextBlock nextBlock = textBlocks.get(i);
-                if (prejudgeParagraphs(textBlocks, newBlocks, i, leftX, rightX, width)) {
+                if (prejudgeParagraphs(textBlocks, newBlocks, i, leftX, rightX, width, lineArts)) {
                 } else if (areLinesOfParagraphsWithLeftAlignments(previousBlock, nextBlock, checkStyle)) {
                     previousBlock.add(nextBlock.getLines());
                     previousBlock.setTextAlignment(TextAlignment.LEFT);
@@ -460,7 +501,7 @@ public class ParagraphProcessor {
         return true;
     }
 
-    private static List<TextBlock> detectFirstLinesOfParagraphWithLeftAlignments(List<TextBlock> textBlocks, double leftX, double rightX, double width) {
+    private static List<TextBlock> detectFirstLinesOfParagraphWithLeftAlignments(List<TextBlock> textBlocks, double leftX, double rightX, double width, List<LineArtChunk> lineArts) {
         List<TextBlock> newBlocks = new ArrayList<>();
         if (!textBlocks.isEmpty()) {
             newBlocks.add(textBlocks.get(0));
@@ -469,7 +510,7 @@ public class ParagraphProcessor {
             for (int i = 1; i < textBlocks.size(); i++) {
                 TextBlock previousBlock = newBlocks.get(newBlocks.size() - 1);
                 TextBlock nextBlock = textBlocks.get(i);
-                if (prejudgeParagraphs(textBlocks, newBlocks, i, leftX, rightX, width)) {
+                if (prejudgeParagraphs(textBlocks, newBlocks, i, leftX, rightX, width, lineArts)) {
                 } else if (isFirstLineOfParagraphWithLeftAlignment(previousBlock, nextBlock)) {
                     previousBlock.add(nextBlock.getLines());
                     previousBlock.setTextAlignment(TextAlignment.LEFT);
@@ -529,7 +570,7 @@ public class ParagraphProcessor {
         return true;
     }
 
-    private static List<TextBlock> detectTwoLinesParagraphs(List<TextBlock> textBlocks, double leftX, double rightX, double width) {
+    private static List<TextBlock> detectTwoLinesParagraphs(List<TextBlock> textBlocks, double leftX, double rightX, double width, List<LineArtChunk> lineArts) {
         List<TextBlock> newBlocks = new ArrayList<>();
         if (!textBlocks.isEmpty()) {
             newBlocks.add(textBlocks.get(0));
@@ -538,7 +579,7 @@ public class ParagraphProcessor {
             for (int i = 1; i < textBlocks.size(); i++) {
                 TextBlock previousBlock = newBlocks.get(newBlocks.size() - 1);
                 TextBlock nextBlock = textBlocks.get(i);
-                if (prejudgeParagraphs(textBlocks, newBlocks, i, leftX, rightX, width)) {
+                if (prejudgeParagraphs(textBlocks, newBlocks, i, leftX, rightX, width, lineArts)) {
                 } else if (isTwoLinesParagraph(previousBlock, nextBlock)) {
                     previousBlock.add(nextBlock.getLines());
                     previousBlock.setTextAlignment(TextAlignment.LEFT);
@@ -624,7 +665,7 @@ public class ParagraphProcessor {
         return true;
     }
 
-    private static List<TextBlock> detectParagraphsWithRightAlignments(List<TextBlock> textBlocks, double leftX, double rightX, double width) {
+    private static List<TextBlock> detectParagraphsWithRightAlignments(List<TextBlock> textBlocks, double leftX, double rightX, double width, List<LineArtChunk> lineArts) {
         List<TextBlock> newBlocks = new ArrayList<>();
         if (!textBlocks.isEmpty()) {
             newBlocks.add(textBlocks.get(0));
@@ -633,7 +674,7 @@ public class ParagraphProcessor {
             for (int i = 1; i < textBlocks.size(); i++) {
                 TextBlock previousBlock = newBlocks.get(newBlocks.size() - 1);
                 TextBlock nextBlock = textBlocks.get(i);
-                if (prejudgeParagraphs(textBlocks, newBlocks, i, leftX, rightX, width)) {
+                if (prejudgeParagraphs(textBlocks, newBlocks, i, leftX, rightX, width, lineArts)) {
                 } else if (areLinesOfParagraphsWithRightAlignments(previousBlock, nextBlock)) {
                     previousBlock.add(nextBlock.getLines());
                     previousBlock.setTextAlignment(TextAlignment.RIGHT);
@@ -686,7 +727,7 @@ public class ParagraphProcessor {
         return newBlocks;
     }
 
-    private static List<TextBlock> processOtherLines(List<TextBlock> textBlocks, double leftX, double rightX, double width) {
+    private static List<TextBlock> processOtherLines(List<TextBlock> textBlocks, double leftX, double rightX, double width, List<LineArtChunk> lineArts) {
         List<TextBlock> newBlocks = new ArrayList<>();
         if (!textBlocks.isEmpty()) {
             newBlocks.add(textBlocks.get(0));
@@ -695,7 +736,7 @@ public class ParagraphProcessor {
             for (int i = 1; i < textBlocks.size(); i++) {
                 TextBlock previousBlock = newBlocks.get(newBlocks.size() - 1);
                 TextBlock nextBlock = textBlocks.get(i);
-                if (prejudgeParagraphs(textBlocks, newBlocks, i, leftX, rightX, width)) {
+                if (prejudgeParagraphs(textBlocks, newBlocks, i, leftX, rightX, width, lineArts)) {
                 } else if (isOneParagraph(previousBlock, nextBlock)) {
                     previousBlock.add(nextBlock.getLines());
                 } else {
