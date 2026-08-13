@@ -842,7 +842,6 @@ public class DocumentProcessor {
                 List<BoundingBox> pageBoxes = new ArrayList<>();
                 try {
                     PDPage page = boxDocument.getPage(pageNumber);
-                    float pageHeight = page.getMediaBox().getHeight();
                     for (GetDrawings.Drawing drawing : GetDrawings.getDrawings(page, pageNumber)) {
                         if (drawing.type != GetDrawings.PaintType.FILL
                                 && drawing.type != GetDrawings.PaintType.FILL_STROKE) {
@@ -851,9 +850,15 @@ public class DocumentProcessor {
                         if (!drawing.closePath || drawing.rect == null) {
                             continue;
                         }
+                        // PDFBox returns coordinates in PDF user space: origin at the
+                        // bottom-left, y increasing upward.  rect.y0 is therefore the
+                        // bottom edge and rect.y1 the top edge; no pageHeight flip is
+                        // needed.  Previously the values were mirrored, which moved
+                        // fallback arrowhead fills to the wrong side of the page and
+                        // made the PDFBox fallback fail for merged arrowheads.
                         pageBoxes.add(new BoundingBox(pageNumber,
-                                drawing.rect.x0, pageHeight - drawing.rect.y1,
-                                drawing.rect.x1, pageHeight - drawing.rect.y0));
+                                drawing.rect.x0, drawing.rect.y0,
+                                drawing.rect.x1, drawing.rect.y1));
                     }
                 } catch (IOException e) {
                     LOGGER.log(Level.WARNING, "Failed to extract fill drawings for page " + (pageNumber + 1), e);
