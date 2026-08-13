@@ -232,10 +232,11 @@ public class FlowchartProcessor {
             }
         }
         if (totalCells < REGULAR_TABLE_CELL_THRESHOLD) {
-            return false;
+            double clusterArea = cluster.boundingBox.getArea();
+            return clusterArea > 0 && tableArea / clusterArea > REGULAR_TABLE_AREA_RATIO;
+        } else {
+            return true;
         }
-        double clusterArea = cluster.boundingBox.getArea();
-        return clusterArea > 0 && tableArea / clusterArea > REGULAR_TABLE_AREA_RATIO;
     }
 
     private static final class Cluster {

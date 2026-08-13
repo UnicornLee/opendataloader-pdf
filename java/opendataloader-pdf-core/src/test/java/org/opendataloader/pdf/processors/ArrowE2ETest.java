@@ -24,7 +24,7 @@ class ArrowE2ETest {
 
     @Test
     void arrowOneHeadRecoveredFromPdfBoxFill() throws Exception {
-        String pdf = "D:\\Code\\JavaCode\\opendataloader-pdf\\docs\\pdf\\202302281677505819604328-84(流程图).pdf";
+        String pdf = "D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202302281677505819604328-84(流程图).pdf";
         DocumentProcessor.preprocessing(pdf, new Config());
         StaticLayoutContainers.clearContainers();
         IDocument doc = StaticContainers.getDocument();
@@ -71,7 +71,7 @@ class ArrowE2ETest {
     void arrowOn83StillRecognized() throws Exception {
         // -83 has its arrowhead as a bbox-only artifact chunk (not merged), so the
         // artifact path runs first and must remain unchanged by the fill fallback.
-        String pdf = "D:\\Code\\JavaCode\\opendataloader-pdf\\docs\\pdf\\202302281677505819604328-83(流程图).pdf";
+        String pdf = "D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202302281677505819604328-83(流程图).pdf";
         DocumentProcessor.preprocessing(pdf, new Config());
         StaticLayoutContainers.clearContainers();
         IDocument doc = StaticContainers.getDocument();
