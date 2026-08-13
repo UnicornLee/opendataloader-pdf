@@ -170,9 +170,9 @@ public class JsonWriter {
             List<Map<String, Object>> data = (List<Map<String, Object>>) map.get(JsonName.DATA);
 
             if (data != null) {
-                resolveSelfBookmarkRelatedIds(mapper, map, data);
-                CatalogBookmarkProcessor.CatalogResult catalogResult =
-                    CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, config);
+                    resolveSelfBookmarkRelatedIds(mapper, map, data);
+                    CatalogBookmarkProcessor.CatalogResult catalogResult =
+                        CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, config);
                 List<Bookmark> catalogBookmarks = catalogResult.getBookmarks();
                 int catalogStartPage = catalogResult.getStartPage();
                 int catalogEndPage = catalogResult.getEndPage();
@@ -818,6 +818,7 @@ public class JsonWriter {
                 List<Map<String, Object>> data = (List<Map<String, Object>>) map.get(JsonName.DATA);
                 if (data != null) {
                     resolveSelfBookmarkRelatedIds(mapper, map, data);
+                    repairSelfBookmarkRelatedPageNums(mapper, map, data);
                     CatalogBookmarkProcessor.CatalogResult catalogResult =
                         CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, config);
                     List<Bookmark> catalogBookmarks = catalogResult.getBookmarks();
@@ -1133,6 +1134,22 @@ public class JsonWriter {
         }
         List<Bookmark> selfBookmarks = mapper.convertValue(selfObj, new TypeReference<List<Bookmark>>() {});
         CatalogBookmarkProcessor.resolveSelfBookmarkRelatedIds(selfBookmarks, data);
+        map.put("self_bookmarks", selfBookmarks);
+    }
+
+    /**
+     * 修复 self_bookmarks 中 page_num 为 0 的节点：page_num=0 占比超过 30% 直接清空，
+     * 否则按 DFS 先序在前后锚点范围内做内容匹配补齐 page_num 与 related_id，
+     * 未命中则用 prev.pageNum+1（或 1）兜底。
+     */
+    private static void repairSelfBookmarkRelatedPageNums(ObjectMapper mapper, Map<String, Object> map,
+                                                          List<Map<String, Object>> data) {
+        Object selfObj = map.get("self_bookmarks");
+        if (!(selfObj instanceof List)) {
+            return;
+        }
+        List<Bookmark> selfBookmarks = mapper.convertValue(selfObj, new TypeReference<List<Bookmark>>() {});
+        CatalogBookmarkProcessor.repairSelfBookmarkPageNums(selfBookmarks, data);
         map.put("self_bookmarks", selfBookmarks);
     }
 
