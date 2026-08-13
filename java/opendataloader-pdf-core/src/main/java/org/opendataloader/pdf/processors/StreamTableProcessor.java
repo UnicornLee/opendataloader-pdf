@@ -26,12 +26,19 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalDouble;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 public class StreamTableProcessor {
 
     private static final Logger LOGGER = Logger.getLogger(StreamTableProcessor.class.getCanonicalName());
+
+    /** Maximum number of attempts (initial + retries) when calling Paddle OCR. */
+    private static final int PADDLE_MAX_RETRIES = 3;
+
+    /** Sleep duration between failed Paddle OCR attempts, in seconds. */
+    private static final long PADDLE_RETRY_SLEEP_SECONDS = 3L;
 
     public static List<IObject> processStreamTables(String pdfPath, List<IObject> contents, int pageNumber, double width, double height, String paddleUrl) throws IOException {
         // 1. 先将文本信息按行进行聚合
@@ -46,8 +53,13 @@ public class StreamTableProcessor {
 //            File singlePagePdfFile = extractSinglePagePdf(pdfPath, pageNumber);
             // 对该页整页截图，生成图片
             File singlePageImageFile = extractSinglePageImage(pdfPath, pageNumber);
-            // 发送单页pdf到大模型进行内容识别
-            TextInOcrAnalysisResultDto textInOcrAnalysisResultDto = PaddleOcrProcessor.getPaddleResponse(singlePageImageFile, 1, paddleUrl);
+            // 发送单页pdf到大模型进行内容识别（带重试）
+            TextInOcrAnalysisResultDto textInOcrAnalysisResultDto = callPaddleWithRetry(singlePageImageFile, 1, paddleUrl, pageNumber, pdfPath);
+            if (textInOcrAnalysisResultDto == null) {
+                // 重试全部失败：删除临时文件并返回原始 contents，不抛异常
+                singlePageImageFile.delete();
+                return new ArrayList<>(contents);
+            }
             PageItemResultDto pageItemResultDto = PaddleOcrResultUtils.generateJsonResultByTextInOcrAnalysisResultDto(singlePageImageFile, textInOcrAnalysisResultDto, width, height, pageNumber);
             singlePageImageFile.delete();
             // // 5. 根据识别回来的内容替换无线表格的部分
@@ -55,6 +67,41 @@ public class StreamTableProcessor {
         }
 
         return new ArrayList<>(contents);
+    }
+
+    /**
+     * Wraps {@link PaddleOcrProcessor#getPaddleResponse} with retry logic: on
+     * failure, sleeps {@value #PADDLE_RETRY_SLEEP_SECONDS} seconds and retries up
+     * to {@value #PADDLE_MAX_RETRIES} times in total. If every attempt fails,
+     * logs an {@code ERROR}-level message and returns {@code null} without
+     * propagating the exception.
+     */
+    private static TextInOcrAnalysisResultDto callPaddleWithRetry(File singlePageImageFile, int fileType,
+                                                                  String paddleUrl, int pageNumber, String pdfPath) {
+        IOException lastException = null;
+        for (int attempt = 1; attempt <= PADDLE_MAX_RETRIES; attempt++) {
+            try {
+                return PaddleOcrProcessor.getPaddleResponse(singlePageImageFile, fileType, paddleUrl);
+            } catch (IOException e) {
+                lastException = e;
+                LOGGER.log(Level.WARNING,
+                    "Paddle OCR call failed (attempt " + attempt + "/" + PADDLE_MAX_RETRIES
+                        + ") for page " + pageNumber + " of {" + pdfPath + "}", e);
+                if (attempt < PADDLE_MAX_RETRIES) {
+                    try {
+                        Thread.sleep(PADDLE_RETRY_SLEEP_SECONDS * 1000L);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        LOGGER.log(Level.WARNING, "Paddle OCR retry sleep interrupted", ie);
+                        break;
+                    }
+                }
+            }
+        }
+        LOGGER.log(Level.SEVERE,
+            "Paddle OCR call failed after " + PADDLE_MAX_RETRIES + " attempts for page "
+                + pageNumber + " of {" + pdfPath + "}; skipping stream-table replacement", lastException);
+        return null;
     }
 
     private static List<IObject> replaceStreamTables(PageItemResultDto pageItemResultDto, List<IObject> contents) {
