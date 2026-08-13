@@ -615,9 +615,40 @@ public class ShapeRecognizer {
     }
 
     private static boolean isConnectorLine(LineChunk line, List<ShapeChunk> existingShapes) {
+        BoundingBox shaft = line.getBoundingBox();
         ShapeChunk startShape = findShapeNearPoint(line.getStartX(), line.getStartY(), existingShapes);
         ShapeChunk endShape = findShapeNearPoint(line.getEndX(), line.getEndY(), existingShapes);
-        return startShape != null && endShape != null && startShape != endShape;
+        if (startShape == null || endShape == null || startShape == endShape) {
+            return false;
+        }
+        // A single line whose bbox lies fully inside another shape's bbox is an internal
+        // structural line of that shape (e.g. a table row separator running between two
+        // opposite table borders), not a connector between two distinct shapes. The
+        // two endpoints merely happen to land within CONNECTOR_MARGIN of *different*
+        // shapes (the left table edge vs the right outline polyline), but the line
+        // itself does not bridge anything — it is contained by a single spanning shape.
+        if (shaft != null && !shaft.isEmpty() && isContainedInAnyShape(shaft, existingShapes)) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Returns true when the given bbox is fully contained (including coincident
+     * edges) by any shape already on the page.
+     */
+    private static boolean isContainedInAnyShape(BoundingBox shaft, List<ShapeChunk> shapes) {
+        for (ShapeChunk shape : shapes) {
+            BoundingBox box = shape.getBoundingBox();
+            if (box != null && !box.isEmpty()
+                    && box.getLeftX() <= shaft.getLeftX()
+                    && box.getRightX() >= shaft.getRightX()
+                    && box.getBottomY() <= shaft.getBottomY()
+                    && box.getTopY() >= shaft.getTopY()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static ShapeChunk findShapeNearPoint(double x, double y, List<ShapeChunk> shapes) {
