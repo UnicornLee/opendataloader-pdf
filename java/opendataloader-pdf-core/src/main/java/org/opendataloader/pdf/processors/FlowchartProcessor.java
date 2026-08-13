@@ -93,43 +93,48 @@ public class FlowchartProcessor {
             if (cluster == null) {
                 continue;
             }
-            if (isFlowchartCluster(cluster)) {
-                BoundingBox screenshotBox = expandHorizontally(cluster.boundingBox, SCREENSHOT_HORIZONTAL_MARGIN,
-                        SCREENSHOT_VERTICAL_TOLERANCE);
-                List<IObject> absorbedContents = new ArrayList<>(cluster.collectedContents);
-                List<IObject> absorbedShapes = new ArrayList<>(group);
-                // Absorb any later shape groups that intersect the screenshot area so the
-                // whole connected diagram is captured as one image. Absorbed groups are
-                // skipped by the outer loop.
-                boolean expanded;
-                do {
-                    expanded = false;
-                    for (int j = i + 1; j < groupedShapeChunks.size(); j++) {
-                        if (skipped[j]) {
-                            continue;
-                        }
-                        List<IObject> laterGroup = groupedShapeChunks.get(j);
-                        if (laterGroup == null || laterGroup.isEmpty()) {
-                            continue;
-                        }
-                        BoundingBox laterBox = BoundingBoxGroupUtils.unionShapeBoundingBoxes(laterGroup, pageNumber);
-                        if (laterBox == null || !screenshotBox.overlaps(laterBox)) {
-                            continue;
-                        }
-                        Cluster laterCluster = collectCluster(pageContents, laterGroup, pageNumber);
-                        if (laterCluster != null) {
-                            screenshotBox.union(laterCluster.boundingBox);
-                            absorbedContents.addAll(laterCluster.collectedContents);
-                        }
-                        absorbedShapes.addAll(laterGroup);
-                        skipped[j] = true;
-                        expanded = true;
+            // Absorb any later shape groups that intersect the cluster area so the
+            // whole connected diagram is evaluated (and potentially captured) as one
+            // image. Absorbing before the flowchart decision prevents a single small
+            // group from being rejected when the merged diagram would qualify.
+            List<IObject> mergedShapes = new ArrayList<>(group);
+            List<IObject> mergedContents = new ArrayList<>(cluster.collectedContents);
+            BoundingBox mergedBox = new BoundingBox(cluster.boundingBox);
+            BoundingBox screenshotBox = expandHorizontally(mergedBox, SCREENSHOT_HORIZONTAL_MARGIN,
+                    SCREENSHOT_VERTICAL_TOLERANCE);
+            boolean expanded;
+            do {
+                expanded = false;
+                for (int j = i + 1; j < groupedShapeChunks.size(); j++) {
+                    if (skipped[j]) {
+                        continue;
                     }
-                } while (expanded);
+                    List<IObject> laterGroup = groupedShapeChunks.get(j);
+                    if (laterGroup == null || laterGroup.isEmpty()) {
+                        continue;
+                    }
+                    BoundingBox laterBox = BoundingBoxGroupUtils.unionShapeBoundingBoxes(laterGroup, pageNumber);
+                    if (laterBox == null || !screenshotBox.overlaps(laterBox)) {
+                        continue;
+                    }
+                    Cluster laterCluster = collectCluster(pageContents, laterGroup, pageNumber);
+                    if (laterCluster != null) {
+                        screenshotBox.union(laterCluster.boundingBox);
+                        mergedBox.union(laterCluster.boundingBox);
+                        mergedContents.addAll(laterCluster.collectedContents);
+                    }
+                    mergedShapes.addAll(laterGroup);
+                    skipped[j] = true;
+                    expanded = true;
+                }
+            } while (expanded);
+
+            Cluster mergedCluster = new Cluster(mergedShapes, mergedContents, mergedBox);
+            if (isFlowchartCluster(mergedCluster)) {
                 LOGGER.log(Level.INFO, "Page {0}: detected flowchart cluster with screenshot bbox {1}",
                         new Object[]{pageNumber + 1, screenshotBox});
-                pageContents.removeAll(absorbedContents);
-                pageContents.removeAll(absorbedShapes);
+                pageContents.removeAll(mergedContents);
+                pageContents.removeAll(mergedShapes);
                 ImageChunk imageChunk = new ImageChunk(screenshotBox);
                 imagesUtils.saveImageChunk(imageChunk);
                 pageContents.add(imageChunk);
@@ -218,22 +223,34 @@ public class FlowchartProcessor {
         if (cluster.tableCount == 0) {
             return false;
         }
-        int totalCells = 0;
-        double tableArea = 0.0;
+        int maxCells = 0;
+        double maxTableArea = 0.0;
         for (IObject content : cluster.collectedContents) {
             if (content instanceof TableBorder) {
                 TableBorder table = (TableBorder) content;
-                totalCells += table.getNumberOfRows() * table.getNumberOfColumns();
-                tableArea += table.getBoundingBox().getArea();
+                int currentCells = table.getNumberOfRows() * table.getNumberOfColumns();
+                if (currentCells > maxCells) {
+                    maxCells = currentCells;
+                }
+                double currentTableArea = table.getBoundingBox().getArea();
+                if (currentTableArea > maxTableArea) {
+                    maxTableArea = currentTableArea;
+                }
             } else if (content instanceof Table) {
                 Table table = (Table) content;
-                totalCells += table.getNumberOfRows() * table.getNumberOfColumns();
-                tableArea += table.getBoundingBox().getArea();
+                int currentCells = table.getNumberOfRows() * table.getNumberOfColumns();
+                if (currentCells > maxCells) {
+                    maxCells = currentCells;
+                }
+                double currentTableArea = table.getBoundingBox().getArea();
+                if (currentTableArea > maxTableArea) {
+                    maxTableArea = currentTableArea;
+                }
             }
         }
-        if (totalCells < REGULAR_TABLE_CELL_THRESHOLD) {
+        if (maxCells < REGULAR_TABLE_CELL_THRESHOLD) {
             double clusterArea = cluster.boundingBox.getArea();
-            return clusterArea > 0 && tableArea / clusterArea > REGULAR_TABLE_AREA_RATIO;
+            return clusterArea > 0 && maxTableArea / clusterArea > REGULAR_TABLE_AREA_RATIO;
         } else {
             return true;
         }
