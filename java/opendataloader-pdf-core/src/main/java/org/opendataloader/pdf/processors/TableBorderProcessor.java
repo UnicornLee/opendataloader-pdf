@@ -39,6 +39,17 @@ public class TableBorderProcessor {
 
     private static final double LINE_ART_PERCENT = 0.9;
     private static final double NEIGHBOUR_TABLE_EPSILON = 0.2;
+    /**
+     * When a TextChunk is split by the table boundary (before/after part), the
+     * split part is only added back to the page contents if it does NOT mostly
+     * overlap the table area. A part whose bounding box overlaps the table by
+     * more than this ratio is considered a spurious split — it almost certainly
+     * belongs to a text that sits *on* the table border (e.g. the first
+     * character of a cell's text slightly protruding past the left border due
+     * to floating-point coordinates), and keeping it would duplicate the
+     * character: once inside the cell and once as a stray top-level text.
+     */
+    private static final double SPLIT_PART_TABLE_OVERLAP_RATIO = 0.5;
     /** Minimum overlap (relative to the cell area) for a rectangle ShapeChunk to be
      *  treated as the background color of a table cell. */
     private static final double CELL_BACKGROUND_OVERLAP_THRESHOLD = 0.5;
@@ -90,11 +101,15 @@ public class TableBorderProcessor {
                     if (content instanceof TextChunk) {
                         TextChunk textChunk = (TextChunk) content;
                         TextChunk textChunkPart = getTextChunkPartBeforeTable(textChunk, tableBorder);
-                        if (textChunkPart != null && !textChunkPart.isEmpty() && !textChunkPart.isWhiteSpaceChunk()) {
+                        if (textChunkPart != null && !textChunkPart.isEmpty()
+                                && !textChunkPart.isWhiteSpaceChunk()
+                                && !isSplitPartInsideTable(textChunkPart, tableBorder)) {
                             newContents.add(textChunkPart);
                         }
                         textChunkPart = getTextChunkPartAfterTable(textChunk, tableBorder);
-                        if (textChunkPart != null && !textChunkPart.isEmpty() && !textChunkPart.isWhiteSpaceChunk()) {
+                        if (textChunkPart != null && !textChunkPart.isEmpty()
+                                && !textChunkPart.isWhiteSpaceChunk()
+                                && !isSplitPartInsideTable(textChunkPart, tableBorder)) {
                             newContents.add(textChunkPart);
                         }
                     }
@@ -314,6 +329,17 @@ public class TableBorderProcessor {
 
     private static TextChunk getTextChunkPartForTableCell(TextChunk textChunk, TableBorderCell cell) {
         return TextChunkUtils.getTextChunkPartForRange(textChunk, cell.getLeftX(), cell.getRightX(), true);
+    }
+
+    /**
+     * Returns true when the given split part of a TextChunk overlaps the table
+     * area to an extent that suggests it is content belonging to the table
+     * itself rather than genuine text before/after it. Used to drop spurious
+     * before/after splits for text that merely touches the table border.
+     */
+    private static boolean isSplitPartInsideTable(TextChunk part, TableBorder table) {
+        return part.getBoundingBox().getIntersectionPercent(table.getBoundingBox())
+                > SPLIT_PART_TABLE_OVERLAP_RATIO;
     }
 
     public static TextChunk getTextChunkPartBeforeTable(TextChunk textChunk, TableBorder table) {
