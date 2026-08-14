@@ -86,6 +86,22 @@ public class PageBookmarkProcessor {
      */
     private static final int MAX_ENTRY_TEXT_LENGTH = 200;
 
+    /**
+     * Filter threshold for the period-end consistency rule applied to L2/L3
+     * candidates that share the same prefix template: keep the majority side
+     * only when it holds strictly more than this fraction of candidates.
+     */
+    private static final double PERIOD_FILTER_RATIO = 0.8;
+
+    /**
+     * Minimum candidate count required to apply the period-end filter. Small
+     * samples are skipped to avoid unstable 80/20 splits over too few items.
+     */
+    private static final int MIN_CANDIDATES_FOR_PERIOD_FILTER = 3;
+
+    /** Chinese full-stop / period "\u3002". */
+    private static final char CHINESE_PERIOD = '。';
+
     private enum NumberSystem {
         ARABIC, CHINESE
     }
@@ -215,6 +231,11 @@ public class PageBookmarkProcessor {
         double averageLeftX;
         int firstPageIndex;
         double firstTopY;
+        // Number of unique pages occupied by the (cleaned) candidates. Drives
+        // the density signal in selectTemplateForLevel so a sparse "one per
+        // section" L2 candidate set beats a dense "many per page" L3 set even
+        // when the L3 set has a larger absolute count.
+        int pageSpan;
 
         Group(TemplateKey templateKey) {
             this.templateKey = templateKey;
@@ -232,6 +253,11 @@ public class PageBookmarkProcessor {
                 .filter(c -> c.pageIndex == firstPageIndex)
                 .mapToDouble(c -> c.topY)
                 .max().orElse(0.0);
+            Set<Integer> uniquePages = new HashSet<>();
+            for (Candidate c : candidates) {
+                uniquePages.add(c.pageIndex);
+            }
+            pageSpan = uniquePages.size();
         }
     }
 
@@ -391,7 +417,7 @@ public class PageBookmarkProcessor {
         }
         List<Candidate> cleaned = (level == 1)
             ? cleanCandidates(selected)
-            : cleanCandidatesLocal(selected);
+            : cleanCandidatesLocal(selected, level);
         List<Integer> indices = new ArrayList<>();
         for (Candidate c : cleaned) {
             int idx = candidates.indexOf(c);
@@ -479,7 +505,7 @@ public class PageBookmarkProcessor {
 
         List<Candidate> cleaned = (level == 1)
             ? cleanCandidates(selectedCandidates)
-            : cleanCandidatesLocal(selectedCandidates);
+            : cleanCandidatesLocal(selectedCandidates, level);
         if (cleaned.isEmpty()) {
             return Collections.emptyList();
         }
@@ -557,7 +583,7 @@ public class PageBookmarkProcessor {
                 cleaned = cleanCandidates(group.candidates);
             } else {
                 // Deeper levels: allow a local consecutive run starting anywhere.
-                cleaned = cleanCandidatesLocal(group.candidates);
+                cleaned = cleanCandidatesLocal(group.candidates, level);
                 if (cleaned.isEmpty()) {
                     continue;
                 }
@@ -579,6 +605,28 @@ public class PageBookmarkProcessor {
             int fontCmp = Double.compare(b.averageFontSize, a.averageFontSize);
             if (fontCmp != 0) {
                 return fontCmp;
+            }
+            // Density-before-count is applied only at L2: a template whose
+            // cleaned candidates are spread across many pages (one entry per
+            // section, ~1 per page) is a more plausible L2 chapter sub-heading
+            // than a template that packs many entries on each page (a dense
+            // L3+ body pattern such as "(一)、(二)、(三)、..." appearing 3-5
+            // times per page). Skipping this at L3+ preserves the existing
+            // "prefer the wider run" behavior, because at L3 the sparser
+            // template may simply be a short local run that should yield to a
+            // longer one on the same page (see
+            // testLevel3ReusesLevel2TemplateWhenSameTemplateLivesInRange).
+            if (level == 2) {
+                double densityA = a.pageSpan > 0
+                    ? (double) a.candidates.size() / a.pageSpan
+                    : Double.POSITIVE_INFINITY;
+                double densityB = b.pageSpan > 0
+                    ? (double) b.candidates.size() / b.pageSpan
+                    : Double.POSITIVE_INFINITY;
+                int densityCmp = Double.compare(densityA, densityB);
+                if (densityCmp != 0) {
+                    return densityCmp;
+                }
             }
             // Count-before-indent: a template that survives cleaning with more
             // entries is more likely to be the real chapter spine than a
@@ -676,6 +724,66 @@ public class PageBookmarkProcessor {
     }
 
     /**
+     * For a single-template candidate group (e.g. all "一、.." or all "(一)..."),
+     * drop the minority side based on whether {@code c.fullText} ends with
+     * the Chinese full-stop {@link #CHINESE_PERIOD}.
+     *
+     * <p>Uses {@code fullText} (the joined paragraph) rather than {@code text}
+     * (the first line) because body paragraphs split across multiple text
+     * chunks keep their trailing "。" on the last line; checking only the
+     * first line would miss it and let the residue leak into the candidate
+     * set.</p>
+     *
+     * <p>Skips the filter when neither side strictly exceeds
+     * {@link #PERIOD_FILTER_RATIO}, or when filtering would leave the group
+     * empty (defensive fallback to the original list). The caller already
+     * gates on {@link #MIN_CANDIDATES_FOR_PERIOD_FILTER} so this method can
+     * assume {@code candidates.size() >= 3}.</p>
+     */
+    private static List<Candidate> applyPeriodEndFilter(List<Candidate> candidates) {
+        int total = candidates.size();
+        int endsWithPeriod = 0;
+        // Check c.fullText (joined paragraph text), NOT c.text (first line only):
+        // body paragraphs split across multiple text chunks (e.g. a long "三、（十
+        // 四）和（十八）..." spread over two lines) keep the period on the last
+        // line; c.text only sees the first line and would miss the trailing "。".
+        for (Candidate c : candidates) {
+            String fullText = c.fullText;
+            if (fullText != null && !fullText.isEmpty()
+                    && fullText.charAt(fullText.length() - 1) == CHINESE_PERIOD) {
+                endsWithPeriod++;
+            }
+        }
+        double periodRatio = (double) endsWithPeriod / total;
+
+        List<Candidate> filtered;
+        if (periodRatio > PERIOD_FILTER_RATIO) {
+            // >80% end with period -> drop the minority that do NOT.
+            filtered = new ArrayList<>();
+            for (Candidate c : candidates) {
+                String fullText = c.fullText;
+                if (fullText != null && !fullText.isEmpty()
+                        && fullText.charAt(fullText.length() - 1) == CHINESE_PERIOD) {
+                    filtered.add(c);
+                }
+            }
+        } else if ((total - endsWithPeriod) > total * PERIOD_FILTER_RATIO) {
+            // >80% do NOT end with period -> drop the minority that DO.
+            filtered = new ArrayList<>();
+            for (Candidate c : candidates) {
+                String fullText = c.fullText;
+                if (fullText == null || fullText.isEmpty()
+                        || fullText.charAt(fullText.length() - 1) != CHINESE_PERIOD) {
+                    filtered.add(c);
+                }
+            }
+        } else {
+            return candidates; // no clear majority -> keep original
+        }
+        return filtered.isEmpty() ? candidates : filtered;
+    }
+
+    /**
      * Cleans a list of candidates of the same template within a parent range
      * by grouping them into maximal runs of consecutive values, chaining runs
      * whose value ranges abut (previous.max + 1 == next.min), and selecting
@@ -684,8 +792,11 @@ public class PageBookmarkProcessor {
      *
      * <p>Unlike {@link #cleanCandidates}, the run may start at any value,
      * allowing headings to continue their numbering across parent sections.</p>
+     *
+     * @param level depth at which the cleaning runs (1=L1, 2=L2, 3=L3);
+     *              only L2+ applies the period-end consistency filter.
      */
-    private static List<Candidate> cleanCandidatesLocal(List<Candidate> candidates) {
+    private static List<Candidate> cleanCandidatesLocal(List<Candidate> candidates, int level) {
         if (candidates.isEmpty()) {
             return Collections.emptyList();
         }
@@ -695,6 +806,20 @@ public class PageBookmarkProcessor {
         sorted.sort(Comparator
             .comparingInt((Candidate c) -> c.pageIndex)
             .thenComparing((Candidate c) -> -c.topY));
+
+        // Step 1.5: Period-end consistency filter for L2+.
+        //
+        // When the same prefix template carries many candidates (e.g. all
+        // "一、.." or all "(一)..."), they tend to end consistently: either
+        // with a trailing "。" or without one. A small minority of body
+        // paragraphs that mimic the prefix (e.g. "（十四）和（十八）...") can
+        // leak into the candidate set; they usually break the period-end
+        // pattern. Filter the minority when one side strictly exceeds the
+        // 80% threshold, and only when the candidate count is large enough
+        // to make the ratio meaningful.
+        if (level >= 2 && sorted.size() >= MIN_CANDIDATES_FOR_PERIOD_FILTER) {
+            sorted = applyPeriodEndFilter(sorted);
+        }
 
         // Step 2: Group into consecutive runs. Each run is a maximal sequence
         // where every candidate's value is +1 from the previous one. A new run

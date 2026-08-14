@@ -1163,4 +1163,245 @@ public class PageBookmarkProcessorTest {
                 "L3 still prefers a deeper template with strictly more candidates");
     }
 
+    /**
+     * Mirrors the structure of {@code docs/pdf/202304271682505621075149.pdf}'s
+     * "第十节 财务报告" range: a sparse {@code 一、~十六、} candidate set sits
+     * alongside a much denser {@code (一)~(八十五)} candidate set. Without
+     * the density-before-count fix, the L2 selector picks the dense
+     * ascii_paren template (more entries win by count desc) and the L2
+     * children start with "(一)货币资金" instead of the expected "一、审计
+     * 意见". With the fix, the sparser cn_comma template wins.
+     */
+    @Test
+    public void testLevel2PicksSparseCnCommaOverDenseParenChain() {
+        String[] cnCommaValues = {"一", "二", "三", "四", "五", "六", "七", "八",
+                                   "九", "十", "十一", "十二", "十三", "十四", "十五", "十六"};
+        String[] asciiParenValues = {"一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
+                                      "十一", "十二", "十三", "十四", "十五", "十六",
+                                      "十七", "十八", "十九", "二十", "二十一",
+                                      "二十二", "二十三", "二十四", "二十五", "二十六",
+                                      "二十七", "二十八", "二十九", "三十", "三十一",
+                                      "三十二", "三十三", "三十四", "三十五"};
+
+        List<List<IObject>> contents = new ArrayList<>();
+        // Page 0: L1
+        contents.add(new ArrayList<>());
+        contents.get(0).add(createParagraph("第1章 测试", 0, 50, 1100, 1090, 20.0f));
+
+        // L2 cn_comma candidates: 一、A0 .. 十六、A15, one per page (pages 1-16),
+        // leftX=50 (chapter-sub-heading indent), font 12. Density ≈ 1.0.
+        for (int i = 0; i < cnCommaValues.length; i++) {
+            int pageIdx = i + 1;
+            while (contents.size() <= pageIdx) {
+                contents.add(new ArrayList<>());
+            }
+            contents.get(pageIdx).add(createParagraph(
+                    cnCommaValues[i] + "、A" + i, pageIdx, 50, 1000 - i * 5, 990 - i * 5, 12.0f));
+        }
+
+        // L3 ascii_paren noise: (一)X0 .. (三十五)X34, two per page (pages 5-22),
+        // leftX=100 (deeper indent), font 12. Density ≈ 1.94 — denser than L2.
+        for (int i = 0; i < asciiParenValues.length; i++) {
+            int pageIdx = 5 + i / 2;
+            int orderInPage = i % 2;
+            while (contents.size() <= pageIdx) {
+                contents.add(new ArrayList<>());
+            }
+            contents.get(pageIdx).add(createParagraph(
+                    "(" + asciiParenValues[i] + ")X" + i, pageIdx, 100,
+                    800 - orderInPage * 10, 790 - orderInPage * 10, 12.0f));
+        }
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(1, bookmarks.size(), "Only one L1 chapter");
+        Bookmark chapter = bookmarks.get(0);
+        Assertions.assertEquals("第1章 测试", chapter.getText());
+
+        // L2 must pick the sparse cn_comma template (16 items, density 1.0)
+        // over the dense ascii_paren template (35 items, density ≈ 1.94).
+        Assertions.assertEquals(16, chapter.getChildren().size(),
+                "L2 must prefer the sparser cn_comma template (one entry per page) "
+                        + "over the denser ascii_paren template (two entries per page), "
+                        + "even though ascii_paren has more entries");
+        List<String> l2Texts = new ArrayList<>();
+        for (Bookmark child : chapter.getChildren()) {
+            l2Texts.add(child.getText());
+        }
+        Assertions.assertEquals("一、A0", chapter.getChildren().get(0).getText(),
+                "First L2 child must use the cn_comma template, not ascii_paren");
+        Assertions.assertEquals("十六、A15", chapter.getChildren().get(15).getText(),
+                "Last L2 child must use the cn_comma template");
+        // No ascii_paren prefix should leak into the L2 layer.
+        for (String text : l2Texts) {
+            Assertions.assertFalse(text.startsWith("("),
+                    "L2 child must not come from the ascii_paren template: " + text);
+        }
+    }
+
+    /**
+     * When L2 candidates from multiple templates have the same density
+     * (~one entry per page), the new density-before-count criterion must
+     * tie and fall through to count desc — preserving the pre-fix behavior
+     * for "equally sparse" sets.
+     */
+    @Test
+    public void testLevel2FallsBackToCountWhenDensityTies() {
+        String[] l2Values = {"一", "二", "三", "四", "五"};
+        String[] l3Values = {"一", "二", "三", "四", "五"};
+
+        List<List<IObject>> contents = new ArrayList<>();
+        // Page 0: L1.
+        contents.add(new ArrayList<>());
+        contents.get(0).add(createParagraph("第1章 测试", 0, 50, 1100, 1090, 20.0f));
+
+        // L2 cn_comma candidates: 5 items, one per page (pages 1-5), density 1.0.
+        for (int i = 0; i < l2Values.length; i++) {
+            int pageIdx = i + 1;
+            while (contents.size() <= pageIdx) {
+                contents.add(new ArrayList<>());
+            }
+            contents.get(pageIdx).add(createParagraph(
+                    l2Values[i] + "、A" + i, pageIdx, 50, 1000 - i * 5, 990 - i * 5, 12.0f));
+        }
+
+        // L3 ascii_paren noise: also 5 items, one per page (pages 2-6), density 1.0.
+        for (int i = 0; i < l3Values.length; i++) {
+            int pageIdx = i + 2;
+            while (contents.size() <= pageIdx) {
+                contents.add(new ArrayList<>());
+            }
+            contents.get(pageIdx).add(createParagraph(
+                    "(" + l3Values[i] + ")X" + i, pageIdx, 100, 800 - i * 10, 790 - i * 10, 12.0f));
+        }
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(1, bookmarks.size(), "Only one L1 chapter");
+        Bookmark chapter = bookmarks.get(0);
+        // Both groups have count=5 and density=1.0. The tie falls through to
+        // indent (cn_comma leftX=50 vs ascii_paren leftX=100): cn_comma wins
+        // by the smaller indent. Either outcome is acceptable as long as the
+        // pick is one of the two templates and produces 5 children.
+        Assertions.assertEquals(5, chapter.getChildren().size(),
+                "When densities tie, the selector must fall through to count/indent/page/topY and still produce a valid L2 set");
+    }
+
+    /**
+     * When >80% of L2 candidates that share the same prefix template end with
+     * a Chinese full-stop "。", the minority that do NOT must be dropped so
+     * body-paragraph residue (e.g. "（十四）和（十八）...") does not surface
+     * as a bookmark entry.
+     */
+    @Test
+    public void testL2DropsMinorityEndingWithPeriod() {
+        // L1 + 10 L2 candidates: 9 with "。" (90%), 1 without (10%).
+        // (9/10 = 0.9 > 0.8 strictly, so filter triggers.)
+        List<List<IObject>> contents = new ArrayList<>();
+        contents.add(new ArrayList<>());
+        contents.get(0).add(createParagraph("第1章 测试", 0, 50, 1100, 1090, 20.0f));
+
+        String[] values = {"一", "二", "三", "四", "五", "六", "七", "八", "九", "十"};
+        boolean[] hasPeriod = {true, true, true, true, true, true, true, true, true, false};
+        for (int i = 0; i < values.length; i++) {
+            int pageIdx = i + 1;
+            while (contents.size() <= pageIdx) {
+                contents.add(new ArrayList<>());
+            }
+            String text = values[i] + "、标题" + i + (hasPeriod[i] ? "。" : "");
+            contents.get(pageIdx).add(createParagraph(
+                    text, pageIdx, 50, 1000 - i * 5, 990 - i * 5, 12.0f));
+        }
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(1, bookmarks.size());
+        Bookmark chapter = bookmarks.get(0);
+
+        // Filter drops 十 (no period); remaining 9 should be present.
+        Assertions.assertEquals(9, chapter.getChildren().size(),
+                "L2 must drop the 1 minority entry that does not end with 。 (10% minority vs 90% majority)");
+
+        List<String> texts = new ArrayList<>();
+        for (Bookmark child : chapter.getChildren()) {
+            texts.add(child.getText());
+        }
+        Assertions.assertFalse(texts.contains("十、标题9"), "Minority no-period entry must be filtered out");
+        Assertions.assertTrue(texts.contains("一、标题0。"), "Majority period entries must be preserved");
+        Assertions.assertTrue(texts.contains("九、标题8。"), "Majority period entries must be preserved");
+    }
+
+    /**
+     * Inverse case: when >80% of L2 candidates do NOT end with "。", the
+     * minority that DO must be dropped. Real chapter sub-headings in financial
+     * reports usually omit the trailing period; a stray paragraph ending with
+     * "。" (e.g. "一、本期实现盈利...。") must not leak into the bookmark set.
+     */
+    @Test
+    public void testL2DropsMinorityNotEndingWithPeriod() {
+        // 10 L2 candidates: 9 without period (90%), 1 with period (10%).
+        // (9/10 = 0.9 > 0.8 strictly, so filter triggers.)
+        List<List<IObject>> contents = new ArrayList<>();
+        contents.add(new ArrayList<>());
+        contents.get(0).add(createParagraph("第1章 测试", 0, 50, 1100, 1090, 20.0f));
+
+        String[] values = {"一", "二", "三", "四", "五", "六", "七", "八", "九", "十"};
+        boolean[] hasPeriod = {false, false, false, false, false, false, false, false, false, true};
+        for (int i = 0; i < values.length; i++) {
+            int pageIdx = i + 1;
+            while (contents.size() <= pageIdx) {
+                contents.add(new ArrayList<>());
+            }
+            String text = values[i] + "、标题" + i + (hasPeriod[i] ? "。" : "");
+            contents.get(pageIdx).add(createParagraph(
+                    text, pageIdx, 50, 1000 - i * 5, 990 - i * 5, 12.0f));
+        }
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(1, bookmarks.size());
+        Bookmark chapter = bookmarks.get(0);
+
+        // Filter drops 十 (with period); remaining 9 should be present.
+        Assertions.assertEquals(9, chapter.getChildren().size(),
+                "L2 must drop the 1 minority entry that ends with 。 (10% minority vs 90% majority)");
+
+        List<String> texts = new ArrayList<>();
+        for (Bookmark child : chapter.getChildren()) {
+            texts.add(child.getText());
+        }
+        Assertions.assertFalse(texts.contains("十、标题9。"), "Minority period entry must be filtered out");
+        Assertions.assertTrue(texts.contains("一、标题0"), "Majority no-period entries must be preserved");
+        Assertions.assertTrue(texts.contains("九、标题8"), "Majority no-period entries must be preserved");
+    }
+
+    /**
+     * When neither side strictly exceeds the 80% threshold (e.g. 60% / 40%),
+     * no clear majority exists and the period-end filter must be skipped to
+     * preserve all candidates.
+     */
+    @Test
+    public void testL2PeriodFilterSkippedWhenNoClearMajority() {
+        // 10 L2 candidates: 6 with period (60%), 4 without (40%). Neither > 80%.
+        List<List<IObject>> contents = new ArrayList<>();
+        contents.add(new ArrayList<>());
+        contents.get(0).add(createParagraph("第1章 测试", 0, 50, 1100, 1090, 20.0f));
+
+        String[] values = {"一", "二", "三", "四", "五", "六", "七", "八", "九", "十"};
+        boolean[] hasPeriod = {true, true, true, true, true, true, false, false, false, false};
+        for (int i = 0; i < values.length; i++) {
+            int pageIdx = i + 1;
+            while (contents.size() <= pageIdx) {
+                contents.add(new ArrayList<>());
+            }
+            String text = values[i] + "、标题" + i + (hasPeriod[i] ? "。" : "");
+            contents.get(pageIdx).add(createParagraph(
+                    text, pageIdx, 50, 1000 - i * 5, 990 - i * 5, 12.0f));
+        }
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(1, bookmarks.size());
+        Bookmark chapter = bookmarks.get(0);
+
+        // Filter skipped -> all 10 candidates preserved.
+        Assertions.assertEquals(10, chapter.getChildren().size(),
+                "When neither period side strictly exceeds 80%, the filter must be skipped and all candidates retained");
+    }
+
 }
