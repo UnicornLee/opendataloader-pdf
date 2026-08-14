@@ -51,6 +51,8 @@ public class FlowchartProcessor {
     /** Vertical tolerance (pt) added to the final flowchart screenshot bbox:
      *  topY is increased by this amount and bottomY is decreased by it. */
     private static final double SCREENSHOT_VERTICAL_TOLERANCE = 1.0;
+    /** Safety cap on the do-while absorption loop to avoid runaway iteration. */
+    private static final int MAX_GROWTH_ITERATIONS = 30;
 
     private static final double MIN_WIDTH = 80.0;
     private static final double MIN_HEIGHT = 40.0;
@@ -103,8 +105,10 @@ public class FlowchartProcessor {
             BoundingBox screenshotBox = expandHorizontally(mergedBox, SCREENSHOT_HORIZONTAL_MARGIN,
                     SCREENSHOT_VERTICAL_TOLERANCE);
             boolean expanded;
+            int iterations = 0;
             do {
                 expanded = false;
+                iterations++;
                 for (int j = i + 1; j < groupedShapeChunks.size(); j++) {
                     if (skipped[j]) {
                         continue;
@@ -127,7 +131,7 @@ public class FlowchartProcessor {
                     skipped[j] = true;
                     expanded = true;
                 }
-            } while (expanded);
+            } while (expanded && iterations < MAX_GROWTH_ITERATIONS);
 
             Cluster mergedCluster = new Cluster(mergedShapes, mergedContents, mergedBox);
             if (isFlowchartCluster(mergedCluster)) {

@@ -10,7 +10,7 @@ import java.util.Map;
 public class DebugSample1 {
     public static void main(String[] args) throws Exception {
         Config config = new Config();
-        config.setOutputFolder("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\tmp_output");
+        config.setOutputFolder("D:\\Code\\JavaCode\\opendataloader-pdf\\tmp_output");
         config.setGenerateMarkdown(true);
         config.getFilterConfig().setHalfWidthToFullWidth(true);
         Map<String, Object> customOptions = new HashMap<>();
@@ -28,7 +28,8 @@ public class DebugSample1 {
         config.setCustomOptions(customOptions);
 
         try {
-            ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202304281682603453761936.pdf", config);
+//            ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf\\docs\\pdf\\202304271682510470028924.pdf", config);
+            ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf\\docs\\pdf\\202304281682603453761936.pdf", config);
             System.out.println("JSON URL / local path: " + result.getJsonUrlOrPath());
             System.out.println("OCR JSON local path: " + result.getOcrJsonLocalPath());
         } catch (Throwable e) {
