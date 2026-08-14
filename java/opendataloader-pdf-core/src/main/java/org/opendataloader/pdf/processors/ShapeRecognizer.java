@@ -122,6 +122,16 @@ public class ShapeRecognizer {
      *  another shape's top edge (or above its bottom edge) still counts. */
     private static final double SHAPE_GROUP_Y_TOLERANCE = 2.0;
 
+    /**
+     * Fallback color assigned to filled rectangles that only surface through the
+     * PDFBox fallback source (e.g. rectangles filled with a {@code /Pattern}
+     * shading/gradient color space whose RGB cannot be resolved by the veraPDF
+     * chunk layer). All such rectangles share the same fallback color so they
+     * are grouped together by {@link #groupByColor} and can form bar-chart
+     * groups; the color itself is only informational metadata.
+     */
+    private static final double[] FALLBACK_FILL_COLOR = new double[]{0.5, 0.7, 0.95};
+
     private ShapeRecognizer() {
         // utility class
     }
@@ -263,6 +273,12 @@ public class ShapeRecognizer {
         }
 
         shapes.addAll(recognizeFilledShapes(pageNumber, filledRects));
+        // Pattern/shading-filled rectangles (e.g. WIND-style gradient bars) are
+        // invisible to the veraPDF artifact layer: SCN_FILL resolves no color for
+        // /Pattern color spaces and, on tagged pages, MCID-nested geometry never
+        // reaches getArtifacts(). The PDFBox fill boxes act as a fallback source
+        // (the same mechanism already used for merged arrowheads).
+        shapes.addAll(recognizeBarChartsFromFillBoxes(pageNumber, fillBoxes, shapes));
         shapes.addAll(recognizePolylines(pageNumber, thinLines));
         // Single-segment lines that bridge two existing shapes are likely arrows/connectors.
         // They are too short to form a polyline on their own but are important for
@@ -333,6 +349,69 @@ public class ShapeRecognizer {
             parts.add(bb);
         }
         return new ShapeChunk(union, shapeType, color, cluster.size(), parts);
+    }
+
+    /**
+     * Detects bar-chart groups from the raw PDFBox fill-box fallback source.
+     *
+     * <p>Pattern- or shading-filled rectangles are invisible to the veraPDF
+     * artifact layer: {@code SCN_FILL} cannot resolve a color for a
+     * {@code /Pattern} color space, and on tagged pages the MCID-nested
+     * geometry never reaches {@code getArtifacts()} at all. PDFBox's
+     * {@code GetDrawings} still reports those closed fills, so this method
+     * turns the fallback boxes into synthetic filled rectangles (the same
+     * "thick line through the rectangle" representation the veraPDF chunk
+     * layer produces) and runs them through the same bar-group validation as
+     * the artifact-layer rectangles.</p>
+     *
+     * <p>Boxes that substantially coincide with an already recognized
+     * rectangle/bar chart shape are dropped first, so geometry veraPDF did
+     * manage to surface (e.g. axis bands) is not duplicated.</p>
+     */
+    private static List<ShapeChunk> recognizeBarChartsFromFillBoxes(int pageNumber,
+                                                                    List<BoundingBox> fillBoxes,
+                                                                    List<ShapeChunk> existingShapes) {
+        if (fillBoxes == null || fillBoxes.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<BoundingBox> candidates = filterShapeCoincidentFills(fillBoxes, existingShapes);
+        if (candidates.size() < MIN_BAR_COUNT) {
+            return Collections.emptyList();
+        }
+        List<LineChunk> rects = new ArrayList<>(candidates.size());
+        for (BoundingBox box : candidates) {
+            if (box == null || box.isEmpty()) {
+                continue;
+            }
+            double w = box.getWidth();
+            double h = box.getHeight();
+            if (w <= 0 || h <= 0) {
+                continue;
+            }
+            if (h >= w) {
+                // Vertical bar: a center line along the bar height, thickness = width.
+                rects.add(LineChunk.createLineChunk(pageNumber,
+                        box.getLeftX() + 0.5 * w, box.getBottomY() + 0.5 * w,
+                        box.getLeftX() + 0.5 * w, box.getTopY() - 0.5 * w,
+                        w, LineChunk.PROJECTING_SQUARE_CAP_STYLE, FALLBACK_FILL_COLOR));
+            } else {
+                // Horizontal bar: a center line along the bar length, thickness = height.
+                rects.add(LineChunk.createLineChunk(pageNumber,
+                        box.getLeftX() + 0.5 * h, box.getBottomY() + 0.5 * h,
+                        box.getRightX() - 0.5 * h, box.getBottomY() + 0.5 * h,
+                        h, LineChunk.PROJECTING_SQUARE_CAP_STYLE, FALLBACK_FILL_COLOR));
+            }
+        }
+        if (rects.size() < MIN_BAR_COUNT) {
+            return Collections.emptyList();
+        }
+        List<ShapeChunk> shapes = new ArrayList<>();
+        for (List<LineChunk> group : detectBarGroups(rects)) {
+            if (group.size() >= MIN_BAR_COUNT && isValidBarGroup(group)) {
+                shapes.add(createShape(pageNumber, group, ShapeChunk.TYPE_BAR_CHART));
+            }
+        }
+        return shapes;
     }
 
     /**
