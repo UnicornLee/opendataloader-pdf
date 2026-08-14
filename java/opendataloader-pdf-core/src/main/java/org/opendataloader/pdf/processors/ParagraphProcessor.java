@@ -283,14 +283,14 @@ public class ParagraphProcessor {
             TextBlock previousBlock = newBlocks.get(newBlocks.size() - 1);
             TextBlock nextBlock = textBlocks.get(index);
             String prevLastLineText = previousBlock.getLastLine().getValue().trim();
-            String prevLastLineTextLastCh = prevLastLineText.substring(prevLastLineText.length() - 1);
+            String prevLastLineTextLastCh = prevLastLineText.isEmpty() ? "" : prevLastLineText.substring(prevLastLineText.length() - 1);
             double prevFontSize = previousBlock.getLastLine().getFontSize();
             double prevLastLineLeftX = previousBlock.getLastLine().getBoundingBox().getLeftX();
             double prevLastLineRightX = previousBlock.getLastLine().getBoundingBox().getRightX();
             double prevTopY = previousBlock.getLastLine().getTopY();
             double prevBottomY = previousBlock.getLastLine().getBottomY();
             String nextFirstLineText = nextBlock.getFirstLine().getValue().trim();
-            String nextFirstLineTextLastCh = nextFirstLineText.substring(nextFirstLineText.length() - 1);
+            String nextFirstLineTextLastCh = nextFirstLineText.isEmpty() ? "" : nextFirstLineText.substring(nextFirstLineText.length() - 1);
             double nextFontSize = nextBlock.getFirstLine().getFontSize();
             double nextFirstLineLeftX = nextBlock.getFirstLine().getBoundingBox().getLeftX();
             double nextFirstLineRightX = nextBlock.getFirstLine().getBoundingBox().getRightX();

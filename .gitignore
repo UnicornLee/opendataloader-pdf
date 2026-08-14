@@ -3,6 +3,7 @@ tmp_output
 .agents
 .claude
 .omc
+.insCode
 data/
 
 # OS specific files
