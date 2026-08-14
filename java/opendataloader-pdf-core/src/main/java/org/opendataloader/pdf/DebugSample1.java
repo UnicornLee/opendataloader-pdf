@@ -27,7 +27,7 @@ public class DebugSample1 {
         customOptions.put("ossDomainName", "https://common-pdf-bucket.obs.cn-north-1.myhuaweicloud.com/");*/
         config.setCustomOptions(customOptions);
 
-        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf\\docs\\pdf\\202303251679660111823147-7.pdf", config);
+        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf\\docs\\pdf\\202304211681997115596529.pdf", config);
         System.out.println("JSON URL / local path: " + result.getJsonUrlOrPath());
         System.out.println("OCR JSON local path: " + result.getOcrJsonLocalPath());
 
