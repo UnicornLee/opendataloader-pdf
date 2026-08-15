@@ -17,6 +17,7 @@ public class DebugSample {
         customOptions.put("paddleUrl", "http://192.168.1.97:8088/layout-parsing");
         customOptions.put("businessId", 123456789);
         customOptions.put("extend", new HashMap<String, Object>(){});
+        customOptions.put("basicParseStreamTable", false);
         /*customOptions.put("basicEnv", "test");
         customOptions.put("pulsarReceiveTopicName", "pdf_parse_increment");
         customOptions.put("ossTempBucketName", "stock-temp-bucket");
@@ -33,7 +34,7 @@ public class DebugSample {
 //        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202302281677505819604328-84(流程图).pdf", config);
 //        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202304271682510470028924-12.pdf", config);
 //        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202304271682510470028924-15.pdf", config);
-        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202304271682510470028924.pdf", config);
+        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\20260507AN202606291826520711.pdf", config);
 //        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202303311680177387554158.pdf", config);
         System.out.println("JSON URL / local path: " + result.getJsonUrlOrPath());
         System.out.println("OCR JSON local path: " + result.getOcrJsonLocalPath());
