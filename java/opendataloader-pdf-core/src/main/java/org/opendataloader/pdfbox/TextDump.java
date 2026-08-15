@@ -15,7 +15,7 @@ import java.util.List;
  * PDFTextStripper, to detect duplicated single-char draws for a given
  * x-range (e.g. chars at x0 around 60.24 that also appear inside table cells).
  *
- * Usage: TextDump <pdf> <pageIndex>
+ * Usage: TextDump {@code <pdf>} {@code <pageIndex>}
  */
 public class TextDump {
     public static void main(String[] args) throws Exception {

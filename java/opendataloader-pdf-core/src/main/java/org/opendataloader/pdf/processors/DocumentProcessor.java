@@ -56,10 +56,7 @@ import org.verapdf.pd.PDDocument;
 import org.verapdf.tools.StaticResources;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.SemanticTextNode;
-import org.verapdf.wcag.algorithms.entities.content.ImageChunk;
-import org.verapdf.wcag.algorithms.entities.content.LineChunk;
-import org.verapdf.wcag.algorithms.entities.content.TextChunk;
-import org.verapdf.wcag.algorithms.entities.content.TextLine;
+import org.verapdf.wcag.algorithms.entities.content.*;
 import org.verapdf.wcag.algorithms.entities.geometry.BoundingBox;
 import org.verapdf.wcag.algorithms.entities.tables.TableBordersCollection;
 import org.verapdf.wcag.algorithms.semanticalgorithms.consumers.LinesPreprocessingConsumer;
@@ -158,13 +155,21 @@ public class DocumentProcessor {
     public static ProcessingResult processFileWithResult(String inputPdfName, Config config) throws IOException {
         CustomOutputResult customOutput = null;
         try {
+            long startTime = System.nanoTime();
             // Phase 1: Extract
             ExtractionResult extraction = extractContents(inputPdfName, config);
 
             // Phase 2: Output (JSON/MD/HTML/PDF/Text)
             long t0 = System.nanoTime();
+            long extractionNs = to - startTime;
             customOutput = generateCustomOutputs(inputPdfName, extraction.getContents(), config, extraction.getElementMetadata());
             long outputNs = System.nanoTime() - t0;
+            String fileName = inputPdfName;
+            if (config.getCustomOptions().containsKey("url") && !"".equals(config.getCustomOptions().get("url"))) {
+                fileName = (String) config.getCustomOptions().get("url");
+            }
+            LOGGER.log(Level.INFO, "{0} - extraction cost {1}, generating outputs cost {2}, total cost {3}.",
+                new Object[]{fileName, extractionNs, outputNs, extractionNs + outputNs});
 
             return new ProcessingResult(extraction.getHybridTimings(), extraction.getExtractionNs(), outputNs,
                 customOutput.getJsonUrlOrPath(), customOutput.getOcrJsonLocalPath());
@@ -547,7 +552,16 @@ public class DocumentProcessor {
                     BarChartProcessor.processBarChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
                     FlowchartProcessor.processFlowchartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
                 }
-                LineArtProcessor.processLineArtGroups(pageContents, pageNumber, imagesUtils, paddleUrl);
+                long count = pageContents.stream()
+                    .filter(c -> c instanceof LineArtChunk && c.getHeight() <= 3 && c.getWidth() <= 300)
+                    .count();
+                if (count > 20) {
+                    LOGGER.log(Level.INFO, "Page {0} - LineArtChunk count with height <= 3 and width <= 300 in pageContents: {1}. " +
+                            "线条太多，做公式识别会拖慢解析速度，放弃公式识别！",
+                        new Object[]{pageNumber + 1, count});
+                } else if (count > 0) {
+                    LineArtProcessor.processLineArtGroups(pageContents, pageNumber, imagesUtils, paddleUrl);
+                }
                 ConsecutiveImageProcessor.processConsecutiveImages(pageContents, pageNumber, imagesUtils);
             }
 
