@@ -49,6 +49,9 @@ public final class LineArtProcessor {
 
     private static final Logger LOGGER = Logger.getLogger(LineArtProcessor.class.getCanonicalName());
 
+    /** Maximum number of recognize fornula per page. */
+    private static final int FORMULA_RECOGNIZE_MAX_COUNT = 5;
+
     /** Maximum number of attempts (initial + retries) when calling Paddle OCR. */
     private static final int PADDLE_MAX_RETRIES = 3;
 
@@ -87,9 +90,15 @@ public final class LineArtProcessor {
         // how earlier processors may have rearranged the list.
         pageContents.sort(Comparator.comparingDouble(IObject::getTopY).reversed());
         List<IObject> result = new ArrayList<>(pageContents.size());
+        int recognizeCount = 0;
         for (int i = 0; i < pageContents.size(); i++) {
+            if (recognizeCount > FORMULA_RECOGNIZE_MAX_COUNT) {
+                LOGGER.log(Level.INFO, "Page {0} - 每页最多只做{1}个公式识别，已达上限，跳过后续识别！",
+                    new Object[]{pageNumber + 1, FORMULA_RECOGNIZE_MAX_COUNT});
+                break;
+            }
             IObject current = pageContents.get(i);
-            if (!(current instanceof LineArtChunk && current.getHeight() <= 3)) {
+            if (!(current instanceof LineArtChunk && current.getHeight() <= 3 && current.getWidth() <= 300)) {
                 result.add(current);
                 continue;
             }
@@ -166,6 +175,7 @@ public final class LineArtProcessor {
                                 result.addAll(group);
                                 continue;
                             }
+                            recognizeCount++;
                         }
                         // null = 重试全部失败：ERROR 日志已在 callPaddleWithRetry 中打印，replacement 保持为 imageChunk
                     }
