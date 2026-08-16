@@ -18,15 +18,21 @@ package org.opendataloader.pdf.api;
 import org.opendataloader.pdf.hybrid.HybridClientFactory;
 import org.opendataloader.pdf.json.JsonWriter;
 import org.opendataloader.pdf.processors.DocumentProcessor;
+import org.opendataloader.pdf.processors.PaddleOcrClient;
+import org.opendataloader.pdf.processors.PaddleOcrProcessor;
 import org.opendataloader.pdf.processors.ProcessingResult;
 
 import java.io.IOException;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * The main entry point for the opendataloader-pdf library.
  * Use the static method {@link #processFile(String, Config)} to process a PDF.
  */
 public final class OpenDataLoaderPDF {
+
+    private static final Logger LOGGER = Logger.getLogger(OpenDataLoaderPDF.class.getCanonicalName());
 
     private OpenDataLoaderPDF() {
     }
@@ -73,9 +79,20 @@ public final class OpenDataLoaderPDF {
      * Shuts down any cached resources used by the library.
      *
      * <p>This method should be called when processing is complete, typically at CLI exit.
-     * It releases resources such as HTTP client thread pools used for hybrid mode backends.
+     * It releases resources such as HTTP client thread pools used for hybrid mode backends
+     * and Paddle OCR.
      */
     public static void shutdown() {
-        HybridClientFactory.shutdown();
+        shutdownQuietly("HybridClientFactory", HybridClientFactory::shutdown);
+        shutdownQuietly("PaddleOcrClient", PaddleOcrClient::shutdown);
+        shutdownQuietly("PaddleOcrProcessor", PaddleOcrProcessor::shutdown);
+    }
+
+    private static void shutdownQuietly(String name, Runnable shutdown) {
+        try {
+            shutdown.run();
+        } catch (Exception e) {
+            LOGGER.log(Level.WARNING, "Shutdown of " + name + " failed; continuing with remaining cleanup", e);
+        }
     }
 }
