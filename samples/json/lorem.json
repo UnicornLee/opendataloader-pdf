@@ -1,6 +1,6 @@
 {
   "url" : "D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\java\\opendataloader-pdf-core\\..\\..\\samples\\pdf\\lorem.pdf",
-  "bookmarks" : [ ],
+  "self_bookmarks" : [ ],
   "data" : [ {
     "page_index" : 1,
     "width" : 595.0,
@@ -12,7 +12,7 @@
     "margin_bottom" : 567.9359597490235,
     "items" : [ {
       "item_type" : "text",
-      "margin_top" : 0.0,
+      "margin_top" : 95.868,
       "font_size" : 32.005,
       "y0" : 95.868,
       "x0" : 200.891,
@@ -23,7 +23,7 @@
       "id" : 1,
       "content" : [ {
         "item_type" : "text",
-        "margin_top" : 0.0,
+        "margin_top" : 95.868,
         "font_size" : 32.005,
         "y0" : 95.868,
         "x0" : 200.891,
@@ -137,5 +137,6 @@
     } ]
   } ],
   "catalog_bookmarks" : [ ],
-  "page_bookmarks" : [ ]
+  "page_bookmarks" : [ ],
+  "bookmarks" : [ ]
 }

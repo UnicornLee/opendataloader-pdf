@@ -90,6 +90,11 @@ import java.util.logging.Logger;
 public class DocumentProcessor {
     private static final Logger LOGGER = Logger.getLogger(DocumentProcessor.class.getCanonicalName());
 
+    /** Garbage text ratio that triggers full-page OCR fallback for a page. */
+    private static final double OCR_FALLBACK_GARBAGE_RATIO_THRESHOLD = 0.5;
+    /** DPI used when rendering a page image for fallback OCR. */
+    private static final float OCR_FALLBACK_RENDER_DPI = 300.0f;
+
     /**
      * Releases PDF resources to prevent file locks and memory leaks.
      * - Closes PDDocument to free OS file handles (required for file deletion)
@@ -161,15 +166,18 @@ public class DocumentProcessor {
 
             // Phase 2: Output (JSON/MD/HTML/PDF/Text)
             long t0 = System.nanoTime();
-            long extractionNs = to - startTime;
+            long extractionNs = t0 - startTime;
             customOutput = generateCustomOutputs(inputPdfName, extraction.getContents(), config, extraction.getElementMetadata());
             long outputNs = System.nanoTime() - t0;
             String fileName = inputPdfName;
-            if (config.getCustomOptions().containsKey("url") && !"".equals(config.getCustomOptions().get("url"))) {
-                fileName = (String) config.getCustomOptions().get("url");
+            Map<String, Object> docCustomOptions = config.getCustomOptions();
+            if (docCustomOptions != null && docCustomOptions.containsKey("url")
+                    && !"".equals(docCustomOptions.get("url"))) {
+                fileName = (String) docCustomOptions.get("url");
             }
             LOGGER.log(Level.INFO, "{0} - extraction cost {1}, generating outputs cost {2}, total cost {3}.",
-                new Object[]{fileName, extractionNs, outputNs, extractionNs + outputNs});
+                new Object[]{fileName, formatElapsed(extractionNs), formatElapsed(outputNs),
+                    formatElapsed(extractionNs + outputNs)});
 
             return new ProcessingResult(extraction.getHybridTimings(), extraction.getExtractionNs(), outputNs,
                 customOutput.getJsonUrlOrPath(), customOutput.getOcrJsonLocalPath());
@@ -179,7 +187,8 @@ public class DocumentProcessor {
             // processing exception.
             closePdfResources();
 
-            // OSS 上传成功且原始 PDF 仍存在时，在资源释放后删除源文件。
+            // Delete the source PDF after resource release only when OSS upload succeeded
+            // and the original file still exists.
             if (customOutput != null && customOutput.isOssUploadSuccess()) {
                 try {
                     File inputPdf = new File(inputPdfName);
@@ -192,6 +201,49 @@ public class DocumentProcessor {
                 }
             }
         }
+    }
+
+    /**
+     * Formats an elapsed time in nanoseconds as readable text: under 60 seconds
+     * it prints seconds (1 decimal); at 60 seconds or more it prints
+     * "X minutes Y seconds". Used for the processing timing log.
+     */
+    private static String formatElapsed(long nanos) {
+        double totalSeconds = nanos / 1_000_000_000.0;
+        if (totalSeconds < 60) {
+            return String.format(Locale.ROOT, "%.1f s", totalSeconds);
+        }
+        long minutes = (long) totalSeconds / 60;
+        long seconds = (long) totalSeconds % 60;
+        if (minutes >= 60) {
+            long hours = minutes / 60;
+            long restMinutes = minutes % 60;
+            return String.format(Locale.ROOT, "%d hours %d minutes %d seconds", hours, restMinutes, seconds);
+        }
+        return String.format(Locale.ROOT, "%d minutes %d seconds", minutes, seconds);
+    }
+
+    /**
+     * Returns the mode (most frequent value) among the non-zero entries of
+     * {@code values}. Zeroes are treated as "missing" and ignored. Returns
+     * {@code 0.0} when every entry is zero (nothing to infer from).
+     */
+    private static double modeOfValues(double[] values) {
+        Map<Double, Integer> frequency = new HashMap<>();
+        for (double value : values) {
+            if (value != 0.0) {
+                frequency.merge(value, 1, Integer::sum);
+            }
+        }
+        double mode = 0.0;
+        int bestCount = 0;
+        for (Map.Entry<Double, Integer> entry : frequency.entrySet()) {
+            if (entry.getValue() > bestCount) {
+                bestCount = entry.getValue();
+                mode = entry.getKey();
+            }
+        }
+        return mode;
     }
 
     /**
@@ -297,9 +349,47 @@ public class DocumentProcessor {
 
         // Capture ALL ThreadLocal state from main thread for propagation to workers
         final var document = StaticContainers.getDocument();
-        BoundingBox pageBoundingBox = getPageBoundingBox(0);
-        final double height = pageBoundingBox.getHeight();
-        final double width = pageBoundingBox.getWidth();
+        // Per-page dimensions: non-uniform documents (mixed page sizes / rotation)
+        // must not use page 0's width/height for other pages, otherwise per-page
+        // coordinate mapping (OCR fallback, stream tables, paragraphs, line-art OCR)
+        // is silently offset.
+        final double[] pageWidths = new double[totalPages];
+        final double[] pageHeights = new double[totalPages];
+        for (int pageNumber = 0; pageNumber < totalPages; pageNumber++) {
+            BoundingBox pageBoundingBox = getPageBoundingBox(pageNumber);
+            pageWidths[pageNumber] = pageBoundingBox != null ? pageBoundingBox.getWidth() : 0.0;
+            pageHeights[pageNumber] = pageBoundingBox != null ? pageBoundingBox.getHeight() : 0.0;
+        }
+        // Zero dimensions mean the page bbox is unavailable. Replace each zero
+        // dimension with the mode (most frequent non-zero value) of that
+        // dimension across all pages; a page whose width AND height are both
+        // zero is additionally logged as a warning since its geometry is
+        // completely missing and downstream coordinates will be estimates.
+        double modeWidth = modeOfValues(pageWidths);
+        double modeHeight = modeOfValues(pageHeights);
+        for (int pageNumber = 0; pageNumber < totalPages; pageNumber++) {
+            boolean widthMissing = pageWidths[pageNumber] == 0.0;
+            boolean heightMissing = pageHeights[pageNumber] == 0.0;
+            if (widthMissing && heightMissing) {
+                LOGGER.log(Level.WARNING,
+                    "Page {0} has zero width and height (no bounding box); using mode values {1} x {2} as fallback.",
+                    new Object[]{pageNumber + 1, modeWidth, modeHeight});
+            } else if (widthMissing) {
+                LOGGER.log(Level.WARNING,
+                    "Page {0} has zero width (no bounding box); using mode values |{1}| x {2} as fallback.",
+                    new Object[]{pageNumber + 1, modeWidth, pageHeights[pageNumber]});
+            } else if (heightMissing) {
+                LOGGER.log(Level.WARNING,
+                    "Page {0} has zero height (no bounding box); using mode values {1} x |{2}| as fallback.",
+                    new Object[]{pageNumber + 1, pageWidths[pageNumber], modeHeight});
+            }
+            if (widthMissing) {
+                pageWidths[pageNumber] = modeWidth;
+            }
+            if (heightMissing) {
+                pageHeights[pageNumber] = modeHeight;
+            }
+        }
         final var pdDocument = StaticResources.getDocument();
         final var tableBordersCollection = StaticContainers.getTableBordersCollection();
         final var accumulatedNodeMapper = StaticContainers.getAccumulatedNodeMapper();
@@ -411,16 +501,16 @@ public class DocumentProcessor {
                     }
                     List<IObject> pageContents = contents.get(pageNumber);
                     double replacementRatio = StaticLayoutContainers.getReplacementCharRatio(pageNumber);
-                    if (shouldUseOcrFallback(pageContents, width, height) || replacementRatio >= 0.1) {
+                    if (shouldUseOcrFallback(pageContents, pageWidths[pageNumber], pageHeights[pageNumber]) || replacementRatio >= 0.1) {
                         LOGGER.log(Level.WARNING, "Page {0} text extraction is mostly garbled or image-dominant; falling back to full-page OCR.", pageNumber);
                         if (isImmediateOcr) {
-                            List<IObject> ocrContents = fallbackOcrPage(inputPdfName, pageNumber, width, height, paddleUrl);
+                            List<IObject> ocrContents = fallbackOcrPage(inputPdfName, pageNumber, pageWidths[pageNumber], pageHeights[pageNumber], paddleUrl);
                             if (!ocrContents.isEmpty()) {
                                 contents.set(pageNumber, ocrContents);
                                 ocrFallbackPages.add(pageNumber);
                             }
                         } else {
-                            ImageChunk imageChunk = new ImageChunk(new BoundingBox(pageNumber, 0, 0, width, height));
+                            ImageChunk imageChunk = new ImageChunk(new BoundingBox(pageNumber, 0, 0, pageWidths[pageNumber], pageHeights[pageNumber]));
                             contents.set(pageNumber, new ArrayList<>(Collections.singletonList(imageChunk)));
                             ocrFallbackPages.add(pageNumber);
                         }
@@ -484,14 +574,14 @@ public class DocumentProcessor {
                         pageContents = SpecialTableProcessor.detectSpecialTables(pageContents);
                     }
                     pageContents = TextLineProcessor.processTextLines(pageContents, finalImagesDirectory);
-                    // 1. 连续
-                    // 对 pageContents 按照每个元素的 bounding box 的 topY 坐标从大到小进行排序，确保从上到下的顺序
+                    // Sort pageContents by each element's bounding box topY coordinate
+                    // in descending order so the final order runs from top to bottom.
                     pageContents.sort(Comparator.comparingDouble(item -> item.getTopY()));
                     Collections.reverse(pageContents);
-                    // 无线表格识别 (skip for pages already replaced by fallback OCR to avoid double OCR)
+                    // Stream-table recognition (skip pages already replaced by fallback OCR to avoid double OCR).
                     if (basicParseStreamTable && paddleUrl != null && !"".equals(paddleUrl) && !ocrFallbackPages.contains(pageNumber)) {
                         try {
-                            pageContents = StreamTableProcessor.processStreamTables(inputPdfName, pageContents, pageNumber, width, height, paddleUrl);
+                            pageContents = StreamTableProcessor.processStreamTables(inputPdfName, pageContents, pageNumber, pageWidths[pageNumber], pageHeights[pageNumber], paddleUrl);
                         } catch (IOException e) {
                             throw new RuntimeException(e);
                         }
@@ -524,7 +614,7 @@ public class DocumentProcessor {
                     }
                     propagateState.run();
                     List<IObject> pageContents = contents.get(pageNumber);
-                    pageContents = ParagraphProcessor.processParagraphs(pageContents, width);
+                    pageContents = ParagraphProcessor.processParagraphs(pageContents, pageWidths[pageNumber]);
                     contents.set(pageNumber, pageContents);
                 })
             ).get();
@@ -539,28 +629,33 @@ public class DocumentProcessor {
                 ).get();
             }
 
-            // 循环每一页，先做图表截图，再做公式截图。
+            boolean paddleEnabled = paddleUrl != null && !"".equals(paddleUrl);
+            if (!paddleEnabled) {
+                LOGGER.log(Level.INFO, "No OCR service configured; skipping formula recognition to avoid false positives.");
+            }
+            // Process each page: first chart/flowchart screenshots, then formula screenshots.
             for (int pageNumber = 0; pageNumber < totalPages; pageNumber++) {
                 List<IObject> pageContents = contents.get(pageNumber);
                 ImagesUtils imagesUtils = new ImagesUtils();
                 List<IObject> shapeChunks = pageContents.stream()
                         .filter(ShapeChunk.class::isInstance)
                         .collect(Collectors.toList());
-                // 对 pageContents 中的 ShapeChunk 做分组，将有交集的分成一组
+                // Group ShapeChunks in pageContents by intersection.
                 List<List<IObject>> groupedShapeChunks = ShapeRecognizer.groupShapes(shapeChunks);
                 if (groupedShapeChunks != null && !groupedShapeChunks.isEmpty()) {
                     BarChartProcessor.processBarChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
                     FlowchartProcessor.processFlowchartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
                 }
-                long count = pageContents.stream()
-                    .filter(c -> c instanceof LineArtChunk && c.getHeight() <= 3 && c.getWidth() <= 300)
-                    .count();
-                if (count > 20) {
-                    LOGGER.log(Level.INFO, "Page {0} - LineArtChunk count with height <= 3 and width <= 300 in pageContents: {1}. " +
-                            "线条太多，做公式识别会拖慢解析速度，放弃公式识别！",
+                if (paddleEnabled) {
+                    long count = pageContents.stream()
+                        .filter(c -> c instanceof LineArtChunk && c.getHeight() <= 3 && c.getWidth() <= 300)
+                        .count();
+                    LOGGER.log(Level.INFO, "Page {0} - LineArtChunk count with height <= 3 and width <= 300 in pageContents: {1}.",
                         new Object[]{pageNumber + 1, count});
-                } else if (count > 0) {
-                    LineArtProcessor.processLineArtGroups(pageContents, pageNumber, imagesUtils, paddleUrl);
+                    // Page-level OCR converts pixel-space boxes back to PDF user units
+                    // using the page's real width/height (from per-page arrays).
+                    LineArtProcessor.processLineArtGroups(pageContents, pageNumber, imagesUtils, paddleUrl,
+                        inputPdfName, pageWidths[pageNumber], pageHeights[pageNumber]);
                 }
                 ConsecutiveImageProcessor.processConsecutiveImages(pageContents, pageNumber, imagesUtils);
             }
@@ -1035,11 +1130,6 @@ public class DocumentProcessor {
                 textNode.getFontSize(), Arrays.toString(TextNodeUtils.getTextColorOrDefault(textNode)),
                 textNode.getValue().length() > 15 ? textNode.getValue().substring(0, 15) + "..." : textNode.getValue());
     }
-
-    /** Garbage text ratio that triggers full-page OCR fallback for a page. */
-    private static final double OCR_FALLBACK_GARBAGE_RATIO_THRESHOLD = 0.5;
-    /** DPI used when rendering a page image for fallback OCR. */
-    private static final float OCR_FALLBACK_RENDER_DPI = 300.0f;
 
     /**
      * Checks whether a page needs fallback OCR because either:

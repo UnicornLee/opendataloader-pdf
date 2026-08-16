@@ -38,24 +38,81 @@ public class PaddleOcrProcessor {
 
     private static final Logger LOGGER = Logger.getLogger(PaddleOcrProcessor.class.getCanonicalName());
 
-    /**
-     * Default Paddle OCR endpoint. The actual URL should eventually be
-     * plumbed through {@link org.opendataloader.pdf.api.Config} so dev/prepub/
-     * prod profiles can override it without touching this file
-     * (see {@code paddle.url} in application-*.yml).
-     */
-    private static final String DEFAULT_PADDLE_URL =
-        "http://localhost:8080/layout-parsing";
-
     /** Connect / read / write timeouts (ms) for the Paddle HTTP call. */
     private static final long PADDLE_HTTP_TIMEOUT_MS = 60_000L;
 
-    /** Single, lazily-built client for Paddle calls (okhttp recommends reuse). */
-    private static final OkHttpClient PADDLE_CLIENT = new OkHttpClient.Builder()
-        .connectTimeout(PADDLE_HTTP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        .readTimeout(PADDLE_HTTP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        .writeTimeout(PADDLE_HTTP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        .build();
+    /**
+     * Single, lazily-built client for Paddle calls (okhttp recommends reuse).
+     *
+     * <p>Tuned for concurrent OCR dispatch from {@link PaddleOcrClient}:
+     * <ul>
+     *   <li>{@code maxRequestsPerHost=16} — OkHttp's default of 5 serialises all
+     *       calls behind a single host semaphore, which becomes the bottleneck
+     *       once {@code PaddleOcrClient}'s thread pool starts submitting in
+     *       parallel. 16 matches the typical paddle container's batch size
+     *       without flooding the server;</li>
+     *   <li>{@code connectionPool} — keep up to 32 idle connections alive for
+     *       5 minutes. Paddle calls reuse the same host so connection setup
+     *       costs (TLS / TCP) are worth amortising;</li>
+     *   <li>{@code retryOnConnectionFailure(true)} — let OkHttp transparently
+     *       retry idempotent connection-level failures; the caller's own
+     *       retry policy then only has to worry about HTTP-level errors.</li>
+     * </ul>
+     */
+    private static final OkHttpClient PADDLE_CLIENT = buildPaddleClient();
+
+    private static OkHttpClient buildPaddleClient() {
+        java.util.concurrent.ExecutorService paddleExecutor =
+            java.util.concurrent.Executors.newFixedThreadPool(
+                Math.max(2, Runtime.getRuntime().availableProcessors() * 2),
+                new java.util.concurrent.ThreadFactory() {
+                    private final java.util.concurrent.atomic.AtomicInteger seq = new java.util.concurrent.atomic.AtomicInteger();
+                    @Override
+                    public Thread newThread(Runnable r) {
+                        Thread t = new Thread(r, "paddle-okhttp-" + seq.incrementAndGet());
+                        t.setDaemon(true);
+                        return t;
+                    }
+                });
+        okhttp3.Dispatcher dispatcher = new okhttp3.Dispatcher(paddleExecutor);
+        dispatcher.setMaxRequests(64);
+        dispatcher.setMaxRequestsPerHost(16);
+        return new OkHttpClient.Builder()
+            .connectTimeout(PADDLE_HTTP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            .readTimeout(PADDLE_HTTP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            .writeTimeout(PADDLE_HTTP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            .dispatcher(dispatcher)
+            .connectionPool(new okhttp3.ConnectionPool(32, 5, TimeUnit.MINUTES))
+            .retryOnConnectionFailure(true)
+            .build();
+    }
+
+    /**
+     * Shuts down the shared Paddle HTTP client's dispatcher thread pool and
+     * connection pool. Called from {@code OpenDataLoaderPDF.shutdown()} at
+     * process / service exit. Idempotent: subsequent calls are no-ops.
+     *
+     * <p>Note: {@link PADDLE_CLIENT} is a static singleton built at class load;
+     * after a shutdown it is no longer usable for new OCR calls. This mirrors
+     * the semantics of {@code HybridClientFactory.shutdown()} (exit-time only).</p>
+     */
+    public static void shutdown() {
+        if (PADDLE_CLIENT != null) {
+            java.util.concurrent.ExecutorService executor = PADDLE_CLIENT.dispatcher().executorService();
+            if (!executor.isShutdown()) {
+                executor.shutdown();
+                try {
+                    if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                        executor.shutdownNow();
+                    }
+                } catch (InterruptedException ie) {
+                    executor.shutdownNow();
+                    Thread.currentThread().interrupt();
+                }
+            }
+            PADDLE_CLIENT.connectionPool().evictAll();
+        }
+    }
 
     public static void main(String[] args) {
         File file = new File("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\file-5(无线表格).pdf");
@@ -84,8 +141,9 @@ public class PaddleOcrProcessor {
         if (file.length() == 0) {
             throw new IllegalArgumentException("paddle image file is empty: " + file);
         }
-        String effectiveUrl = (paddleUrl == null || paddleUrl.isBlank())
-            ? DEFAULT_PADDLE_URL : paddleUrl;
+        if (paddleUrl == null || paddleUrl.isBlank()) {
+            throw new IllegalArgumentException("paddle URL must not be null or blank");
+        }
 
         byte[] fileContent = Files.readAllBytes(file.toPath());
         String base64Image = Base64.getEncoder().encodeToString(fileContent);
@@ -106,7 +164,7 @@ public class PaddleOcrProcessor {
         String bodyJson = mapper.writeValueAsString(jsonBody);
 
         Request request = new Request.Builder()
-            .url(effectiveUrl)
+            .url(paddleUrl)
             .post(RequestBody.create(bodyJson,
                 MediaType.parse("application/json; charset=utf-8")))
             .build();
@@ -116,17 +174,17 @@ public class PaddleOcrProcessor {
             if (!response.isSuccessful()) {
                 String detail = (responseBody == null) ? "" : responseBody.string();
                 throw new IOException("paddle service returned http " + response.code()
-                    + " for " + effectiveUrl + ": " + detail);
+                    + " for " + paddleUrl + ": " + detail);
             }
             if (responseBody == null) {
-                throw new IOException("paddle service returned an empty body for " + effectiveUrl);
+                throw new IOException("paddle service returned an empty body for " + paddleUrl);
             }
             String responseJson = responseBody.string();
             // Log via supplier to avoid the SLF4J-style "{}" placeholder
             // being printed verbatim by java.util.logging. The response body
             // is already JSON, so we embed it directly instead of round-tripping
             // it through JsonUtil (which would re-encode it as a quoted string).
-            LOGGER.log(Level.INFO, () -> "paddle response: " + responseJson);
+            LOGGER.log(Level.FINE, () -> "paddle response: " + responseJson);
             PaddleDocLayoutParseResponseDto paddle =
                 mapper.readValue(responseJson, PaddleDocLayoutParseResponseDto.class);
             TextInOcrAnalysisResultDto resultDto = transferPropertiesFromPaddleToTextInModel(paddle);
@@ -191,7 +249,7 @@ public class PaddleOcrProcessor {
                                         }
                                     }).collect(Collectors.toList());
                                     String tempImageSubStr = String.join("_", blockBoxStrList);
-                                    // 通过imagesMap进行获取base64编码
+                                    // Retrieve the base64-encoded image via imagesMap.
                                     String allTempImageSubStr = "imgs/img_in_"+blockLabel+"_box_"+tempImageSubStr+".jpg";
                                     if(imagesMap != null && !imagesMap.isEmpty()){
                                         String tempBase64Str = imagesMap.get(allTempImageSubStr);
@@ -228,27 +286,28 @@ public class PaddleOcrProcessor {
     }
 
     /**
-     * 将Base64字符串转换为本地图片文件
-     * @param base64Str Base64编码的图片字符串（可带/不带data:image/xxx;base64,前缀）
-     * @param filePath  要保存的图片文件完整路径（如：D:/images/test.png）
+     * Converts a Base64-encoded image string to a local image file.
+     *
+     * @param base64Str Base64-encoded image string (with or without a data:image/xxx;base64 prefix)
+     * @param filePath  Full path where the image file should be saved (e.g., D:/images/test.png)
      */
     public static void convertBase64ToImage(String base64Str, String filePath) {
-        // 1. 处理Base64前缀（如果有）
+        // 1. Strip the Base64 prefix if present.
         String pureBase64Str = base64Str;
         if (base64Str.contains("data:image/")) {
-            // 截取base64前缀后的真实编码内容
             pureBase64Str = base64Str.split(",")[1];
         }
 
-        // 2. Base64解码为字节数组（Java 8+ 推荐使用java.util.Base64，替代过时的sun.misc.BASE64Decoder）
+        // 2. Decode Base64 to a byte array (java.util.Base64 is preferred on Java 8+ over the
+        //    deprecated sun.misc.BASE64Decoder).
         byte[] imageBytes = Base64.getDecoder().decode(pureBase64Str);
 
-        // 3. 将字节数组写入本地文件（使用try-with-resources自动关闭流，避免资源泄漏）
+        // 3. Write the byte array to a local file using try-with-resources to avoid leaking streams.
         try (OutputStream outputStream = Files.newOutputStream(Paths.get(filePath))) {
             outputStream.write(imageBytes);
             outputStream.flush();
         } catch (Exception e) {
-            throw new RuntimeException(e); // 抛出异常让调用方处理
+            throw new RuntimeException(e); // Rethrow so the caller can decide how to handle it.
         }
     }
 }

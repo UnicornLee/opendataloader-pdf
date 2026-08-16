@@ -15,9 +15,10 @@ public class DebugSample {
         config.getFilterConfig().setHalfWidthToFullWidth(true);
         Map<String, Object> customOptions = new HashMap<>();
         customOptions.put("paddleUrl", "http://192.168.1.97:8088/layout-parsing");
+//        customOptions.put("pulsarReceiveTopicName", "hk_announcement_parse_all");
         customOptions.put("businessId", 123456789);
         customOptions.put("extend", new HashMap<String, Object>(){});
-        customOptions.put("basicParseStreamTable", false);
+        customOptions.put("basicParseStreamTable", true);
         /*customOptions.put("basicEnv", "test");
         customOptions.put("pulsarReceiveTopicName", "pdf_parse_increment");
         customOptions.put("ossTempBucketName", "stock-temp-bucket");
@@ -34,8 +35,11 @@ public class DebugSample {
 //        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202302281677505819604328-84(流程图).pdf", config);
 //        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202304271682510470028924-12.pdf", config);
 //        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202304271682510470028924-15.pdf", config);
-        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\20260507AN202606291826520711.pdf", config);
-//        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202303311680177387554158.pdf", config);
+//        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\公式：带中文的公式(1679816122933478).pdf", config);
+//        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202303181679059838994480-252(公式).pdf", config);
+//        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202303181679059838994480-314(公式).pdf", config);
+//        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\20260507AN202606291826520711.pdf", config);
+        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202303311680177387554158.pdf", config);
         System.out.println("JSON URL / local path: " + result.getJsonUrlOrPath());
         System.out.println("OCR JSON local path: " + result.getOcrJsonLocalPath());
         OpenDataLoaderPDF.shutdown();
