@@ -65,6 +65,7 @@ import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorderCell;
 import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorderRow;
 import org.verapdf.wcag.algorithms.semanticalgorithms.containers.StaticContainers;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -123,22 +124,23 @@ public class JsonWriter {
     }
 
     /**
-     * 从已有的 JSON 文件中读取 {@code self_bookmarks}（缺失则回退到 {@code bookmarks}），
-     * 复用 {@link #writeToCustomJson(String, String, List, Map, Map, boolean, Config)} 中
-     * 的目录识别 / 页面书签抽取 / 质量选型三条流水线，重新生成 {@code catalog_bookmarks}、
-     * {@code page_bookmarks} 与 {@code bookmarks}，写回 JSON；按 customOptions 是否
-     * 包含 OSS 8 项配置（不含 {@code ossPermanentBucketName}），决定本地保留还是上传到
-     * OBS 临时桶。
+     * Reads {@code self_bookmarks} from an existing JSON file (falling back to {@code bookmarks}
+     * and then to an empty list), reuses the catalog detection / page-bookmark extraction /
+     * quality-selection pipelines from {@link #writeToCustomJson(String, String, List, Map, Map, boolean, Config)},
+     * and regenerates {@code catalog_bookmarks}, {@code page_bookmarks} and {@code bookmarks},
+     * writing them back to the JSON file. Whether the result is kept locally or uploaded to the
+     * OBS temp bucket depends on whether {@code customOptions} contains the eight OSS config keys
+     * (excluding {@code ossPermanentBucketName}).
      *
-     * <p>仅刷新书签相关字段（{@code self_bookmarks}、{@code catalog_bookmarks}、
-     * {@code page_bookmarks}、{@code bookmarks}、{@code catalog_page_range_start/end}）；
-     * 其余字段（{@code url}、{@code data}、{@code extend}、{@code is_ocr} 等）一律保留不动。
-     * 不做图片上传、不做 OCR 检测、不重命名 / 移动 JSON。</p>
+     * <p>Only bookmark-related fields ({@code self_bookmarks}, {@code catalog_bookmarks},
+     * {@code page_bookmarks}, {@code bookmarks}, {@code catalog_page_range_start/end}) are refreshed;
+     * all other fields ({@code url}, {@code data}, {@code extend}, {@code is_ocr}, etc.) are preserved.
+     * No image upload, OCR detection, renaming or moving of the JSON file is performed.</p>
      *
-     * @param inputJsonName 待重建的 JSON 文件绝对路径
-     * @param config        配置对象；customOptions 驱动是否启用 OSS 上传
-     * @return {@link RebuildBookmarksResult}，包含 OBS URL 或本地绝对路径以及是否上传成功
-     * @throws IOException 读写或上传 JSON 失败时抛出
+     * @param inputJsonName absolute path of the JSON file to rebuild
+     * @param config        configuration object; customOptions drive whether OSS upload is enabled
+     * @return {@link RebuildBookmarksResult} containing the OBS URL or local absolute path and whether upload succeeded
+     * @throws IOException when reading, writing or uploading the JSON fails
      */
     public static RebuildBookmarksResult rebuildBookmarksFromJson(String inputJsonName, Config config) throws IOException {
         File jsonFile = new File(inputJsonName);
@@ -226,7 +228,7 @@ public class JsonWriter {
                 try {
                     obsClient.close();
                 } catch (IOException closeEx) {
-                    LOGGER.log(Level.WARNING, "Failed to close OBS client: " + closeEx.getMessage());
+                    LOGGER.log(Level.WARNING, "Failed to close OBS client: " + closeEx.getClass().getSimpleName() + ": " + closeEx.getMessage(), closeEx);
                 }
             }
         }
@@ -240,13 +242,15 @@ public class JsonWriter {
         StaticLayoutContainers.resetImageIndex();
         File inputPDF = new File(inputPdfName);
         String jsonFileName = outputFolder + File.separator + inputPDF.getName().substring(0, inputPDF.getName().length() - 3) + "json";
+        String url = inputPdfName;
+        if (config != null && config.getCustomOptions() != null
+                && config.getCustomOptions().containsKey("url")
+                && !"".equals(config.getCustomOptions().get("url"))) {
+            url = (String) config.getCustomOptions().get("url");
+        }
         try (JsonGenerator jsonGenerator = getJsonGenerator(jsonFileName)) {
             jsonGenerator.writeStartObject();
-            if (config.getCustomOptions().containsKey("url") && !"".equals(config.getCustomOptions().get("url"))) {
-                jsonGenerator.writeStringField("url", (String) config.getCustomOptions().get("url"));
-            } else {
-                jsonGenerator.writeStringField("url", inputPdfName);
-            }
+            jsonGenerator.writeStringField("url", url);
             jsonGenerator.writeArrayFieldStart("self_bookmarks");
             for (Bookmark bookmark : BookmarkUtils.getSelfBookmarks(inputPdfName)) {
                 jsonGenerator.writePOJO(bookmark);
@@ -260,535 +264,68 @@ public class JsonWriter {
             SerializerUtil.setElementMetadata(elementMetadata);
             try {
                 jsonGenerator.writeArrayFieldStart(JsonName.DATA);
+                JsonFactory pageJsonFactory = new JsonFactory();
                 for (int pageNumber = 0; pageNumber < StaticContainers.getDocument().getNumberOfPages(); pageNumber++) {
-                    jsonGenerator.writeStartObject();
-                    jsonGenerator.writeNumberField(JsonName.PAGE_INDEX, pageNumber + 1);
-                    BoundingBox pageBoundingBox = DocumentProcessor.getPageBoundingBox(pageNumber);
-                    double width = pageBoundingBox.getWidth();
-                    double height = pageBoundingBox.getHeight();
-                    jsonGenerator.writeNumberField(JsonName.WIDTH, width);
-                    jsonGenerator.writeNumberField(JsonName.HEIGHT, height);
-                    jsonGenerator.writeBooleanField(JsonName.IS_OCR, false);
-                    List<IObject> pageContents = contents.get(pageNumber);
-                    List<IObject> layoutObjects = pageContents.stream()
-                            .filter(o -> !(o instanceof SemanticHeaderOrFooter))
-                            .collect(Collectors.toList());
-                    List<Double> leftXList = layoutObjects.stream().map(IObject::getLeftX).collect(Collectors.toList());
-                    List<Double> rightXList = layoutObjects.stream().map(IObject::getRightX).collect(Collectors.toList());
-                    List<Double> topYList = layoutObjects.stream().map(IObject::getTopY).collect(Collectors.toList());
-                    List<Double> bottomYList = layoutObjects.stream().map(IObject::getBottomY).collect(Collectors.toList());
-                    double minX = leftXList.stream().min(Double::compare).orElse(0.0);
-                    double maxX = rightXList.stream().max(Double::compare).orElse(0.0);
-                    double maxY = topYList.stream().max(Double::compare).orElse(0.0);
-                    double minY = bottomYList.stream().min(Double::compare).orElse(0.0);
-                    double marginLeft = minX;
-                    double marginRight = width - maxX;
-                    double marginTop = height - maxY;
-                    double marginBottom = minY;
-                    jsonGenerator.writeNumberField(JsonName.MARGIN_LEFT, marginLeft);
-                    jsonGenerator.writeNumberField(JsonName.MARGIN_RIGHT, marginRight);
-                    jsonGenerator.writeNumberField(JsonName.MARGIN_TOP, marginTop);
-                    jsonGenerator.writeNumberField(JsonName.MARGIN_BOTTOM, marginBottom);
-                    jsonGenerator.writeArrayFieldStart(JsonName.ITEMS);
-                    final double[] prevBottomY = {height};
-                    int textId = 1;
-                    for (IObject content : pageContents) {
-                        final int finalTextId = textId;
-                        if (content instanceof LineArtChunk || content instanceof ShapeChunk) {
-                            continue;
+                    // Serialize each page to an independent in-memory buffer first;
+                    // only after the whole page succeeds (balanced and closed) is it
+                    // appended to the main stream. A per-page exception affects only
+                    // that page (falls back to a minimal placeholder), while the main
+                    // JsonGenerator stays inside the DATA array context, so subsequent
+                    // pages continue uninterrupted and the overall JSON structure stays valid.
+                    String pageJson;
+                    try {
+                        ByteArrayOutputStream pageBuffer = new ByteArrayOutputStream();
+                        try (JsonGenerator pageGenerator = pageJsonFactory.createGenerator(pageBuffer, JsonEncoding.UTF8)
+                                .setCodec(ObjectMapperHolder.getObjectMapper())) {
+                            writePageToGenerator(pageNumber, includeHeaderFooter, contents, pageGenerator, config);
                         }
-                        if (!includeHeaderFooter && content instanceof SemanticHeaderOrFooter) {
-                            continue;
-                        }
-                        if (content instanceof SemanticHeading) {
-                            SemanticHeading heading = (SemanticHeading) content;
-                            List<Map<String, Object>> headingList = new ArrayList<>();
-                            final double[] lineBottomY = {prevBottomY[0]};
-                            heading.getColumns().forEach(column -> {
-                                column.getBlocks().forEach(block -> {
-                                    Map<String, Object> paragraphMap = new HashMap<>();
-                                    paragraphMap.put(JsonName.ITEM_TYPE, "text");
-                                    paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_HEADING);
-                                    paragraphMap.put(JsonName.ID, finalTextId);
-                                    paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, block.getFontSize());
-                                    paragraphMap.put(JsonName.X0, block.getLeftX());
-                                    paragraphMap.put(JsonName.X1, block.getRightX());
-                                    paragraphMap.put(JsonName.Y0, height - block.getTopY());
-                                    paragraphMap.put(JsonName.Y1, height - block.getBottomY());
-                                    paragraphMap.put(JsonName.WIDTH, block.getWidth());
-                                    paragraphMap.put(JsonName.HEIGHT, block.getHeight());
-                                    paragraphMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - block.getTopY());
-                                    List<Map<String, Object>> lineList = new ArrayList<>();
-                                    block.getLines().forEach(line -> {
-                                        Map<String, Object> textMap = new HashMap<>();
-                                        textMap.put(JsonName.ITEM_TYPE, "text");
-                                        textMap.put(JsonName.FONT_UNDERLINE_SIZE, line.getFontSize());
-                                        textMap.put(JsonName.X0, line.getLeftX());
-                                        textMap.put(JsonName.X1, line.getRightX());
-                                        textMap.put(JsonName.Y0, height - line.getTopY());
-                                        textMap.put(JsonName.Y1, height - line.getBottomY());
-                                        textMap.put(JsonName.WIDTH, line.getWidth());
-                                        textMap.put(JsonName.HEIGHT, line.getHeight());
-                                        textMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
-                                        String lineText = line.getTextChunks().stream().map(chunk -> {
-                                            String val = chunk.getValue();
-                                            if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
-                                                return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
-                                            } else {
-                                                return val;
-                                            }
-                                        }).collect(Collectors.joining(""));
-                                        textMap.put(JsonName.CONTENT, Arrays.asList(lineText));
-                                        lineList.add(textMap);
-                                        lineBottomY[0] = line.getBottomY();
-                                    });
-                                    paragraphMap.put(JsonName.CONTENT, lineList);
-                                    headingList.add(paragraphMap);
-                                    lineBottomY[0] = block.getBottomY();
-                                });
-                            });
-                            for (Map<String, Object> headingItem : headingList) {
-                                jsonGenerator.writeObject(headingItem);
-                            }
-                        }
-                        if (content instanceof PDFList) {
-                            PDFList pdfList = (PDFList) content;
-                            List<Map<String, Object>> list = new ArrayList<>();
-                            final double[] lineBottomY = {prevBottomY[0]};
-                            pdfList.getListItems().forEach(listItem -> {
-                                Map<String, Object> paragraphMap = new HashMap<>();
-                                paragraphMap.put(JsonName.ITEM_TYPE, "text");
-                                paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_LIST);
-                                paragraphMap.put(JsonName.ID, finalTextId);
-                                paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, listItem.getFontSize());
-                                paragraphMap.put(JsonName.X0, listItem.getLeftX());
-                                paragraphMap.put(JsonName.X1, listItem.getRightX());
-                                paragraphMap.put(JsonName.Y0, height - listItem.getTopY());
-                                paragraphMap.put(JsonName.Y1, height - listItem.getBottomY());
-                                paragraphMap.put(JsonName.WIDTH, listItem.getWidth());
-                                paragraphMap.put(JsonName.HEIGHT, listItem.getHeight());
-                                paragraphMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - listItem.getTopY());
-                                List<Map<String, Object>> lineList = new ArrayList<>();
-                                listItem.getLines().forEach(line -> {
-                                    Map<String, Object> textMap = new HashMap<>();
-                                    textMap.put(JsonName.ITEM_TYPE, "text");
-                                    textMap.put(JsonName.FONT_UNDERLINE_SIZE, line.getFontSize());
-                                    textMap.put(JsonName.X0, line.getLeftX());
-                                    textMap.put(JsonName.X1, line.getRightX());
-                                    textMap.put(JsonName.Y0, height - line.getTopY());
-                                    textMap.put(JsonName.Y1, height - line.getBottomY());
-                                    textMap.put(JsonName.WIDTH, line.getWidth());
-                                    textMap.put(JsonName.HEIGHT, line.getHeight());
-                                    textMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
-                                    String lineText = line.getTextChunks().stream().map(chunk -> {
-                                        String val = chunk.getValue();
-                                        if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
-                                            return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
-                                        } else {
-                                            return val;
-                                        }
-                                    }).collect(Collectors.joining(""));
-                                    textMap.put(JsonName.CONTENT, Arrays.asList(lineText));
-                                    lineList.add(textMap);
-                                    lineBottomY[0] = line.getBottomY();
-                                });
-                                paragraphMap.put(JsonName.CONTENT, lineList);
-                                list.add(paragraphMap);
-                                lineBottomY[0] = listItem.getBottomY();
-                            });
-                            for (Map<String, Object> pdfItem : list) {
-                                jsonGenerator.writeObject(pdfItem);
-                            }
-                        }
-                        if (content instanceof SemanticCaption) {
-                            SemanticCaption semanticCaption = (SemanticCaption) content;
-                            List<Map<String, Object>> captionList = new ArrayList<>();
-                            final double[] lineBottomY = {prevBottomY[0]};
-                            semanticCaption.getColumns().forEach(column -> {
-                                column.getBlocks().forEach(block -> {
-                                    Map<String, Object> paragraphMap = new HashMap<>();
-                                    paragraphMap.put(JsonName.ITEM_TYPE, "text");
-                                    paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_CAPTION);
-                                    paragraphMap.put(JsonName.ID, finalTextId);
-                                    paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, block.getFontSize());
-                                    paragraphMap.put(JsonName.X0, block.getLeftX());
-                                    paragraphMap.put(JsonName.X1, block.getRightX());
-                                    paragraphMap.put(JsonName.Y0, height - block.getTopY());
-                                    paragraphMap.put(JsonName.Y1, height - block.getBottomY());
-                                    paragraphMap.put(JsonName.WIDTH, block.getWidth());
-                                    paragraphMap.put(JsonName.HEIGHT, block.getHeight());
-                                    paragraphMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - block.getTopY());
-                                    List<Map<String, Object>> lineList = new ArrayList<>();
-                                    block.getLines().forEach(line -> {
-                                        Map<String, Object> textMap = new HashMap<>();
-                                        textMap.put(JsonName.ITEM_TYPE, "text");
-                                        textMap.put(JsonName.FONT_UNDERLINE_SIZE, line.getFontSize());
-                                        textMap.put(JsonName.X0, line.getLeftX());
-                                        textMap.put(JsonName.X1, line.getRightX());
-                                        textMap.put(JsonName.Y0, height - line.getTopY());
-                                        textMap.put(JsonName.Y1, height - line.getBottomY());
-                                        textMap.put(JsonName.WIDTH, line.getWidth());
-                                        textMap.put(JsonName.HEIGHT, line.getHeight());
-                                        textMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
-                                        String lineText = line.getTextChunks().stream().map(chunk -> {
-                                            String val = chunk.getValue();
-                                            if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
-                                                return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
-                                            } else {
-                                                return val;
-                                            }
-                                        }).collect(Collectors.joining(""));
-                                        textMap.put(JsonName.CONTENT, Arrays.asList(lineText));
-                                        lineList.add(textMap);
-                                        lineBottomY[0] = line.getBottomY();
-                                    });
-                                    paragraphMap.put(JsonName.CONTENT, lineList);
-                                    captionList.add(paragraphMap);
-                                    lineBottomY[0] = block.getBottomY();
-                                });
-                            });
-                            for (Map<String, Object> captionItem : captionList) {
-                                jsonGenerator.writeObject(captionItem);
-                            }
-                        }
-                        if (content instanceof SemanticTOC) {
-                            SemanticTOC semanticTOC = (SemanticTOC) content;
-                            List<Map<String, Object>> tocList = new ArrayList<>();
-                            final double[] lineBottomY = {prevBottomY[0]};
-                            semanticTOC.getTOCItems().forEach(tocItem -> {
-                                if (tocItem instanceof SemanticTOCI) {
-                                    SemanticTOCI semanticTOCI = (SemanticTOCI) tocItem;
-                                    semanticTOCI.getLines().forEach(line -> {
-                                        Map<String, Object> paragraphMap = new HashMap<>();
-                                        paragraphMap.put(JsonName.ITEM_TYPE, "text");
-                                        paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_TOC);
-                                        paragraphMap.put(JsonName.ID, finalTextId);
-                                        paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, line.getFontSize());
-                                        paragraphMap.put(JsonName.X0, line.getLeftX());
-                                        paragraphMap.put(JsonName.X1, line.getRightX());
-                                        paragraphMap.put(JsonName.Y0, height - line.getTopY());
-                                        paragraphMap.put(JsonName.Y1, height - line.getBottomY());
-                                        paragraphMap.put(JsonName.WIDTH, line.getWidth());
-                                        paragraphMap.put(JsonName.HEIGHT, line.getHeight());
-                                        paragraphMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
-                                        Map<String, Object> tocItemMap = new HashMap<>();
-                                        tocItemMap.put(JsonName.ITEM_TYPE, "text");
-                                        tocItemMap.put(JsonName.FONT_UNDERLINE_SIZE, line.getFontSize());
-                                        tocItemMap.put(JsonName.X0, line.getLeftX());
-                                        tocItemMap.put(JsonName.X1, line.getRightX());
-                                        tocItemMap.put(JsonName.Y0, height - line.getTopY());
-                                        tocItemMap.put(JsonName.Y1, height - line.getBottomY());
-                                        tocItemMap.put(JsonName.WIDTH, line.getWidth());
-                                        tocItemMap.put(JsonName.HEIGHT, line.getHeight());
-                                        tocItemMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
-                                        String lineText = line.getTextChunks().stream().map(chunk -> {
-                                            String val = chunk.getValue();
-                                            if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
-                                                return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
-                                            } else {
-                                                return val;
-                                            }
-                                        }).collect(Collectors.joining(""));
-                                        tocItemMap.put(JsonName.CONTENT, Arrays.asList(lineText));
-                                        paragraphMap.put(JsonName.CONTENT, Arrays.asList(tocItemMap));
-                                        tocList.add(paragraphMap);
-                                        lineBottomY[0] = line.getBottomY();
-                                    });
-                                }
-                            });
-                            for (Map<String, Object> tocItem : tocList) {
-                                jsonGenerator.writeObject(tocItem);
-                            }
-                        }
-                        if (content instanceof TextChunk) {
-                            Map<String, Object> paragraphMap = new HashMap<>();
-                            List<Map<String, Object>> paragraphContentList = new ArrayList<>();
-                            TextChunk textChunk = (TextChunk) content;
-                            Map<String, Object> textLineMap = new HashMap<>();
-                            textLineMap.put(JsonName.ITEM_TYPE, "text");
-                            textLineMap.put(JsonName.IS_THIRD_PARTY, true);
-                            textLineMap.put(JsonName.HEIGHT, textChunk.getHeight());
-                            textLineMap.put(JsonName.WIDTH, textChunk.getWidth());
-                            textLineMap.put(JsonName.FONT_UNDERLINE_SIZE, textChunk.getFontSize());
-                            textLineMap.put(JsonName.X0, textChunk.getLeftX());
-                            textLineMap.put(JsonName.X1, textChunk.getRightX());
-                            textLineMap.put(JsonName.Y0, height - textChunk.getTopY());
-                            textLineMap.put(JsonName.Y1, height - textChunk.getBottomY());
-                            textLineMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - textChunk.getTopY());
-                            textLineMap.put(JsonName.CONTENT, Arrays.asList(textChunk.getValue()));
-                            paragraphContentList.add(textLineMap);
-                            paragraphMap.put(JsonName.CONTENT, paragraphContentList);
-                            paragraphMap.put(JsonName.ITEM_TYPE, "text");
-                            paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_TEXT_CHUNK);
-                            paragraphMap.put(JsonName.ID, finalTextId);
-                            paragraphMap.put(JsonName.IS_BOOKMARK, false);
-                            paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, textChunk.getFontSize());
-                            paragraphMap.put(JsonName.X0, textChunk.getLeftX());
-                            paragraphMap.put(JsonName.X1, textChunk.getRightX());
-                            paragraphMap.put(JsonName.Y0, height - textChunk.getTopY());
-                            paragraphMap.put(JsonName.Y1, height - textChunk.getBottomY());
-                            paragraphMap.put(JsonName.WIDTH, textChunk.getWidth());
-                            paragraphMap.put(JsonName.HEIGHT, textChunk.getHeight());
-                            paragraphMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - textChunk.getTopY());
-                            jsonGenerator.writeObject(paragraphMap);
-                        }
-                        if (content instanceof CustomSemanticParagraph) {
-                            Map<String, Object> paragraphMap = new HashMap<>();
-                            List<Map<String, Object>> paragraphContentList = new ArrayList<>();
-                            CustomSemanticParagraph customSemanticParagraph = (CustomSemanticParagraph) content;
-                            final double[] lineBottomY = {prevBottomY[0]};
-                            customSemanticParagraph.getTextLines().forEach(textLine -> {
-                                Map<String, Object> textLineMap = new HashMap<>();
-                                textLineMap.put(JsonName.ITEM_TYPE, "text");
-                                textLineMap.put(JsonName.IS_THIRD_PARTY, false);
-                                textLineMap.put(JsonName.HEIGHT, textLine.getHeight());
-                                textLineMap.put(JsonName.WIDTH, textLine.getWidth());
-                                textLineMap.put(JsonName.FONT_UNDERLINE_SIZE, textLine.getFontSize());
-                                textLineMap.put(JsonName.X0, textLine.getLeftX());
-                                textLineMap.put(JsonName.X1, textLine.getRightX());
-                                textLineMap.put(JsonName.Y0, height - textLine.getTopY());
-                                textLineMap.put(JsonName.Y1, height - textLine.getBottomY());
-                                textLineMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - textLine.getTopY());
-                                String lineText = textLine.getTextChunks().stream().map(chunk -> {
-                                    String val = chunk.getValue();
-                                    if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
-                                        return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
-                                    } else {
-                                        return val;
-                                    }
-                                }).collect(Collectors.joining(""));
-                                textLineMap.put(JsonName.CONTENT, Arrays.asList(lineText));
-                                paragraphContentList.add(textLineMap);
-                                lineBottomY[0] = textLine.getBottomY();
-                            });
-                            paragraphMap.put(JsonName.CONTENT, paragraphContentList);
-                            paragraphMap.put(JsonName.ITEM_TYPE, "text");
-                            paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_PARAGRAPH);
-                            paragraphMap.put(JsonName.ID, finalTextId);
-                            paragraphMap.put(JsonName.IS_BOOKMARK, false);
-                            paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, customSemanticParagraph.getFontSize());
-                            paragraphMap.put(JsonName.X0, customSemanticParagraph.getLeftX());
-                            paragraphMap.put(JsonName.X1, customSemanticParagraph.getRightX());
-                            paragraphMap.put(JsonName.Y0, height - customSemanticParagraph.getTopY());
-                            paragraphMap.put(JsonName.Y1, height - customSemanticParagraph.getBottomY());
-                            paragraphMap.put(JsonName.WIDTH, customSemanticParagraph.getWidth());
-                            paragraphMap.put(JsonName.HEIGHT, customSemanticParagraph.getHeight());
-                            paragraphMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - customSemanticParagraph.getTopY());
-                            jsonGenerator.writeObject(paragraphMap);
-                        }
-                        if (content instanceof ImageChunk) {
-                            ImageChunk imageChunk = (ImageChunk) content;
-                            Map<String, Object> imageMap = new HashMap<>();
-                            imageMap.put(JsonName.ITEM_TYPE, "image");
-                            imageMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_IMAGE);
-                            imageMap.put(JsonName.ID, finalTextId);
-                            imageMap.put(JsonName.WIDTH, imageChunk.getWidth());
-                            imageMap.put(JsonName.HEIGHT, imageChunk.getHeight());
-                            imageMap.put(JsonName.FONT_UNDERLINE_SIZE, imageChunk.getHeight());
-                            imageMap.put(JsonName.X0, imageChunk.getLeftX());
-                            imageMap.put(JsonName.X1, imageChunk.getRightX());
-                            imageMap.put(JsonName.Y0, height - imageChunk.getTopY());
-                            imageMap.put(JsonName.Y1, height - imageChunk.getBottomY());
-                            String absoluteImagesDirectory = StaticLayoutContainers.getImagesDirectory();
-                            String imageFormat = StaticLayoutContainers.getImageFormat();
-                            String absolutePath = String.format(MarkdownSyntax.IMAGE_FILE_NAME_FORMAT, absoluteImagesDirectory,
-                                File.separator, imageChunk.getIndex(), imageFormat);
-                            imageMap.put(JsonName.CONTENT, Arrays.asList(absolutePath));
-                            imageMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - imageChunk.getTopY());
-                            jsonGenerator.writeObject(imageMap);
-                        }
-                        if (content instanceof PageItem) {
-                            PageItem pageItem = (PageItem) content;
-                            if ("stream_table".equals(pageItem.getItemType())) {
-                                Map<String, Object> tableMap = new HashMap<>();
-                                tableMap.put(JsonName.ITEM_TYPE, "stream_table");
-                                tableMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_STREAM_TABLE);
-                                tableMap.put(JsonName.ID, finalTextId);
-                                tableMap.put(JsonName.WIDTH, pageItem.getWidth());
-                                tableMap.put(JsonName.HEIGHT, pageItem.getHeight());
-                                tableMap.put(JsonName.X0, pageItem.getX0());
-                                tableMap.put(JsonName.X1, pageItem.getX1());
-                                tableMap.put(JsonName.Y0, pageItem.getY0());
-                                tableMap.put(JsonName.Y1, pageItem.getY1());
-                                tableMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - pageItem.getTopY());
-                                tableMap.put(JsonName.IS_THIRD_PARTY, true);
-                                List<List<Map<String, Object>>> rowList = new ArrayList<>();
-                                List<List<TableSingleItem>> tableContent = (List<List<TableSingleItem>>) pageItem.getContent();
-                                for (List<TableSingleItem> row : tableContent) {
-                                    List<Map<String, Object>> rowMapList = new ArrayList<>();
-                                    for (TableSingleItem cell : row) {
-                                        Map<String, Object> cellMap = new HashMap<>();
-                                        cellMap.put(JsonName.CELL_RADIO, cell.getCellRadio());
-                                        cellMap.put(JsonName.ROW_LENGTH, cell.getRowLen());
-                                        cellMap.put(JsonName.COLUMN_LENGTH, cell.getColumnLen());
-                                        cellMap.put(JsonName.HEIGHT, cell.getHeight());
-                                        cellMap.put(JsonName.WIDTH, cell.getWidth());
-                                        cellMap.put(JsonName.X0, cell.getX0());
-                                        cellMap.put(JsonName.X1, cell.getX1());
-                                        cellMap.put(JsonName.TEXT, cell.getText());
-                                        cellMap.put(JsonName.CELL_TYPE, "text");
-                                        rowMapList.add(cellMap);
-                                    }
-                                    rowList.add(rowMapList);
-                                }
-                                tableMap.put(JsonName.CONTENT, rowList);
-                                jsonGenerator.writeObject(tableMap);
-                            }
-                        }
-                        if (content instanceof TableBorder) {
-                            TableBorder tableBorder = (TableBorder) content;
-                            Map<String, Object> tableMap = new HashMap<>();
-                            tableMap.put(JsonName.ITEM_TYPE, "lattice_table");
-                            tableMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_LATTICE_TABLE);
-                            tableMap.put(JsonName.ID, finalTextId);
-                            tableMap.put(JsonName.WIDTH, tableBorder.getWidth());
-                            tableMap.put(JsonName.HEIGHT, tableBorder.getHeight());
-                            tableMap.put(JsonName.X0, tableBorder.getLeftX());
-                            tableMap.put(JsonName.X1, tableBorder.getRightX());
-                            tableMap.put(JsonName.Y0, height - tableBorder.getTopY());
-                            tableMap.put(JsonName.Y1, height - tableBorder.getBottomY());
-                            tableMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - tableBorder.getTopY());
-                            tableMap.put(JsonName.IS_THIRD_PARTY, false);
-                            List<List<Map<String, Object>>> rowList = new ArrayList<>();
-                            int numberOfColumns = ((TableBorder) content).getNumberOfColumns();
-                            float[] cellRadios = new float[numberOfColumns];
-                            double tableWidth = tableBorder.getLeftX(numberOfColumns) - tableBorder.getLeftX(0);
-                            float cumulativeProportion = 0;
-                            for (int i = 1; i <= numberOfColumns; i++) {
-                                if (i == numberOfColumns) {
-                                    cellRadios[i - 1] = 1 - cumulativeProportion;
-                                } else {
-                                    float cellRadio = BigDecimal.valueOf((float) (tableBorder.getLeftX(i) - tableBorder.getLeftX(i - 1)) / tableWidth)
-                                        .setScale(4, RoundingMode.HALF_UP).floatValue();
-                                    cellRadios[i - 1] = cellRadio;
-                                    cumulativeProportion += cellRadio;
-                                }
-                            }
-                            int[] cumulativeRowSpans = new int[numberOfColumns];
-                            for (int m = 0; m < tableBorder.getRows().length; m++) {
-                                TableBorderRow row = tableBorder.getRows()[m];
-                                List<Map<String, Object>> oneRowList = new ArrayList<>();
-                                int cumulativeColSpans = 0;
-                                for (int i = 0; i < row.getCells().length; i++) {
-                                    if (cumulativeColSpans >= numberOfColumns) {
-                                        break;
-                                    }
-
-                                    TableBorderCell cell = row.getCells()[i];
-                                    if (m < cumulativeRowSpans[i]) {
-                                        if (i >= cumulativeColSpans) {
-                                            cumulativeColSpans += cell.getColSpan();
-                                        }
-                                        continue;
-                                    }
-                                    Map<String, Object> cellMap = new HashMap<>();
-                                    float cellRadio = 0;
-                                    for (int j = cumulativeColSpans; j < cumulativeColSpans + cell.getColSpan(); j++) {
-                                        cellRadio += cellRadios[j];
-                                        cumulativeRowSpans[j] += cell.getRowSpan();
-                                    }
-                                    cellMap.put(JsonName.CELL_RADIO, cellRadio);
-                                    cumulativeColSpans += cell.getColSpan();
-                                    cellMap.put(JsonName.ROW_LENGTH, cell.getRowSpan());
-                                    cellMap.put(JsonName.COLUMN_LENGTH, cell.getColSpan());
-                                    cellMap.put(JsonName.HEIGHT, cell.getHeight());
-                                    cellMap.put(JsonName.WIDTH, cell.getWidth());
-                                    cellMap.put(JsonName.X0, cell.getLeftX());
-                                    cellMap.put(JsonName.X1, cell.getRightX());
-                                    cellMap.put(JsonName.Y0, height - cell.getTopY());
-                                    cellMap.put(JsonName.Y1, height - cell.getBottomY());
-                                    double[] backgroundColor = cell.getBackgroundColor();
-                                    if (backgroundColor != null && backgroundColor.length == 3) {
-                                        // convert normalized RGB [0,1] to 0-255 integers, then to hex
-                                        int r = Math.max(0, Math.min(255, (int) Math.round(backgroundColor[0] * 255)));
-                                        int g = Math.max(0, Math.min(255, (int) Math.round(backgroundColor[1] * 255)));
-                                        int b = Math.max(0, Math.min(255, (int) Math.round(backgroundColor[2] * 255)));
-                                        cellMap.put(JsonName.BACKGROUND_COLOR, String.format("#%02x%02x%02x", r, g, b));
-                                    }
-                                    String text = "";
-                                    List<String> textList = new ArrayList<>();
-                                    for (int n = cell.getRowNumber(); n < cell.getRowNumber() + cell.getRowSpan(); n++) {
-                                        for (int k = cell.getColNumber(); k < cell.getColNumber() + cell.getColSpan(); k++) {
-                                            if (n < tableBorder.getRows().length && k < tableBorder.getRows()[n].getCells().length) {
-                                                TableBorderCell cellItem = tableBorder.getRows()[n].getCells()[k];
-                                                String currentText = "";
-                                                for (IObject cellContent : cellItem.getContents()) {
-                                                    if (cellContent instanceof CustomSemanticParagraph) {
-                                                        currentText += ((CustomSemanticParagraph) cellContent).getTextLines().stream()
-                                                            .map(line ->
-                                                                line.getTextChunks().stream().map(chunk -> {
-                                                                    String val = chunk.getValue();
-                                                                    if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
-                                                                        return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
-                                                                    } else {
-                                                                        return val;
-                                                                    }
-                                                                }).collect(Collectors.joining("")))
-                                                            .collect(Collectors.joining(""));
-                                                    }
-                                                    if (cellContent instanceof TextChunk) {
-                                                        String val = ((TextChunk) cellContent).getValue();
-                                                        currentText += GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val) ?
-                                                            GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val)) :
-                                                            val;
-                                                    }
-                                                    if (cellContent instanceof ImageChunk) {
-                                                        ImageChunk imageChunk = (ImageChunk) cellContent;
-                                                        String absoluteImagesDirectory = StaticLayoutContainers.getImagesDirectory();
-                                                        String imageFormat = StaticLayoutContainers.getImageFormat();
-                                                        String absolutePath = String.format(MarkdownSyntax.IMAGE_FILE_NAME_FORMAT, absoluteImagesDirectory,
-                                                            File.separator, imageChunk.getIndex(), imageFormat);
-                                                        currentText += "<img src='" + absolutePath + "' style='height: " + imageChunk.getHeight() + "pt !important; width: " + imageChunk.getWidth() + "pt !important;' />";
-                                                    }
-                                                }
-                                                if (!textList.contains(currentText) && currentText.length() > 0) {
-                                                    textList.add(currentText);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if (textList.size() > 0) {
-                                        text = String.join("", textList);
-                                    }
-                                    cellMap.put(JsonName.TEXT, Arrays.asList(text));
-                                    cellMap.put(JsonName.CELL_TYPE, "text");
-                                    oneRowList.add(cellMap);
-                                }
-                                rowList.add(oneRowList);
-                            }
-                            tableMap.put(JsonName.CONTENT, rowList);
-                            jsonGenerator.writeObject(tableMap);
-                        }
-                        if (!(content instanceof ShapeChunk)) {
-                            textId++;
-                        }
-                        prevBottomY[0] = content.getBottomY();
+                        // close() (via try-with-resources) flushes the generator's
+                        // internal buffer, so the bytes here are the complete page JSON.
+                        pageJson = new String(pageBuffer.toByteArray(), StandardCharsets.UTF_8);
+                    } catch (Exception pageEx) {
+                        // Note: on JDK 11 JUL's log(Level, String, Object...) does not treat
+                        // a trailing Throwable as the thrown cause (LogRecord.setParameters has
+                        // no such logic). Use the log(Level, String, Throwable) overload to
+                        // ensure the stack trace is printed.
+                        LOGGER.log(Level.WARNING,
+                            inputPdfName + " - Error when generating JSON data of page " + (pageNumber + 1)
+                                + ": fallback to empty page: " + pageEx.getClass().getSimpleName() + ": " + pageEx.getMessage(),
+                            pageEx);
+                        // Minimal placeholder page: keeps page numbers contiguous with an empty items list.
+                        pageJson = placeholderPageJson(pageNumber + 1);
                     }
-
-                    jsonGenerator.writeEndArray();
-                    jsonGenerator.writeEndObject();
+                    jsonGenerator.writeRawValue(pageJson);
                 }
                 jsonGenerator.writeEndArray();
-            } catch (Exception e) {
-                throw new RuntimeException(e);
+            } catch (Exception e2) {
+                LOGGER.log(Level.WARNING,
+                    inputPdfName + " - Error when generating content JSON data: "
+                        + e2.getClass().getSimpleName() + ": " + e2.getMessage(),
+                    e2);
             } finally {
+                // Clear document-level metadata only once after serialization finishes to avoid ThreadLocal leaks;
+                // never clear inside the loop (including on exception pages), or enrichment fields would be lost
+                // from the second page onward.
                 SerializerUtil.clearElementMetadata();
             }
 
             jsonGenerator.writeEndObject();
             LOGGER.log(Level.INFO, "Created {0}", jsonFileName);
         } catch (Exception ex) {
-            LOGGER.log(Level.WARNING, "Unable to create JSON output: " + ex.getMessage());
+            LOGGER.log(Level.WARNING,
+                inputPdfName + " - Error when generating JSON data: "
+                    + ex.getClass().getSimpleName() + ": " + ex.getMessage(),
+                ex);
         }
 
-        // 重新读取json文件内容
+        // Re-read the generated JSON file into memory.
         ObjectMapper mapper = new ObjectMapper();
         Map<String, Object> map = mapper.readValue(
             new File(jsonFileName),
             new TypeReference<Map<String, Object>>() {}
         );
 
-        // 解析配置中的 OSS 参数，判断是否启用对象存储
+        // Parse OSS parameters from the configuration to decide whether object storage is enabled.
         OssUploadConfig ossConfig = OssUploadConfig.fromCustomOptions(config);
         boolean ossEnabled = ossConfig.isEnabled();
         HuaweiObsClient obsClient = null;
@@ -796,24 +333,24 @@ public class JsonWriter {
             obsClient = new HuaweiObsClient(ossConfig.getEndpoint(), ossConfig.getAccessKey(), ossConfig.getSecretKey());
         }
 
-        // 遍历每页，把图片上传到永久桶并用 OSS URL 替换本地路径
+        // Walk every page and upload images to the permanent bucket, replacing local paths with OSS URLs.
         try {
             if (ossEnabled) {
                 uploadImagesToOssAndUpdateMap(map, obsClient, ossConfig);
             }
 
-            // 扫描每一页，识别符合 OCR 条件的页面，写入 <pdfname>_ocr.json，
-            // 并在命中页上将 is_ocr 置为 true（由后续 bookmarks 写回主 JSON 时一起持久化）。
+            // Scan every page for OCR-eligible pages, write them to <pdfname>_ocr.json,
+            // and mark is_ocr=true on hit pages (persisted to the main JSON later when bookmarks are written back).
             try {
                 writeOcrDetectionJson(mapper, map, outputFolder, inputPDF.getName(), config);
             } catch (Exception ocrEx) {
-                LOGGER.log(Level.WARNING, "Unable to create OCR detection JSON: " + ocrEx.getMessage());
+                LOGGER.log(Level.WARNING, "Unable to create OCR detection JSON: " + ocrEx.getClass().getSimpleName() + ": " + ocrEx.getMessage(), ocrEx);
             }
 
-            // 在已生成的 JSON 数据上识别 catalog_bookmarks 与 page_bookmarks，
-            // page_bookmarks 的 relatedId 直接复用 JSON item 的 id。
+            // Identify catalog_bookmarks and page_bookmarks from the already-generated JSON data;
+            // page_bookmarks reuse JSON item ids as their relatedId.
             if (config != null) {
-                // 记录 BookmarkQualitySelector 选中的来源键名；未选中(null)时三个原始键全部保留。
+                // Track the source key selected by BookmarkQualitySelector; when nothing is selected (null) all three original keys are kept.
                 String selectedSource = null;
                 List<Map<String, Object>> data = (List<Map<String, Object>>) map.get(JsonName.DATA);
                 if (data != null) {
@@ -843,29 +380,28 @@ public class JsonWriter {
                     writeCollectedPageBookmarkMarkdown(outputFolder, inputPdfName, data,
                         catalogStartPage, catalogEndPage);
 
-                    // 从 catalog/page/self 三种来源中选出质量最高的目录写入 bookmarks
+                    // Select the highest-quality catalog from catalog/page/self sources and write it as bookmarks.
                     List<Bookmark> selfBookmarks = mapper.convertValue(
                         map.get("self_bookmarks"), new TypeReference<List<Bookmark>>() {});
                     Map<Integer, Set<Integer>> pageItemIds = BookmarkQualitySelector.buildPageItemIds(data);
                     BookmarkQualitySelector.Selection selection = BookmarkQualitySelector.select(
                         catalogBookmarks, pageBookmarks, selfBookmarks, pageItemIds);
                     map.put("bookmarks", selection.getBookmarks());
-                    // 只移除被选中的来源；未选中的(或全部被淘汰时 selectedSource 为 null)
-                    // 仍保留在 map 中，以便写入 json。
+                    // Remove only the source that was selected; unselected sources (or all sources when selectedSource is null) remain in the map so they are still written to json.
                     selectedSource = selection.getSource();
                 } else {
                     map.put("bookmarks", new ArrayList<>());
-                    // data 为空时无法做来源选择，三个原始键保留在输出中。
+                    // When data is empty no source selection can be performed; keep all three original keys in the output.
                 }
                 if (selectedSource != null) {
                     map.remove(selectedSource);
                 }
 
-                // 把更新后的内容重新写回 json 文件
+                // Write the updated content back to the JSON file.
                 mapper.writerWithDefaultPrettyPrinter().writeValue(new File(jsonFileName), map);
             }
 
-            // 上传主 JSON 到临时桶，并构造返回结果
+            // Upload the main JSON to the temp bucket and build the return result.
             String jsonUrlOrPath;
             String ocrJsonLocalPath = resolveOcrJsonLocalPath(outputFolder, inputPDF.getName());
             boolean ossUploadSuccess = false;
@@ -875,10 +411,10 @@ public class JsonWriter {
                 LOGGER.log(Level.INFO, "Uploaded main JSON to OBS: {0}", jsonUrlOrPath);
                 ossUploadSuccess = true;
 
-                // 上传成功后清理本地文件：保留 _ocr.json，删除 outputFolder 下与当前 PDF 相关的其余生成文件
+                // After a successful upload clean up local files: keep _ocr.json, delete the other PDF-related generated files under outputFolder.
                 cleanupLocalFiles(outputFolder, inputPDF.getName(), ocrJsonLocalPath);
             } else {
-                // 生成 html/js/css 等辅助文件
+                // Generate auxiliary html/js/css files for local output.
                 FileUtils.copyResourceToDir("templates/index.css", outputFolder);
                 String jsFileName = outputFolder + File.separator + inputPDF.getName().substring(0, inputPDF.getName().length() - 3) + "js";
                 String jsFileContent = "var url = " + mapper.writeValueAsString(inputPdfName) + ";";
@@ -891,7 +427,7 @@ public class JsonWriter {
                 FileUtils.writeToFile(jsFileName, jsFileContent);
 
                 String htmlFileName = outputFolder + File.separator + inputPDF.getName().substring(0, inputPDF.getName().length() - 3) + "html";
-                // 按行读取 templates/announcementAnalysis.html 文件，并按行写入 htmlFileName
+                // Read templates/announcementAnalysis.html line by line and write it to htmlFileName line by line.
                 List<String> htmlLines = FileUtils.readResourceLines("templates/announcementAnalysis.html");
                 String pdfFileName = inputPDF.getName().substring(0, inputPDF.getName().length() - 4);
                 htmlLines.set(6, "  <title>" + pdfFileName + "</title>");
@@ -906,14 +442,586 @@ public class JsonWriter {
                 try {
                     obsClient.close();
                 } catch (IOException closeEx) {
-                    LOGGER.log(Level.WARNING, "Failed to close OBS client: " + closeEx.getMessage());
+                    LOGGER.log(Level.WARNING, "Failed to close OBS client: " + closeEx.getClass().getSimpleName() + ": " + closeEx.getMessage(), closeEx);
                 }
             }
         }
     }
 
     /**
-     * 从 JSON data 中收集 page bookmark 候选并写出调试 markdown。
+     * Serializes a single page into a complete JSON object on the caller-supplied,
+     * independent-memory JsonGenerator (page_index / width / height / margins / items).
+     * Any exception is propagated upward so the caller can discard this page's buffer
+     * without affecting the main JSON stream structure.
+     */
+    private static void writePageToGenerator(int pageNumber, boolean includeHeaderFooter,
+                                            List<List<IObject>> contents, JsonGenerator pageGenerator,
+                                             Config config) throws IOException {
+        boolean isHk = false;
+        if (config != null && config.getCustomOptions() != null && config.getCustomOptions().containsKey("pulsarReceiveTopicName")) {
+            String pulsarReceiveTopicName = config.getCustomOptions().get("pulsarReceiveTopicName").toString();
+            if (pulsarReceiveTopicName.startsWith("hk") || pulsarReceiveTopicName.endsWith("hk")) {
+                isHk = true;
+            }
+        }
+        pageGenerator.writeStartObject();
+        pageGenerator.writeNumberField(JsonName.PAGE_INDEX, pageNumber + 1);
+        BoundingBox pageBoundingBox = DocumentProcessor.getPageBoundingBox(pageNumber);
+        double width = pageBoundingBox.getWidth();
+        double height = pageBoundingBox.getHeight();
+        pageGenerator.writeNumberField(JsonName.WIDTH, width);
+        pageGenerator.writeNumberField(JsonName.HEIGHT, height);
+        pageGenerator.writeBooleanField(JsonName.IS_OCR, false);
+        List<IObject> pageContents = contents.get(pageNumber);
+        if (isHk) {
+            pageContents = flattenHeaderFooterContents(pageContents);
+        }
+        List<IObject> layoutObjects = pageContents.stream()
+            .filter(o -> !(o instanceof SemanticHeaderOrFooter))
+            .collect(Collectors.toList());
+        List<Double> leftXList = layoutObjects.stream().map(IObject::getLeftX).collect(Collectors.toList());
+        List<Double> rightXList = layoutObjects.stream().map(IObject::getRightX).collect(Collectors.toList());
+        List<Double> topYList = layoutObjects.stream().map(IObject::getTopY).collect(Collectors.toList());
+        List<Double> bottomYList = layoutObjects.stream().map(IObject::getBottomY).collect(Collectors.toList());
+        double minX = leftXList.stream().min(Double::compare).orElse(0.0);
+        double maxX = rightXList.stream().max(Double::compare).orElse(0.0);
+        double maxY = topYList.stream().max(Double::compare).orElse(0.0);
+        double minY = bottomYList.stream().min(Double::compare).orElse(0.0);
+        pageGenerator.writeNumberField(JsonName.MARGIN_LEFT, minX);
+        pageGenerator.writeNumberField(JsonName.MARGIN_RIGHT, width - maxX);
+        pageGenerator.writeNumberField(JsonName.MARGIN_TOP, height - maxY);
+        pageGenerator.writeNumberField(JsonName.MARGIN_BOTTOM, minY);
+        pageGenerator.writeArrayFieldStart(JsonName.ITEMS);
+        generateJsonPageContentData(includeHeaderFooter, height, pageContents, pageGenerator);
+        pageGenerator.writeEndArray();
+        pageGenerator.writeEndObject();
+    }
+
+    /**
+     * Walks the page contents and expands only the first {@link SemanticHeaderOrFooter}
+     * encountered — replacing it in-place with {@code getContents()} while preserving
+     * relative order. Any later {@code SemanticHeaderOrFooter} on the same page is kept
+     * unchanged, as are all other elements.
+     *
+     * <p>This lets the real header/footer contents reach their own type-specific
+     * serialization branches in {@link #generateJsonPageContentData}; the header/footer
+     * wrapper itself has no dedicated branch there and would otherwise be dropped entirely.</p>
+     */
+    private static List<IObject> flattenHeaderFooterContents(List<IObject> pageContents) {
+        List<IObject> flattened = new ArrayList<>(pageContents.size());
+        boolean firstHeaderOrFooterSeen = false;
+        for (IObject content : pageContents) {
+            if (content instanceof SemanticHeaderOrFooter && !firstHeaderOrFooterSeen) {
+                // Process only the first header/footer seen on the page, even if its contents are empty;
+                // subsequent headers/footers are kept unchanged.
+                firstHeaderOrFooterSeen = true;
+                List<IObject> contents = ((SemanticHeaderOrFooter) content).getContents();
+                if (contents != null && !contents.isEmpty()) {
+                    flattened.addAll(contents);
+                    continue;
+                }
+                // Fallback when contents is empty: keep the header/footer element unchanged.
+            }
+            flattened.add(content);
+        }
+        return flattened;
+    }
+
+    /**
+     * Minimal placeholder page written when page serialization fails: keeps
+     * the page index and an empty items array so the {@code data} array has
+     * the same length as the PDF and page_index stays contiguous.
+     */
+    private static String placeholderPageJson(int pageIndex) throws IOException {
+        Map<String, Object> placeholder = new LinkedHashMap<>();
+        placeholder.put(JsonName.PAGE_INDEX, pageIndex);
+        placeholder.put(JsonName.IS_OCR, false);
+        placeholder.put(JsonName.ITEMS, Collections.emptyList());
+        return ObjectMapperHolder.getObjectMapper().writeValueAsString(placeholder);
+    }
+
+    private static void generateJsonPageContentData(boolean includeHeaderFooter, double height, List<IObject> pageContents, JsonGenerator jsonGenerator) throws IOException {
+        final double[] prevBottomY = {height};
+        int textId = 1;
+        for (IObject content : pageContents) {
+            final int finalTextId = textId;
+            if (content instanceof LineArtChunk || content instanceof ShapeChunk) {
+                continue;
+            }
+            if (!includeHeaderFooter && content instanceof SemanticHeaderOrFooter) {
+                continue;
+            }
+            if (content instanceof SemanticHeading) {
+                SemanticHeading heading = (SemanticHeading) content;
+                List<Map<String, Object>> headingList = new ArrayList<>();
+                final double[] lineBottomY = {prevBottomY[0]};
+                heading.getColumns().forEach(column -> {
+                    column.getBlocks().forEach(block -> {
+                        Map<String, Object> paragraphMap = new HashMap<>();
+                        paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                        paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_HEADING);
+                        paragraphMap.put(JsonName.ID, finalTextId);
+                        paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, block.getFontSize());
+                        paragraphMap.put(JsonName.X0, block.getLeftX());
+                        paragraphMap.put(JsonName.X1, block.getRightX());
+                        paragraphMap.put(JsonName.Y0, height - block.getTopY());
+                        paragraphMap.put(JsonName.Y1, height - block.getBottomY());
+                        paragraphMap.put(JsonName.WIDTH, block.getWidth());
+                        paragraphMap.put(JsonName.HEIGHT, block.getHeight());
+                        paragraphMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - block.getTopY());
+                        List<Map<String, Object>> lineList = new ArrayList<>();
+                        block.getLines().forEach(line -> {
+                            Map<String, Object> textMap = new HashMap<>();
+                            textMap.put(JsonName.ITEM_TYPE, "text");
+                            textMap.put(JsonName.FONT_UNDERLINE_SIZE, line.getFontSize());
+                            textMap.put(JsonName.X0, line.getLeftX());
+                            textMap.put(JsonName.X1, line.getRightX());
+                            textMap.put(JsonName.Y0, height - line.getTopY());
+                            textMap.put(JsonName.Y1, height - line.getBottomY());
+                            textMap.put(JsonName.WIDTH, line.getWidth());
+                            textMap.put(JsonName.HEIGHT, line.getHeight());
+                            textMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
+                            String lineText = line.getTextChunks().stream().map(chunk -> {
+                                String val = chunk.getValue();
+                                if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
+                                    return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
+                                } else {
+                                    return val;
+                                }
+                            }).collect(Collectors.joining(""));
+                            textMap.put(JsonName.CONTENT, Arrays.asList(lineText));
+                            lineList.add(textMap);
+                            lineBottomY[0] = line.getBottomY();
+                        });
+                        paragraphMap.put(JsonName.CONTENT, lineList);
+                        headingList.add(paragraphMap);
+                        lineBottomY[0] = block.getBottomY();
+                    });
+                });
+                for (Map<String, Object> headingItem : headingList) {
+                    jsonGenerator.writeObject(headingItem);
+                }
+            }
+            if (content instanceof PDFList) {
+                PDFList pdfList = (PDFList) content;
+                List<Map<String, Object>> list = new ArrayList<>();
+                final double[] lineBottomY = {prevBottomY[0]};
+                pdfList.getListItems().forEach(listItem -> {
+                    Map<String, Object> paragraphMap = new HashMap<>();
+                    paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                    paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_LIST);
+                    paragraphMap.put(JsonName.ID, finalTextId);
+                    paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, listItem.getFontSize());
+                    paragraphMap.put(JsonName.X0, listItem.getLeftX());
+                    paragraphMap.put(JsonName.X1, listItem.getRightX());
+                    paragraphMap.put(JsonName.Y0, height - listItem.getTopY());
+                    paragraphMap.put(JsonName.Y1, height - listItem.getBottomY());
+                    paragraphMap.put(JsonName.WIDTH, listItem.getWidth());
+                    paragraphMap.put(JsonName.HEIGHT, listItem.getHeight());
+                    paragraphMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - listItem.getTopY());
+                    List<Map<String, Object>> lineList = new ArrayList<>();
+                    listItem.getLines().forEach(line -> {
+                        Map<String, Object> textMap = new HashMap<>();
+                        textMap.put(JsonName.ITEM_TYPE, "text");
+                        textMap.put(JsonName.FONT_UNDERLINE_SIZE, line.getFontSize());
+                        textMap.put(JsonName.X0, line.getLeftX());
+                        textMap.put(JsonName.X1, line.getRightX());
+                        textMap.put(JsonName.Y0, height - line.getTopY());
+                        textMap.put(JsonName.Y1, height - line.getBottomY());
+                        textMap.put(JsonName.WIDTH, line.getWidth());
+                        textMap.put(JsonName.HEIGHT, line.getHeight());
+                        textMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
+                        String lineText = line.getTextChunks().stream().map(chunk -> {
+                            String val = chunk.getValue();
+                            if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
+                                return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
+                            } else {
+                                return val;
+                            }
+                        }).collect(Collectors.joining(""));
+                        textMap.put(JsonName.CONTENT, Arrays.asList(lineText));
+                        lineList.add(textMap);
+                        lineBottomY[0] = line.getBottomY();
+                    });
+                    paragraphMap.put(JsonName.CONTENT, lineList);
+                    list.add(paragraphMap);
+                    lineBottomY[0] = listItem.getBottomY();
+                });
+                for (Map<String, Object> pdfItem : list) {
+                    jsonGenerator.writeObject(pdfItem);
+                }
+            }
+            if (content instanceof SemanticCaption) {
+                SemanticCaption semanticCaption = (SemanticCaption) content;
+                List<Map<String, Object>> captionList = new ArrayList<>();
+                final double[] lineBottomY = {prevBottomY[0]};
+                semanticCaption.getColumns().forEach(column -> {
+                    column.getBlocks().forEach(block -> {
+                        Map<String, Object> paragraphMap = new HashMap<>();
+                        paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                        paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_CAPTION);
+                        paragraphMap.put(JsonName.ID, finalTextId);
+                        paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, block.getFontSize());
+                        paragraphMap.put(JsonName.X0, block.getLeftX());
+                        paragraphMap.put(JsonName.X1, block.getRightX());
+                        paragraphMap.put(JsonName.Y0, height - block.getTopY());
+                        paragraphMap.put(JsonName.Y1, height - block.getBottomY());
+                        paragraphMap.put(JsonName.WIDTH, block.getWidth());
+                        paragraphMap.put(JsonName.HEIGHT, block.getHeight());
+                        paragraphMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - block.getTopY());
+                        List<Map<String, Object>> lineList = new ArrayList<>();
+                        block.getLines().forEach(line -> {
+                            Map<String, Object> textMap = new HashMap<>();
+                            textMap.put(JsonName.ITEM_TYPE, "text");
+                            textMap.put(JsonName.FONT_UNDERLINE_SIZE, line.getFontSize());
+                            textMap.put(JsonName.X0, line.getLeftX());
+                            textMap.put(JsonName.X1, line.getRightX());
+                            textMap.put(JsonName.Y0, height - line.getTopY());
+                            textMap.put(JsonName.Y1, height - line.getBottomY());
+                            textMap.put(JsonName.WIDTH, line.getWidth());
+                            textMap.put(JsonName.HEIGHT, line.getHeight());
+                            textMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
+                            String lineText = line.getTextChunks().stream().map(chunk -> {
+                                String val = chunk.getValue();
+                                if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
+                                    return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
+                                } else {
+                                    return val;
+                                }
+                            }).collect(Collectors.joining(""));
+                            textMap.put(JsonName.CONTENT, Arrays.asList(lineText));
+                            lineList.add(textMap);
+                            lineBottomY[0] = line.getBottomY();
+                        });
+                        paragraphMap.put(JsonName.CONTENT, lineList);
+                        captionList.add(paragraphMap);
+                        lineBottomY[0] = block.getBottomY();
+                    });
+                });
+                for (Map<String, Object> captionItem : captionList) {
+                    jsonGenerator.writeObject(captionItem);
+                }
+            }
+            if (content instanceof SemanticTOC) {
+                SemanticTOC semanticTOC = (SemanticTOC) content;
+                List<Map<String, Object>> tocList = new ArrayList<>();
+                final double[] lineBottomY = {prevBottomY[0]};
+                semanticTOC.getTOCItems().forEach(tocItem -> {
+                    if (tocItem instanceof SemanticTOCI) {
+                        SemanticTOCI semanticTOCI = (SemanticTOCI) tocItem;
+                        semanticTOCI.getLines().forEach(line -> {
+                            Map<String, Object> paragraphMap = new HashMap<>();
+                            paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                            paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_TOC);
+                            paragraphMap.put(JsonName.ID, finalTextId);
+                            paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, line.getFontSize());
+                            paragraphMap.put(JsonName.X0, line.getLeftX());
+                            paragraphMap.put(JsonName.X1, line.getRightX());
+                            paragraphMap.put(JsonName.Y0, height - line.getTopY());
+                            paragraphMap.put(JsonName.Y1, height - line.getBottomY());
+                            paragraphMap.put(JsonName.WIDTH, line.getWidth());
+                            paragraphMap.put(JsonName.HEIGHT, line.getHeight());
+                            paragraphMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
+                            Map<String, Object> tocItemMap = new HashMap<>();
+                            tocItemMap.put(JsonName.ITEM_TYPE, "text");
+                            tocItemMap.put(JsonName.FONT_UNDERLINE_SIZE, line.getFontSize());
+                            tocItemMap.put(JsonName.X0, line.getLeftX());
+                            tocItemMap.put(JsonName.X1, line.getRightX());
+                            tocItemMap.put(JsonName.Y0, height - line.getTopY());
+                            tocItemMap.put(JsonName.Y1, height - line.getBottomY());
+                            tocItemMap.put(JsonName.WIDTH, line.getWidth());
+                            tocItemMap.put(JsonName.HEIGHT, line.getHeight());
+                            tocItemMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
+                            String lineText = line.getTextChunks().stream().map(chunk -> {
+                                String val = chunk.getValue();
+                                if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
+                                    return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
+                                } else {
+                                    return val;
+                                }
+                            }).collect(Collectors.joining(""));
+                            tocItemMap.put(JsonName.CONTENT, Arrays.asList(lineText));
+                            paragraphMap.put(JsonName.CONTENT, Arrays.asList(tocItemMap));
+                            tocList.add(paragraphMap);
+                            lineBottomY[0] = line.getBottomY();
+                        });
+                    }
+                });
+                for (Map<String, Object> tocItem : tocList) {
+                    jsonGenerator.writeObject(tocItem);
+                }
+            }
+            if (content instanceof TextChunk) {
+                Map<String, Object> paragraphMap = new HashMap<>();
+                List<Map<String, Object>> paragraphContentList = new ArrayList<>();
+                TextChunk textChunk = (TextChunk) content;
+                Map<String, Object> textLineMap = new HashMap<>();
+                textLineMap.put(JsonName.ITEM_TYPE, "text");
+                textLineMap.put(JsonName.IS_THIRD_PARTY, true);
+                textLineMap.put(JsonName.HEIGHT, textChunk.getHeight());
+                textLineMap.put(JsonName.WIDTH, textChunk.getWidth());
+                textLineMap.put(JsonName.FONT_UNDERLINE_SIZE, textChunk.getFontSize());
+                textLineMap.put(JsonName.X0, textChunk.getLeftX());
+                textLineMap.put(JsonName.X1, textChunk.getRightX());
+                textLineMap.put(JsonName.Y0, height - textChunk.getTopY());
+                textLineMap.put(JsonName.Y1, height - textChunk.getBottomY());
+                textLineMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - textChunk.getTopY());
+                textLineMap.put(JsonName.CONTENT, Arrays.asList(textChunk.getValue()));
+                paragraphContentList.add(textLineMap);
+                paragraphMap.put(JsonName.CONTENT, paragraphContentList);
+                paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_TEXT_CHUNK);
+                paragraphMap.put(JsonName.ID, finalTextId);
+                paragraphMap.put(JsonName.IS_BOOKMARK, false);
+                paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, textChunk.getFontSize());
+                paragraphMap.put(JsonName.X0, textChunk.getLeftX());
+                paragraphMap.put(JsonName.X1, textChunk.getRightX());
+                paragraphMap.put(JsonName.Y0, height - textChunk.getTopY());
+                paragraphMap.put(JsonName.Y1, height - textChunk.getBottomY());
+                paragraphMap.put(JsonName.WIDTH, textChunk.getWidth());
+                paragraphMap.put(JsonName.HEIGHT, textChunk.getHeight());
+                paragraphMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - textChunk.getTopY());
+                jsonGenerator.writeObject(paragraphMap);
+            }
+            if (content instanceof CustomSemanticParagraph) {
+                Map<String, Object> paragraphMap = new HashMap<>();
+                List<Map<String, Object>> paragraphContentList = new ArrayList<>();
+                CustomSemanticParagraph customSemanticParagraph = (CustomSemanticParagraph) content;
+                final double[] lineBottomY = {prevBottomY[0]};
+                customSemanticParagraph.getTextLines().forEach(textLine -> {
+                    Map<String, Object> textLineMap = new HashMap<>();
+                    textLineMap.put(JsonName.ITEM_TYPE, "text");
+                    textLineMap.put(JsonName.IS_THIRD_PARTY, false);
+                    textLineMap.put(JsonName.HEIGHT, textLine.getHeight());
+                    textLineMap.put(JsonName.WIDTH, textLine.getWidth());
+                    textLineMap.put(JsonName.FONT_UNDERLINE_SIZE, textLine.getFontSize());
+                    textLineMap.put(JsonName.X0, textLine.getLeftX());
+                    textLineMap.put(JsonName.X1, textLine.getRightX());
+                    textLineMap.put(JsonName.Y0, height - textLine.getTopY());
+                    textLineMap.put(JsonName.Y1, height - textLine.getBottomY());
+                    textLineMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - textLine.getTopY());
+                    String lineText = textLine.getTextChunks().stream().map(chunk -> {
+                        String val = chunk.getValue();
+                        if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
+                            return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
+                        } else {
+                            return val;
+                        }
+                    }).collect(Collectors.joining(""));
+                    textLineMap.put(JsonName.CONTENT, Arrays.asList(lineText));
+                    paragraphContentList.add(textLineMap);
+                    lineBottomY[0] = textLine.getBottomY();
+                });
+                paragraphMap.put(JsonName.CONTENT, paragraphContentList);
+                paragraphMap.put(JsonName.ITEM_TYPE, "text");
+                paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_PARAGRAPH);
+                paragraphMap.put(JsonName.ID, finalTextId);
+                paragraphMap.put(JsonName.IS_BOOKMARK, false);
+                paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, customSemanticParagraph.getFontSize());
+                paragraphMap.put(JsonName.X0, customSemanticParagraph.getLeftX());
+                paragraphMap.put(JsonName.X1, customSemanticParagraph.getRightX());
+                paragraphMap.put(JsonName.Y0, height - customSemanticParagraph.getTopY());
+                paragraphMap.put(JsonName.Y1, height - customSemanticParagraph.getBottomY());
+                paragraphMap.put(JsonName.WIDTH, customSemanticParagraph.getWidth());
+                paragraphMap.put(JsonName.HEIGHT, customSemanticParagraph.getHeight());
+                paragraphMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - customSemanticParagraph.getTopY());
+                jsonGenerator.writeObject(paragraphMap);
+            }
+            if (content instanceof ImageChunk) {
+                ImageChunk imageChunk = (ImageChunk) content;
+                Map<String, Object> imageMap = new HashMap<>();
+                imageMap.put(JsonName.ITEM_TYPE, "image");
+                imageMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_IMAGE);
+                imageMap.put(JsonName.ID, finalTextId);
+                imageMap.put(JsonName.WIDTH, imageChunk.getWidth());
+                imageMap.put(JsonName.HEIGHT, imageChunk.getHeight());
+                imageMap.put(JsonName.FONT_UNDERLINE_SIZE, imageChunk.getHeight());
+                imageMap.put(JsonName.X0, imageChunk.getLeftX());
+                imageMap.put(JsonName.X1, imageChunk.getRightX());
+                imageMap.put(JsonName.Y0, height - imageChunk.getTopY());
+                imageMap.put(JsonName.Y1, height - imageChunk.getBottomY());
+                String absoluteImagesDirectory = StaticLayoutContainers.getImagesDirectory();
+                String imageFormat = StaticLayoutContainers.getImageFormat();
+                String absolutePath = String.format(MarkdownSyntax.IMAGE_FILE_NAME_FORMAT, absoluteImagesDirectory,
+                    File.separator, imageChunk.getIndex(), imageFormat);
+                imageMap.put(JsonName.CONTENT, Arrays.asList(absolutePath));
+                imageMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - imageChunk.getTopY());
+                jsonGenerator.writeObject(imageMap);
+            }
+            if (content instanceof PageItem) {
+                PageItem pageItem = (PageItem) content;
+                if ("stream_table".equals(pageItem.getItemType())) {
+                    Map<String, Object> tableMap = new HashMap<>();
+                    tableMap.put(JsonName.ITEM_TYPE, "stream_table");
+                    tableMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_STREAM_TABLE);
+                    tableMap.put(JsonName.ID, finalTextId);
+                    tableMap.put(JsonName.WIDTH, pageItem.getWidth());
+                    tableMap.put(JsonName.HEIGHT, pageItem.getHeight());
+                    tableMap.put(JsonName.X0, pageItem.getX0());
+                    tableMap.put(JsonName.X1, pageItem.getX1());
+                    tableMap.put(JsonName.Y0, pageItem.getY0());
+                    tableMap.put(JsonName.Y1, pageItem.getY1());
+                    tableMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - pageItem.getTopY());
+                    tableMap.put(JsonName.IS_THIRD_PARTY, true);
+                    List<List<Map<String, Object>>> rowList = new ArrayList<>();
+                    List<List<TableSingleItem>> tableContent = (List<List<TableSingleItem>>) pageItem.getContent();
+                    for (List<TableSingleItem> row : tableContent) {
+                        List<Map<String, Object>> rowMapList = new ArrayList<>();
+                        for (TableSingleItem cell : row) {
+                            Map<String, Object> cellMap = new HashMap<>();
+                            cellMap.put(JsonName.CELL_RADIO, cell.getCellRadio());
+                            cellMap.put(JsonName.ROW_LENGTH, cell.getRowLen());
+                            cellMap.put(JsonName.COLUMN_LENGTH, cell.getColumnLen());
+                            cellMap.put(JsonName.HEIGHT, cell.getHeight());
+                            cellMap.put(JsonName.WIDTH, cell.getWidth());
+                            cellMap.put(JsonName.X0, cell.getX0());
+                            cellMap.put(JsonName.X1, cell.getX1());
+                            cellMap.put(JsonName.TEXT, cell.getText());
+                            cellMap.put(JsonName.CELL_TYPE, "text");
+                            rowMapList.add(cellMap);
+                        }
+                        rowList.add(rowMapList);
+                    }
+                    tableMap.put(JsonName.CONTENT, rowList);
+                    jsonGenerator.writeObject(tableMap);
+                }
+            }
+            if (content instanceof TableBorder) {
+                TableBorder tableBorder = (TableBorder) content;
+                Map<String, Object> tableMap = new HashMap<>();
+                tableMap.put(JsonName.ITEM_TYPE, "lattice_table");
+                tableMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_LATTICE_TABLE);
+                tableMap.put(JsonName.ID, finalTextId);
+                tableMap.put(JsonName.WIDTH, tableBorder.getWidth());
+                tableMap.put(JsonName.HEIGHT, tableBorder.getHeight());
+                tableMap.put(JsonName.X0, tableBorder.getLeftX());
+                tableMap.put(JsonName.X1, tableBorder.getRightX());
+                tableMap.put(JsonName.Y0, height - tableBorder.getTopY());
+                tableMap.put(JsonName.Y1, height - tableBorder.getBottomY());
+                tableMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - tableBorder.getTopY());
+                tableMap.put(JsonName.IS_THIRD_PARTY, false);
+                List<List<Map<String, Object>>> rowList = new ArrayList<>();
+                int numberOfColumns = ((TableBorder) content).getNumberOfColumns();
+                float[] cellRadios = new float[numberOfColumns];
+                double tableWidth = tableBorder.getLeftX(numberOfColumns) - tableBorder.getLeftX(0);
+                float cumulativeProportion = 0;
+                for (int i = 1; i <= numberOfColumns; i++) {
+                    if (i == numberOfColumns) {
+                        cellRadios[i - 1] = 1 - cumulativeProportion;
+                    } else {
+                        float cellRadio = BigDecimal.valueOf((float) (tableBorder.getLeftX(i) - tableBorder.getLeftX(i - 1)) / tableWidth)
+                            .setScale(4, RoundingMode.HALF_UP).floatValue();
+                        cellRadios[i - 1] = cellRadio;
+                        cumulativeProportion += cellRadio;
+                    }
+                }
+                int[] cumulativeRowSpans = new int[numberOfColumns];
+                for (int m = 0; m < tableBorder.getRows().length; m++) {
+                    TableBorderRow row = tableBorder.getRows()[m];
+                    List<Map<String, Object>> oneRowList = new ArrayList<>();
+                    int cumulativeColSpans = 0;
+                    for (int i = 0; i < row.getCells().length; i++) {
+                        if (cumulativeColSpans >= numberOfColumns) {
+                            break;
+                        }
+
+                        TableBorderCell cell = row.getCells()[i];
+                        if (m < cumulativeRowSpans[i]) {
+                            if (i >= cumulativeColSpans) {
+                                cumulativeColSpans += cell.getColSpan();
+                            }
+                            continue;
+                        }
+                        Map<String, Object> cellMap = new HashMap<>();
+                        float cellRadio = 0;
+                        for (int j = cumulativeColSpans; j < cumulativeColSpans + cell.getColSpan(); j++) {
+                            if (j >= cellRadios.length) {
+                                break;
+                            }
+                            cellRadio += cellRadios[j];
+                            cumulativeRowSpans[j] += cell.getRowSpan();
+                        }
+                        cellMap.put(JsonName.CELL_RADIO, cellRadio);
+                        cumulativeColSpans += cell.getColSpan();
+                        cellMap.put(JsonName.ROW_LENGTH, cell.getRowSpan());
+                        cellMap.put(JsonName.COLUMN_LENGTH, cell.getColSpan());
+                        cellMap.put(JsonName.HEIGHT, cell.getHeight());
+                        cellMap.put(JsonName.WIDTH, cell.getWidth());
+                        cellMap.put(JsonName.X0, cell.getLeftX());
+                        cellMap.put(JsonName.X1, cell.getRightX());
+                        cellMap.put(JsonName.Y0, height - cell.getTopY());
+                        cellMap.put(JsonName.Y1, height - cell.getBottomY());
+                        double[] backgroundColor = cell.getBackgroundColor();
+                        if (backgroundColor != null && backgroundColor.length == 3) {
+                            // convert normalized RGB [0,1] to 0-255 integers, then to hex
+                            int r = Math.max(0, Math.min(255, (int) Math.round(backgroundColor[0] * 255)));
+                            int g = Math.max(0, Math.min(255, (int) Math.round(backgroundColor[1] * 255)));
+                            int b = Math.max(0, Math.min(255, (int) Math.round(backgroundColor[2] * 255)));
+                            cellMap.put(JsonName.BACKGROUND_COLOR, String.format("#%02x%02x%02x", r, g, b));
+                        }
+                        String text = "";
+                        List<String> textList = new ArrayList<>();
+                        for (int n = cell.getRowNumber(); n < cell.getRowNumber() + cell.getRowSpan(); n++) {
+                            for (int k = cell.getColNumber(); k < cell.getColNumber() + cell.getColSpan(); k++) {
+                                if (n < tableBorder.getRows().length && k < tableBorder.getRows()[n].getCells().length) {
+                                    TableBorderCell cellItem = tableBorder.getRows()[n].getCells()[k];
+                                    String currentText = "";
+                                    for (IObject cellContent : cellItem.getContents()) {
+                                        if (cellContent instanceof CustomSemanticParagraph) {
+                                            currentText += ((CustomSemanticParagraph) cellContent).getTextLines().stream()
+                                                .map(line ->
+                                                    line.getTextChunks().stream().map(chunk -> {
+                                                        String val = chunk.getValue();
+                                                        if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
+                                                            return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
+                                                        } else {
+                                                            return val;
+                                                        }
+                                                    }).collect(Collectors.joining("")))
+                                                .collect(Collectors.joining(""));
+                                        }
+                                        if (cellContent instanceof TextChunk) {
+                                            String val = ((TextChunk) cellContent).getValue();
+                                            currentText += GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val) ?
+                                                GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val)) :
+                                                val;
+                                        }
+                                        if (cellContent instanceof ImageChunk) {
+                                            ImageChunk imageChunk = (ImageChunk) cellContent;
+                                            String absoluteImagesDirectory = StaticLayoutContainers.getImagesDirectory();
+                                            String imageFormat = StaticLayoutContainers.getImageFormat();
+                                            String absolutePath = String.format(MarkdownSyntax.IMAGE_FILE_NAME_FORMAT, absoluteImagesDirectory,
+                                                File.separator, imageChunk.getIndex(), imageFormat);
+                                            currentText += "<img src='" + absolutePath + "' style='height: " + imageChunk.getHeight() + "pt !important; width: " + imageChunk.getWidth() + "pt !important;' />";
+                                        }
+                                    }
+                                    if (!textList.contains(currentText) && currentText.length() > 0) {
+                                        textList.add(currentText);
+                                    }
+                                }
+                            }
+                        }
+                        if (textList.size() > 0) {
+                            text = String.join("", textList);
+                        }
+                        cellMap.put(JsonName.TEXT, Arrays.asList(text));
+                        cellMap.put(JsonName.CELL_TYPE, "text");
+                        oneRowList.add(cellMap);
+                    }
+                    rowList.add(oneRowList);
+                }
+                tableMap.put(JsonName.CONTENT, rowList);
+                jsonGenerator.writeObject(tableMap);
+            }
+            if (!(content instanceof ShapeChunk)) {
+                textId++;
+            }
+            prevBottomY[0] = content.getBottomY();
+        }
+    }
+
+    /**
+     * Collects page bookmark candidates from JSON data and writes a debug markdown file.
      */
     private static void writeCollectedPageBookmarkMarkdown(String outputFolder, String inputPdfName,
                                                            List<Map<String, Object>> data,
@@ -969,24 +1077,24 @@ public class JsonWriter {
     }
 
     /**
-     * 扫描主 JSON 的每一页，对符合 OCR 条件的页面：
+     * Scans every page of the main JSON and, for pages that satisfy the OCR conditions:
      * <ul>
-     *     <li>将页面对象上的 {@code is_ocr} 置为 {@code true}（由后续 bookmarks 写回时一起持久化到主 JSON）</li>
-     *     <li>把命中页汇总后写入 {@code <pdfname>_ocr.json}（紧凑 JSON，与样例格式一致）</li>
+     *     <li>sets {@code is_ocr} to {@code true} on the page object (persisted to the main JSON when bookmarks are written back)</li>
+     *     <li>aggregates hit pages and writes them to {@code <pdfname>_ocr.json} (compact JSON matching the sample format)</li>
      * </ul>
      *
-     * <p>OCR 命中条件：
+     * <p>OCR hit conditions:
      * <ol>
-     *     <li>页面 items 数量不超过 4</li>
-     *     <li>页面内不含 lattice_table / stream_table</li>
-     *     <li>页面内至少包含一张图片</li>
-     *     <li>存在某张图片，其 {@code height / page.height > 0.8}（同一页内有多张满足条件时取比例最大的那张）</li>
+     *     <li>the page has no more than 4 items</li>
+     *     <li>the page contains no lattice_table / stream_table</li>
+     *     <li>the page contains at least one image</li>
+     *     <li>some image on the page has {@code height / page.height > 0.8} (when several images qualify, the one with the largest ratio is used)</li>
      * </ol>
      *
-     * @param mapper       已用于读写主 JSON 的 ObjectMapper
-     * @param map          主 JSON 反序列化得到的内存 Map（其内 {@code data} 列表会被原地更新 is_ocr）
-     * @param outputFolder 输出目录（与主 JSON 同目录）
-     * @param pdfFileName  原始 PDF 文件名（含扩展名），用于推导 {@code <pdfname>_ocr.json}
+     * @param mapper       ObjectMapper already used to read/write the main JSON
+     * @param map          in-memory Map deserialized from the main JSON (its {@code data} list is updated in-place with is_ocr)
+     * @param outputFolder output directory (same as the main JSON)
+     * @param pdfFileName  original PDF file name (with extension), used to derive {@code <pdfname>_ocr.json}
      */
     private static void writeOcrDetectionJson(ObjectMapper mapper,
                                               Map<String, Object> map,
@@ -1007,12 +1115,12 @@ public class JsonWriter {
             }
             List<Map<String, Object>> items = (List<Map<String, Object>>) itemsObj;
 
-            // 条件1：items 数量不超过 4
+            // Condition 1: at most 4 items on the page.
             if (items.size() > 4) {
                 continue;
             }
 
-            // 条件2：无表格
+            // Condition 2: no tables.
             boolean hasTable = false;
             for (Map<String, Object> item : items) {
                 String itemType = (String) item.get(JsonName.ITEM_TYPE);
@@ -1025,7 +1133,7 @@ public class JsonWriter {
                 continue;
             }
 
-            // 条件3 + 4：包含图片，且有图片 height / page.height > 0.8
+            // Conditions 3 + 4: contains an image and some image has height / page.height > 0.8.
             Object pageHeightObj = page.get(JsonName.HEIGHT);
             if (!(pageHeightObj instanceof Number)) {
                 continue;
@@ -1057,7 +1165,7 @@ public class JsonWriter {
                 continue;
             }
 
-            // 命中：标记 is_ocr=true，并收集到 ocrEntries
+            // Hit: mark is_ocr=true and collect into ocrEntries.
             page.put(JsonName.IS_OCR, true);
 
             String imageUrl = "";
@@ -1080,14 +1188,14 @@ public class JsonWriter {
             ocrEntries.add(entry);
         }
 
-        // 没有命中页时跳过写出，避免产生空 _ocr.json
+        // Skip writing when no page hit, to avoid producing an empty _ocr.json.
         if (ocrEntries.isEmpty()) {
             LOGGER.log(Level.INFO, "No OCR pages detected, skip creating _ocr.json for {0}", pdfFileName);
             return;
         }
 
-        // business_id / extend 取自 config.customOptions（key 分别为 businessId / extend），
-        // 缺省时回落到原样（"None" / 空对象），保持向后兼容。
+        // business_id / extend come from config.customOptions (keys businessId / extend respectively),
+        // falling back to the original defaults ("None" / empty object) when absent to keep backward compatibility.
         Object businessId = null;
         Object extendValue = null;
         Map<String, Object> customOptions = config != null ? config.getCustomOptions() : null;
@@ -1110,21 +1218,21 @@ public class JsonWriter {
         ocrResult.put("url", map.get("url"));
         ocrResult.put("data", ocrEntries);
 
-        // 文件名：与主 JSON 同前缀（去掉尾部因 length()-3 残留的 '.'），后缀改为 "_ocr.json"
+        // File name: same prefix as the main JSON (drop the trailing dot left over from length()-3), suffix changed to "_ocr.json".
         String ocrBaseName = pdfFileName.substring(0, pdfFileName.length() - 3);
         if (ocrBaseName.endsWith(".")) {
             ocrBaseName = ocrBaseName.substring(0, ocrBaseName.length() - 1);
         }
         String ocrFileName = outputFolder + File.separator + ocrBaseName + "_ocr.json";
 
-        // 紧凑 JSON（与样例 202604231785283947722051256_ocr.json 单行格式一致）
+        // Compact JSON (single-line, matching the sample 202604231785283947722051256_ocr.json format).
         mapper.writeValue(new File(ocrFileName), ocrResult);
         LOGGER.log(Level.INFO, "Created {0}", ocrFileName);
     }
 
     /**
-     * 解析 self_bookmarks 的 related_id：对每个书签按 page_num 定位 JSON 页，
-     * 用书签标题在该页 items 中匹配文本项，命中则复用其 id，未命中保持 0。
+     * Resolves related_id for self_bookmarks: for each bookmark, locate the JSON page by page_num,
+     * match the bookmark title against text items in that page, and reuse the item id on a hit; keep 0 otherwise.
      */
     private static void resolveSelfBookmarkRelatedIds(ObjectMapper mapper, Map<String, Object> map,
                                                      List<Map<String, Object>> data) {
@@ -1138,9 +1246,9 @@ public class JsonWriter {
     }
 
     /**
-     * 修复 self_bookmarks 中 page_num 为 0 的节点：page_num=0 占比超过 30% 直接清空，
-     * 否则按 DFS 先序在前后锚点范围内做内容匹配补齐 page_num 与 related_id，
-     * 未命中则用 prev.pageNum+1（或 1）兜底。
+     * Repairs self_bookmarks nodes whose page_num is 0: if more than 30% of nodes have page_num=0 the list is cleared;
+     * otherwise page_num and related_id are filled by content matching within the anchor ranges in DFS pre-order,
+     * falling back to prev.pageNum+1 (or 1) when no match is found.
      */
     private static void repairSelfBookmarkRelatedPageNums(ObjectMapper mapper, Map<String, Object> map,
                                                           List<Map<String, Object>> data) {
@@ -1154,7 +1262,7 @@ public class JsonWriter {
     }
 
     /**
-     * 取 JSON item 的第一行文本（用于模式匹配）。
+     * Returns the first line of text from a JSON item (used for pattern matching).
      */
     private static String getItemFirstLineText(Map<String, Object> item) {
         Object contentObj = item.get(JsonName.CONTENT);
@@ -1173,11 +1281,11 @@ public class JsonWriter {
     }
 
     /**
-     * 取 JSON item 的完整文本。
+     * Returns the full text of a JSON item.
      *
-     * <p>遍历 item 所有行所有片段，调 {@link SmartTextJoiner} 按"两边都是 ASCII
-     * 字母或两边都是 ASCII 数字才插空格"的规则拼接成单行文本。空字符串片段
-     * 会被跳过，避免引入多余空白。</p>
+     * <p>Walks every line and every fragment of the item and joins them into a single-line string via
+     * {@link SmartTextJoiner} using the rule "insert a space only when both sides are ASCII letters or both sides are
+     * ASCII digits". Empty fragments are skipped to avoid introducing extra whitespace.</p>
      */
     private static String getItemFullText(Map<String, Object> item) {
         Object contentObj = item.get(JsonName.CONTENT);
@@ -1209,7 +1317,7 @@ public class JsonWriter {
     }
 
     /**
-     * 封装 customOptions 中的 OSS 配置项。
+     * Wraps the OSS configuration items from customOptions.
      */
     private static final class OssUploadConfig {
         private final String businessId;
@@ -1270,9 +1378,10 @@ public class JsonWriter {
         }
 
         /**
-         * 仅校验重建书签场景所需的 8 项配置（不含 {@code ossPermanentBucketName}），
-         * 与 {@link #fromCustomOptions(Config)} 共用同一字段集，便于在仅重建 JSON
-         * 时不强制要求永久桶配置。其它语义完全一致。
+         * Validates only the 8 configuration items required for the bookmark-rebuild scenario
+         * (excluding {@code ossPermanentBucketName}). It shares the same field set as
+         * {@link #fromCustomOptions(Config)} so that permanent-bucket config is not mandatory
+         * when only rebuilding JSON. All other semantics are identical.
          */
         static OssUploadConfig fromCustomOptionsForJsonUpload(Config config) {
             if (config == null) {
@@ -1340,7 +1449,7 @@ public class JsonWriter {
     }
 
     /**
-     * 遍历主 JSON 的每一页，将图片上传到 OSS 永久桶，并用 OSS URL 替换 content 中的本地路径。
+     * Walks every page of the main JSON, uploads images to the OSS permanent bucket, and replaces local paths in content with OSS URLs.
      */
     private static void uploadImagesToOssAndUpdateMap(Map<String, Object> map,
                                                        HuaweiObsClient obsClient,
@@ -1396,14 +1505,14 @@ public class JsonWriter {
     }
 
     /**
-     * 构造主 JSON 文件上传到临时桶时使用的 object key。
+     * Builds the object key used when uploading the main JSON file to the temporary bucket.
      */
     private static String buildJsonObjectKey(OssUploadConfig ossConfig, String pdfFileName) {
         String baseName = pdfFileName;
         if (baseName.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
             baseName = baseName.substring(0, baseName.length() - 4);
         }
-        // 去除可能残留的点号
+        // Strip any trailing dot that may remain.
         if (baseName.endsWith(".")) {
             baseName = baseName.substring(0, baseName.length() - 1);
         }
@@ -1414,8 +1523,8 @@ public class JsonWriter {
     }
 
     /**
-     * 构造重建书签后上传到临时桶时使用的 object key（与 {@link #buildJsonObjectKey} 格式
-     * 一致，但不需要 PDF 文件名参数）。
+     * Builds the object key used when uploading a rebuilt-bookmarks JSON to the temporary bucket.
+     * Same format as {@link #buildJsonObjectKey} but does not need the PDF file name parameter.
      */
     private static String buildJsonObjectKeyForRebuild(OssUploadConfig ossConfig) {
         return String.format("public/%s/%s_%s.json",
@@ -1425,7 +1534,7 @@ public class JsonWriter {
     }
 
     /**
-     * 解析 _ocr.json 的本地绝对路径；若文件不存在则返回空字符串。
+     * Resolves the local absolute path of _ocr.json; returns an empty string if the file does not exist.
      */
     private static String resolveOcrJsonLocalPath(String outputFolder, String pdfFileName) {
         String baseName = pdfFileName;
@@ -1441,12 +1550,12 @@ public class JsonWriter {
     }
 
     /**
-     * OSS 上传成功后清理本地生成文件。
+     * Cleans up locally generated files after a successful OSS upload.
      *
-     * <p>保留 {@code ocrJsonLocalPath}（如果存在），只删除输出目录下与当前 PDF
-     * 文件名相关的生成文件，不影响其他 PDF 产生的文件。{@code ocrJsonLocalPath}
-     * 为空字符串时表示没有生成 _ocr.json。
-     * 原始输入 PDF 不在这里删除，由上层在关闭 PDF 资源后处理。</p>
+     * <p>Keeps {@code ocrJsonLocalPath} if it exists and deletes only the generated files under the output
+     * directory that relate to the current PDF file name, leaving files produced for other PDFs untouched.
+     * An empty {@code ocrJsonLocalPath} means no _ocr.json was generated. The original input PDF is not deleted
+     * here; the caller handles that after closing PDF resources.</p>
      */
     private static void cleanupLocalFiles(String outputFolder, String pdfFileName, String ocrJsonLocalPath)
             throws IOException {
@@ -1492,7 +1601,7 @@ public class JsonWriter {
                 }
                 String dirName = normalized.getFileName().toString();
                 if (dirName.equals(imageDirName)) {
-                    // 直接删除当前 PDF 的图片目录及其内容，不再继续遍历该目录
+                    // Delete the image directory for the current PDF outright instead of continuing to walk it.
                     deleteDirectoryTree(normalized);
                     return FileVisitResult.SKIP_SUBTREE;
                 }
