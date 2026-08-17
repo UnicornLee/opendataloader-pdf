@@ -103,7 +103,28 @@ public class CatalogBookmarkProcessor {
     private static final Pattern ARABIC_TOC_PATTERN = Pattern.compile("^(.*?)[\\s\\.]+(\\d{1,5})$");
     private static final Pattern ROMAN_TOC_PATTERN = Pattern.compile("^(.*?)[\\s\\.]+([IVXLCDMivxlcdm]+)$");
     private static final Pattern ROMAN_NUMERAL = Pattern.compile("^(?i)M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$");
-    private static final String TITLE_CLEANUP = "[\\s\\.]+$";
+    // "Title …… 第 X 页" / "Title …… 第 X—Y 页" — Chinese TOC entries that
+    // wrap the page number with 第 (prefix) and 页 (suffix). Group(2) carries
+    // the starting page number so that ranges like "第 1—6 页" resolve to
+    // page 1 (the first page of the spanned section).
+    private static final Pattern CHINESE_PAGE_TOC_PATTERN =
+            Pattern.compile("^(.*?)第\\s*(\\d{1,5})(?:\\s*[—\\-–]\\s*\\d{1,5})?\\s*页\\s*$");
+    // "Title …… 1—6" — page range without 第/页 wrappers. Kept separate from
+    // ARABIC_TOC_PATTERN so that single-page entries (already covered by the
+    // more permissive ARABIC pattern) and range entries have two distinct
+    // match sites; group(2) is the starting page number.
+    private static final Pattern ARABIC_RANGE_TOC_PATTERN =
+            Pattern.compile("^(.*?)[\\s\\.]+(\\d{1,5})\\s*[—\\-–]\\s*\\d{1,5}\\s*$");
+    // Strips trailing whitespace and "dot-leader" punctuation from a TOC title.
+    // The leading character class covers (a) ASCII full stop ".", (b) the
+    // horizontal ellipsis "…" (U+2026) which is the most common TOC leader
+    // glyph in Chinese PDFs, and (c) whitespace. The `+` quantifier collapses
+    // any continuous run of these characters at the very end of the title,
+    // so a single suffix dot leaves the title untouched while a leader like
+    // "……………" is stripped in one pass. The `$` anchor prevents the cleanup
+    // from eating characters that incidentally appear as the first character
+    // of a later line.
+    private static final String TITLE_CLEANUP = "[\\s.\\u2026]+$";
     private static final double CONTINUATION_LEFT_X_DELTA = 2.0;
     private static final double CONTINUATION_VERTICAL_GAP = 18.0;
 
@@ -399,6 +420,24 @@ public class CatalogBookmarkProcessor {
      * @return a {@link TocMatch} with title and raw page, or null if no match
      */
     private static TocMatch matchTocLine(String text, Set<String> pageLabels) {
+        // Chinese style: "Title …… 第 X 页" / "Title …… 第 X—Y 页"
+        Matcher chinesePageMatcher = CHINESE_PAGE_TOC_PATTERN.matcher(text);
+        if (chinesePageMatcher.matches()) {
+            String title = chinesePageMatcher.group(1).trim().replaceAll(TITLE_CLEANUP, "");
+            if (!title.isEmpty()) {
+                return new TocMatch(title, chinesePageMatcher.group(2));
+            }
+        }
+
+        // Arabic range (no 第/页): "Title …… 1—6"
+        Matcher arabicRangeMatcher = ARABIC_RANGE_TOC_PATTERN.matcher(text);
+        if (arabicRangeMatcher.matches()) {
+            String title = arabicRangeMatcher.group(1).trim().replaceAll(TITLE_CLEANUP, "");
+            if (!title.isEmpty()) {
+                return new TocMatch(title, arabicRangeMatcher.group(2));
+            }
+        }
+
         // Arabic numerals: "Title ........ 12"
         Matcher arabicMatcher = ARABIC_TOC_PATTERN.matcher(text);
         if (arabicMatcher.matches()) {
