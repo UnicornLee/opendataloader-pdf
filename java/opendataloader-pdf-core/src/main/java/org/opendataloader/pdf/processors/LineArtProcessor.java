@@ -57,7 +57,7 @@ import java.util.stream.Collectors;
  * configured the screenshot is OCR'd and, if the result looks like a LaTeX
  * formula, replaced with a {@link TextChunk} carrying the formula.
  *
- * <h3>Two OCR strategies</h3>
+ * <h2>Two OCR strategies</h2>
  * The naive approach — one HTTP call per {@code LineArtChunk} group — is far
  * too slow for scanned PDFs with many small line-art regions (a 400-page
  * report can easily produce 100+ groups, i.e. 100+ serial 3–15 s paddle
@@ -69,7 +69,7 @@ import java.util.stream.Collectors;
  *       is OCR'd independently, in parallel via {@link PaddleOcrClient}. This
  *       keeps per-group precision and avoids dragging a whole-page raster
  *       through the network when only a handful of formulas are present.</li>
- *   <li><b>Many groups (> {@value #PAGE_LEVEL_OCR_THRESHOLD})</b>: render the
+ *   <li><b>Many groups (&gt; {@value #PAGE_LEVEL_OCR_THRESHOLD})</b>: render the
  *       whole page once, send it to Paddle once, then walk the OCR result
  *       looking for LaTeX-shaped entries. Each entry's bounding box is matched
  *       against the original candidate group ranges via IoU; entries that
@@ -80,9 +80,10 @@ import java.util.stream.Collectors;
  *       extracted from the page.</li>
  * </ul>
  *
- * <p>The document processor short-circuits pages with more than
- * {@value #DocumentProcessor#LINEART_TOO_MANY_THRESHOLD} candidate chunks
- * anyway, so we never enter an unbounded retry storm.
+ * <p>Page merging runs unconditionally, so decorative line-art is still
+ * collapsed into a single image even when Paddle is disabled. OCR is only
+ * attempted when a Paddle endpoint is configured; otherwise the merged
+ * {@link ImageChunk}s remain in {@code pageContents} unchanged.</p>
  */
 public final class LineArtProcessor {
 
