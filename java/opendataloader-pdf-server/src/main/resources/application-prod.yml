@@ -29,10 +29,10 @@ pulsar:
     token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwdWxzYXItdXNlciJ9.dCSlOU2r55_Lr8ABbHQgjTONjv7Lq_ZuqpNCa9iJJMg
     receive_topic_name: capital/pdf_parse/announcement_parse_increment
     send_topic_name: capital/pdf_parse/announcement_increment_parse_result
-    count: 3
+    count: 7
     ocr_send_topic_name: capital/pdf_parse/announcement_ocr_image_analysis_increment
     ocr_receive_topic_name: capital/pdf_parse/announcement_ocr_image_analysis_increment_result
-    ocrCount: 2
+    ocrCount: 4
 
 oss:
     temp_bucket_name: stock-temp-bucket
