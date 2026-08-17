@@ -184,7 +184,7 @@ public class PaddleOcrProcessor {
             // being printed verbatim by java.util.logging. The response body
             // is already JSON, so we embed it directly instead of round-tripping
             // it through JsonUtil (which would re-encode it as a quoted string).
-            LOGGER.log(Level.FINE, () -> "paddle response: " + responseJson);
+//            LOGGER.log(Level.FINE, () -> "paddle response: " + responseJson);
             PaddleDocLayoutParseResponseDto paddle =
                 mapper.readValue(responseJson, PaddleDocLayoutParseResponseDto.class);
             TextInOcrAnalysisResultDto resultDto = transferPropertiesFromPaddleToTextInModel(paddle);
