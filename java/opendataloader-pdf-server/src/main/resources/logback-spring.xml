@@ -25,7 +25,7 @@
         </appender>
     </springProfile>
 
-    <springProfile name="prod">
+    <springProfile name="prod,prod-hk">
         <appender name="stash" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
             <destination>${log.stash.addresses}</destination>
             <keepAliveDuration>5 minutes</keepAliveDuration>

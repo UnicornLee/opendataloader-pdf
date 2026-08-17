@@ -18,7 +18,7 @@ consul:
 basic:
     version: 2.0
     env: prod
-    pdf_url_prefix: https://ydhkannouncementbucket.obs.cn-north-1.myhuaweicloud.com/
+    pdf_url_prefix: https://ydannouncementbucket.obs.cn-north-1.myhuaweicloud.com/
     is_ocr: true
     complete_display: false
     parse_stream_table: true
@@ -27,11 +27,11 @@ basic:
 pulsar:
     servers: pulsar://node01.public.pulsar.prod:6650,node02.public.pulsar.prod:6650,node03.public.pulsar.prod:6650
     token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwdWxzYXItdXNlciJ9.dCSlOU2r55_Lr8ABbHQgjTONjv7Lq_ZuqpNCa9iJJMg
-    receive_topic_name: capital/pdf_parse/hk_announcement_parse_all
-    send_topic_name: capital/pdf_parse/hk_announcement_parse_all_result
+    receive_topic_name: capital/pdf_parse/announcement_parse_increment
+    send_topic_name: capital/pdf_parse/announcement_increment_parse_result
     count: 7
-    ocr_send_topic_name: capital/pdf_parse/hk_announcement_ocr_image_analysis
-    ocr_receive_topic_name: capital/pdf_parse/hk_announcement_ocr_image_analysis_result
+    ocr_send_topic_name: capital/pdf_parse/announcement_ocr_image_analysis_increment
+    ocr_receive_topic_name: capital/pdf_parse/announcement_ocr_image_analysis_increment_result
     ocrCount: 4
 
 oss:
