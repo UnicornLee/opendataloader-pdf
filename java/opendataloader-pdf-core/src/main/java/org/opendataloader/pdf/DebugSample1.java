@@ -15,9 +15,10 @@ public class DebugSample1 {
         config.getFilterConfig().setHalfWidthToFullWidth(true);
         Map<String, Object> customOptions = new HashMap<>();
         customOptions.put("paddleUrl", "http://192.168.1.97:8088/layout-parsing");
-        /*customOptions.put("businessId", 123456789);
+        customOptions.put("basicParseStreamTable", true);
+        customOptions.put("businessId", 123456789);
         customOptions.put("extend", new HashMap<String, Object>(){});
-        customOptions.put("basicEnv", "test");
+        /*customOptions.put("basicEnv", "test");
         customOptions.put("pulsarReceiveTopicName", "pdf_parse_increment");
         customOptions.put("ossTempBucketName", "stock-temp-bucket");
         customOptions.put("ossPermanentBucketName", "common-pdf-bucket");
@@ -29,7 +30,7 @@ public class DebugSample1 {
 
         try {
 //            ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf\\docs\\pdf\\202304271682510470028924.pdf", config);
-            ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf\\docs\\pdf\\202304281682603453761936.pdf", config);
+            ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf\\docs\\pdf\\202304211681992320803737.pdf", config);
             System.out.println("JSON URL / local path: " + result.getJsonUrlOrPath());
             System.out.println("OCR JSON local path: " + result.getOcrJsonLocalPath());
         } catch (Throwable e) {
