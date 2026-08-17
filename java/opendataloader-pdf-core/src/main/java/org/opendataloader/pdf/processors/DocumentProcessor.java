@@ -96,6 +96,14 @@ public class DocumentProcessor {
     private static final float OCR_FALLBACK_RENDER_DPI = 300.0f;
 
     /**
+     * Tracks the temp file produced by {@link #tryRepairPdfWithPdfBox} so
+     * {@link #closePdfResources} can delete it promptly. The file is also
+     * registered with {@code File#deleteOnExit} as a safety net for
+     * JVMs that crash before reaching the cleanup step.
+     */
+    private static File repairedPdfTempFile;
+
+    /**
      * Releases PDF resources to prevent file locks and memory leaks.
      * - Closes PDDocument to free OS file handles (required for file deletion)
      * - Clears static containers to remove lingering references
@@ -108,6 +116,12 @@ public class DocumentProcessor {
                 document.close();
             }
         });
+        // The repaired-PDF temp file may still be held by veraPDF's
+        // SeekableInputStream, so close the PDDocument first (step above)
+        // before deleting the file. Always null-out the static field so a
+        // future invocation does not try to delete a file the current
+        // shutdown already removed (or that belongs to a different run).
+        clearCleanupStep("RepairedPdfTempFile", DocumentProcessor::deleteRepairedPdfTempFile);
         clearCleanupStep("ImagesUtils", StaticContainers::closeImagesUtils);
 
         clearCleanupStep("StaticResources", StaticResources::clear);
@@ -887,13 +901,38 @@ public class DocumentProcessor {
             // password-handling branch in callers (e.g. CLIMain) take over.
             throw pw;
         } catch (IOException cause) {
-            // Magic number was present, so the user expected a real PDF, but
-            // veraPDF could not parse the document (truncated download, body
-            // corruption, missing xref). Surface a friendly message instead
-            // of letting the raw veraPDF IOException leak as a stack trace.
-            throw new InvalidPdfFileException(
-                "'" + displayName(pdfName) + "' is not a valid PDF file (corrupted or truncated content).",
-                cause);
+            // veraPDF is strict about cross-reference validation and refuses
+            // some real-world PDFs that PDFBox still reads successfully — the
+            // most common symptom is an empty page tree ("Pages not found")
+            // caused by a partially corrupt xref table. If PDFBox can load
+            // the file, re-saving it rebuilds the xref on serialization and
+            // lets veraPDF parse the result. Any other IOException (truncated
+            // body, malformed header, encryption wrong, ...) cannot be fixed
+            // this way, so we surface a friendly message instead of letting
+            // the raw veraPDF IOException leak as a stack trace.
+            File repaired = tryRepairPdfWithPdfBox(pdfName, cause);
+            if (repaired != null) {
+                try {
+                    pdDocument = new PDDocument(repaired.getAbsolutePath());
+                    LOGGER.log(Level.WARNING,
+                        "veraPDF could not parse '" + displayName(pdfName)
+                            + "' because its xref table was rejected ("
+                            + cause.getMessage() + "). PDFBox rebuilt the xref on the fly; "
+                            + "processing continues from the repaired copy at '"
+                            + repaired.getAbsolutePath() + "'.");
+                } catch (IOException retryCause) {
+                    // Repair did not help; drop the temp file and surface
+                    // the original cause rather than the after-repair error.
+                    deleteRepairedPdfTempFile();
+                    throw new InvalidPdfFileException(
+                        "'" + displayName(pdfName) + "' is not a valid PDF file (corrupted or truncated content).",
+                        cause);
+                }
+            } else {
+                throw new InvalidPdfFileException(
+                    "'" + displayName(pdfName) + "' is not a valid PDF file (corrupted or truncated content).",
+                    cause);
+            }
         }
         StaticResources.setDocument(pdDocument);
         GFSAPDFDocument document = new GFSAPDFDocument(pdDocument);
@@ -927,6 +966,99 @@ public class DocumentProcessor {
             boolean badTable = border.isBadTable();
         }));*/
         StaticContainers.setTableBordersCollection(new TableBordersCollection(linesPreprocessingConsumer.getTableBorders()));
+    }
+
+    /**
+     * Attempts to rescue a PDF that veraPDF rejected but PDFBox can still read.
+     *
+     * <p>veraPDF's xref validator is strict about cross-reference tables and throws
+     * an empty page tree ("Pages not found") for some real-world PDFs — typically
+     * downloads with a partially corrupt xref section — even though the body is
+     * intact. PDFBox's lenient parser recovers the page tree, and re-saving
+     * through PDFBox serializes a fresh xref table on disk. Reloading that copy
+     * with veraPDF then succeeds.</p>
+     *
+     * <p>Only the specific "Pages not found" symptom is known to be xref-related;
+     * other IOExceptions (truncated body, malformed header, wrong password) are
+     * unaffected by a re-save, so we ignore them and let the caller surface the
+     * original error.</p>
+     *
+     * <p>The returned file is registered with the JVM {@code deleteOnExit} hook
+     * for the long-running case; {@link #preprocessing} additionally deletes it
+     * immediately after veraPDF has finished parsing so the temp file does not
+     * linger for the lifetime of a server process.</p>
+     *
+     * @param pdfName the original PDF path that veraPDF rejected
+     * @param cause   the IOException thrown by veraPDF; used to gate the recovery
+     *                on the recoverable symptom only
+     * @return the repaired temp file, or {@code null} if recovery was not
+     *         applicable or failed
+     */
+    private static File tryRepairPdfWithPdfBox(String pdfName, IOException cause) {
+        if (!"Pages not found".equals(cause.getMessage())) {
+            // A re-save only fixes xref-related failures. Anything else
+            // (truncated body, encrypted, etc.) wastes effort and risks
+            // masking the real error.
+            return null;
+        }
+        Path repairedPath = null;
+        org.apache.pdfbox.pdmodel.PDDocument boxDoc = null;
+        try {
+            boxDoc = Loader.loadPDF(new File(pdfName));
+            repairedPath = Files.createTempFile("opendataloader-pdf-repaired-", ".pdf");
+            File repaired = repairedPath.toFile();
+            repaired.deleteOnExit();
+            boxDoc.save(repaired);
+            // Register for prompt cleanup in closePdfResources(); the
+            // deleteOnExit hook above is a safety net for abnormal shutdown.
+            repairedPdfTempFile = repaired;
+            return repaired;
+        } catch (IOException repairFailure) {
+            if (repairedPath != null) {
+                try {
+                    Files.deleteIfExists(repairedPath);
+                } catch (IOException deleteFailure) {
+                    LOGGER.log(Level.WARNING,
+                        "Failed to delete unused repair tmp file: " + repairedPath, deleteFailure);
+                }
+            }
+            LOGGER.log(Level.WARNING,
+                "PDFBox-based repair attempt failed for '" + displayName(pdfName) + "': "
+                    + repairFailure.getMessage());
+            return null;
+        } finally {
+            if (boxDoc != null) {
+                try {
+                    boxDoc.close();
+                } catch (IOException ignored) {
+                    // best-effort close; ignore
+                }
+            }
+        }
+    }
+
+    /**
+     * Deletes the repaired-PDF temp file produced by
+     * {@link #tryRepairPdfWithPdfBox} on a previous call to
+     * {@link #preprocessing}, if any, and clears the static reference so
+     * the next run starts clean.
+     *
+     * <p>Idempotent: a second call after the temp file has already been
+     * removed is a no-op. Errors during deletion are logged but never
+     * propagate — temp-file cleanup must not mask the original processing
+     * exception that triggered {@link #closePdfResources}.</p>
+     */
+    private static void deleteRepairedPdfTempFile() {
+        File toDelete = repairedPdfTempFile;
+        repairedPdfTempFile = null;
+        if (toDelete == null) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(toDelete.toPath());
+        } catch (IOException e) {
+            LOGGER.log(Level.WARNING, "Failed to delete repaired-PDF temp file: " + toDelete, e);
+        }
     }
 
     /**
