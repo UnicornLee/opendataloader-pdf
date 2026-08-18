@@ -63,7 +63,7 @@ public class StreamTableProcessor {
             PageItemResultDto pageItemResultDto = PaddleOcrResultUtils.generateJsonResultByTextInOcrAnalysisResultDto(singlePageImageFile, textInOcrAnalysisResultDto, width, height, pageNumber);
             singlePageImageFile.delete();
             // // 5. 根据识别回来的内容替换无线表格的部分
-            return replaceStreamTables(pageItemResultDto, contents);
+            return replaceStreamTables(pageItemResultDto, contents, pdfPath, pageNumber);
         }
 
         return new ArrayList<>(contents);
@@ -111,9 +111,10 @@ public class StreamTableProcessor {
         return null;
     }
 
-    private static List<IObject> replaceStreamTables(PageItemResultDto pageItemResultDto, List<IObject> contents) {
+    private static List<IObject> replaceStreamTables(PageItemResultDto pageItemResultDto, List<IObject> contents, String pdfPath, int pageNumber) {
         // Implementation for replacing stream tables with recognized content
         if (pageItemResultDto != null && pageItemResultDto.getPageItemList() != null && pageItemResultDto.getPageItemList().size() > 0) {
+            boolean haveStreamTables = false;
             List<PageItem> tables = pageItemResultDto.getPageItemList().stream().filter(pageItem -> "stream_table".equals(pageItem.getItemType())).collect(Collectors.toList());
             if (tables.size() > 0) {
                 for (PageItem table : tables) {
@@ -141,11 +142,15 @@ public class StreamTableProcessor {
                         contents.removeAll(toRemove);
                         // 将识别出来的表格内容添加到 contents 中
                         contents.add(table);
+                        haveStreamTables = true;
                     }
                 }
             }
             contents.sort(Comparator.comparingDouble(item -> item.getTopY()));
             Collections.reverse(contents);
+            if (!haveStreamTables) {
+                LOGGER.info(String.format("Page %d of %s 's OCR result has no stream tables.", pageNumber, pdfPath));
+            }
         }
 
         return new ArrayList<>(contents);
