@@ -155,7 +155,18 @@ public class ImagesUtils {
             targetImage = StaticContainers.getImagesUtils().getXObjectImage(imageBox.getPageNumber(), xImageObjectKey);
         }
         if (targetImage == null) {
-            targetImage = StaticContainers.getImagesUtils().getPageSubImage(imageBox);
+            // veraPDF ImagesUtils.getPageSubImage can throw RasterFormatException
+            // ("(y + height) is outside raster") when an image bbox's top edge lands
+            // exactly at the rendered page height — Math.ceil then rounds the integer
+            // y past the height and (renderedPage.getHeight() - y) goes negative.
+            // Catch so a single malformed chunk doesn't kill the whole extraction.
+            try {
+                targetImage = StaticContainers.getImagesUtils().getPageSubImage(imageBox);
+            } catch (java.awt.image.RasterFormatException e) {
+                LOGGER.log(Level.WARNING,
+                    "Skipping image extraction on page " + imageBox.getPageNumber()
+                        + ": bbox " + imageBox + " cannot be rendered (raster out of bounds).");
+            }
         }
         if (targetImage == null) {
             return;
