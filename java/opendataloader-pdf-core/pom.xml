@@ -125,6 +125,40 @@
             <groupId>com.squareup.okhttp3</groupId>
             <artifactId>okhttp-jvm</artifactId>
         </dependency>
+        <!--
+          JPEG2000 (JPXDecode) decoder for PDFBox.
+
+          PDFBox delegates JPX decoding to a javax.imageio ImageReader obtained
+          via IIORegistry SPI lookup (ImageIO.getImageReadersByFormatName(
+          "JPEG2000")). Without these two jars on the runtime classpath PDFBox
+          throws "Cannot read JPEG2000 image: Java Advanced Imaging (JAI)
+          Image I/O Tools are not installed" the first time it hits a JPXDecode
+          image during PDFRenderer.renderImageWithDPI() — reachable from
+          LineArtProcessor (formula-OCR page-level fallback at 200 DPI) and
+          StreamTableProcessor (single-page raster at SINGLE_PAGE_IMAGE_DPI).
+
+          Both come in transitively from veraPDF today, but pin them at runtime
+          scope so the dependency is explicit, stable across veraPDF bumps, and
+          behaves the same in the CLI uber-jar, the Spring Boot nested-jar
+          layout, and IDE run configurations.
+
+          Note: declaring the jars is necessary but not sufficient in the
+          Spring Boot nested-jar layout — LaunchedURLClassLoader does not
+          always pick up META-INF/services from BOOT-INF/lib on its own, so
+          ServerApplication also force-loads J2KImageReaderSpi at startup.
+        -->
+        <dependency>
+            <groupId>com.github.jai-imageio</groupId>
+            <artifactId>jai-imageio-core</artifactId>
+            <version>1.4.0</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.github.jai-imageio</groupId>
+            <artifactId>jai-imageio-jpeg2000</artifactId>
+            <version>1.3.0</version>
+            <scope>runtime</scope>
+        </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
