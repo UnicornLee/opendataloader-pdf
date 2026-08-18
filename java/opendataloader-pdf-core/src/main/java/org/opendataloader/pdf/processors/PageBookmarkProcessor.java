@@ -661,13 +661,18 @@ public class PageBookmarkProcessor {
      * full text exceeds {@value #MAX_ENTRY_TEXT_LENGTH} characters is treated
      * as a numbered body paragraph (not a heading) and discarded. This stops
      * long numbered paragraphs ("1、品牌营销服务网络拓展项目：受外部环境...")
-     * from masquerading as level-1 bookmarks.
+     * from masquerading as level-1 bookmarks.</p>
+     *
+     * <p>The surviving section is also routed through {@link #isTocLikeGroup}
+     * so the same TOC-residue rules that gate L2/L3 (same-page adjacent
+     * {@code relatedId} runs, cross-page bridges) gate L1 too. Without this,
+     * a body section such as {@code (1)..(N)} audit procedures can defeat the
+     * real {@code 一、..十五、} chapter headings at L1 simply because its font
+     * happens to be larger than the financial-appendix heading font.</p>
      *
      * <p>Among the surviving sections only the largest contiguous run is kept,
      * which removes duplicate value-restart groups (e.g. two interleaved
-     * {@code 一/二/...} sequences from a TOC page and a body page) without
-     * touching the deeper-level TOC-residue filter, which remains the job of
-     * {@link #cleanCandidatesLocal}.</p>
+     * {@code 一/二/...} sequences from a TOC page and a body page).</p>
      */
     private static List<Candidate> cleanCandidates(List<Candidate> candidates) {
         if (candidates.isEmpty()) {
@@ -689,6 +694,16 @@ public class PageBookmarkProcessor {
                 continue;
             }
             if (hasOverlongEntry(trimmedSection)) {
+                continue;
+            }
+            // Mirror L2/L3 TOC-residue gating at L1: drop sections whose trimmed
+            // candidates look like a table-of-contents residue (consecutive
+            // relatedIds on the same page, or a long cross-page bridge). Body
+            // paragraph sequences (e.g. "(1)..(7)" audit procedures) frequently
+            // satisfy these properties and would otherwise outrank a real
+            // chapter spine when the body font happens to be larger than the
+            // appendix heading font.
+            if (isTocLikeGroup(trimmedSection)) {
                 continue;
             }
             int length = trimmedSection.size();
