@@ -77,6 +77,9 @@ public class BulletedParagraphUtils {
      * @return true if the line has a recognized label, false otherwise
      */
     public static boolean isLabeledLine(TextLine textLine) {
+        if (textLine == null) {
+            return false;
+        }
         String value = textLine.getValue();
         if (value == null || value.isEmpty()) {
             return false;
