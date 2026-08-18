@@ -48,7 +48,7 @@ public class StreamTableProcessor {
         boolean isExisted = existStreamTable(rows);
         // 4. 对整页内容进行截图发给大模型进行内容的识别
         if (isExisted) {
-            LOGGER.info("Page " + pageNumber + " of {" + pdfPath + "} contains stream tables.");
+            LOGGER.info(String.format("Page %d of %s contains stream tables.", pageNumber, pdfPath));
             // 将该页从pdf中提取出来，生成单页pdf
 //            File singlePagePdfFile = extractSinglePagePdf(pdfPath, pageNumber);
             // 对该页整页截图，生成图片
@@ -85,22 +85,29 @@ public class StreamTableProcessor {
             } catch (IOException e) {
                 lastException = e;
                 LOGGER.log(Level.WARNING,
-                    "Paddle OCR call failed (attempt " + attempt + "/" + PADDLE_MAX_RETRIES
-                        + ") for page " + pageNumber + " of {" + pdfPath + "}", e);
+                    String.format("Paddle OCR call failed (attempt %d/%d) for page %d of %s: %s",
+                        attempt, PADDLE_MAX_RETRIES, pageNumber, pdfPath,
+                        e != null ? e.toString() : "unknown"),
+                    e);
                 if (attempt < PADDLE_MAX_RETRIES) {
                     try {
                         Thread.sleep(PADDLE_RETRY_SLEEP_SECONDS * 1000L);
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
-                        LOGGER.log(Level.WARNING, "Paddle OCR retry sleep interrupted", ie);
+                        LOGGER.log(Level.WARNING,
+                            String.format("Paddle OCR retry sleep interrupted: %s",
+                                ie != null ? ie.toString() : "unknown"),
+                            ie);
                         break;
                     }
                 }
             }
         }
         LOGGER.log(Level.SEVERE,
-            "Paddle OCR call failed after " + PADDLE_MAX_RETRIES + " attempts for page "
-                + pageNumber + " of {" + pdfPath + "}; skipping stream-table replacement", lastException);
+            String.format("Paddle OCR call failed after %d attempts for page %d of %s; skipping stream-table replacement: %s",
+                PADDLE_MAX_RETRIES, pageNumber, pdfPath,
+                lastException != null ? lastException.toString() : "unknown"),
+            lastException);
         return null;
     }
 

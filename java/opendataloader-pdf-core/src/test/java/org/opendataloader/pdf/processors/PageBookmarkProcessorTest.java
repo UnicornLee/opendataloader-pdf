@@ -826,6 +826,23 @@ public class PageBookmarkProcessorTest {
     }
 
     /**
+     * Builds a JSON text item with a caller-specified font size and id, so a test
+     * can mix high-font body paragraphs and low-font chapter headings on the same
+     * page to exercise the L1 font-vs-residue tie-break.
+     */
+    private static Map<String, Object> jsonTextItem(int id, String sourceType, String text,
+                                                    double fontSize, double y0) {
+        Map<String, Object> item = new HashMap<>();
+        item.put(JsonName.ID, id);
+        item.put(JsonName.SOURCE_TYPE, sourceType);
+        item.put(JsonName.CONTENT, Arrays.asList(text));
+        item.put(JsonName.FONT_UNDERLINE_SIZE, fontSize);
+        item.put(JsonName.X0, 70.0);
+        item.put(JsonName.Y0, y0);
+        return item;
+    }
+
+    /**
      * Page 0's last item is a level-2 child ("一、概述", id 2) and page 1 begins
      * with "二、背景" as id 1. The chain ends at the page boundary and resumes on
      * the next page, so the pair must be treated as adjacent and dropped.
@@ -905,6 +922,83 @@ public class PageBookmarkProcessorTest {
         Assertions.assertEquals(1, bookmarks.size());
         Assertions.assertTrue(bookmarks.get(0).getChildren().isEmpty(),
                 ">5 entry chain with same-page and page-boundary adjacency must be dropped");
+    }
+
+    /**
+     * Body paragraphs whose numbering pattern happens to look like an L1 chapter
+     * spine must not be promoted to L1, even when their font is larger than the
+     * real chapter heading font. Models the production failure on
+     * {@code 202304211681992320803737.pdf}, where {@code (1)..(7)} audit procedures
+     * (font 12.0, full sentences, consecutive relatedIds on the same page) won
+     * L1 selection over {@code 一、xx..十五、xx} real chapter headings (font 10.45,
+     * non-consecutive relatedIds).
+     *
+     * <p>Both groups individually pass {@code isValidGroup} and form a clean
+     * from-1 sequence after {@code cleanCandidates}, so the L1 sort that prefers
+     * larger fonts would otherwise pick the wrong group. The fix calls
+     * {@code isTocLikeGroup} on the trimmed section: {@code (1)..(7)} has
+     * 6 same-page adjacent pairs so the section is dropped, allowing
+     * {@code #、/CHINESE} to take the L1 slot.</p>
+     */
+    @Test
+    public void testL1_bodyParagraphsAsTocResidue_dropped() {
+        List<Map<String, Object>> bodyItems = new ArrayList<>();
+        bodyItems.add(jsonTextItem(1, JsonName.SOURCE_TYPE_PARAGRAPH,
+                "(1) 了解与应收款项减值相关的关键内部控制，评价这些控制的设计。",
+                12.0, 100.0));
+        bodyItems.add(jsonTextItem(2, JsonName.SOURCE_TYPE_PARAGRAPH,
+                "(2) 复核以前年度已计提坏账准备的应收款项的后续核销情况。",
+                12.0, 200.0));
+        bodyItems.add(jsonTextItem(3, JsonName.SOURCE_TYPE_PARAGRAPH,
+                "(3) 复核管理层对应收款项的信用风险评估。",
+                12.0, 300.0));
+        bodyItems.add(jsonTextItem(4, JsonName.SOURCE_TYPE_PARAGRAPH,
+                "(4) 获取并检查管理层对预期信用损失的关键假设。",
+                12.0, 400.0));
+        bodyItems.add(jsonTextItem(5, JsonName.SOURCE_TYPE_PARAGRAPH,
+                "(5) 检查与组合为基础计量预期信用损失的方法。",
+                12.0, 500.0));
+        bodyItems.add(jsonTextItem(6, JsonName.SOURCE_TYPE_PARAGRAPH,
+                "(6) 检查应收款项的期后回款情况，评价管理层计提的合理性。",
+                12.0, 600.0));
+        bodyItems.add(jsonTextItem(7, JsonName.SOURCE_TYPE_PARAGRAPH,
+                "(7) 检查与应收款项减值相关的信息是否已在财务报表中作出恰当列报。",
+                12.0, 700.0));
+
+        // Chinese chapter headings at font 10.45 — non-consecutive relatedIds (100..114
+        // stepping by 2) so isTocLikeGroup does not flag them as TOC residue.
+        String[] chapterPrefixes = {
+                "一、公司基本情况", "二、财务报表的编制基础", "三、重要会计政策及会计估计",
+                "四、税项", "五、合并财务报表项目注释", "六、在其他主体中的权益",
+                "七、与金融工具相关的风险", "八、公允价值的披露", "九、关联方及关联交易",
+                "十、股份支付", "十一、承诺及或有事项", "十二、资产负债表日后事项",
+                "十三、其他重要事项", "十四、母公司财务报表主要项目注释", "十五、其他补充资料"
+        };
+        List<Map<String, Object>> allItems = new ArrayList<>(bodyItems);
+        for (int i = 0; i < chapterPrefixes.length; i++) {
+            allItems.add(jsonTextItem(100 + i * 2, JsonName.SOURCE_TYPE_HEADING,
+                    chapterPrefixes[i], 10.45, 800.0 + i * 100.0));
+        }
+
+        List<Map<String, Object>> data = jsonDoc(jsonPage(
+                allItems.toArray(new Map[0])));
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
+
+        Assertions.assertEquals(15, bookmarks.size(),
+                "L1 must contain the 15 Chinese chapter headings, not the 7 body paragraphs");
+        Assertions.assertEquals("一、公司基本情况", bookmarks.get(0).getText(),
+                "L1[0] should be the first chapter heading '一、'");
+        Assertions.assertEquals("十五、其他补充资料", bookmarks.get(14).getText(),
+                "L1[14] should be the last chapter heading '十五、'");
+        for (int i = 0; i < 15; i++) {
+            Assertions.assertEquals(chapterPrefixes[i], bookmarks.get(i).getText(),
+                    "L1 chain should preserve 1..15 value order");
+        }
+        for (Bookmark b : bookmarks) {
+            Assertions.assertTrue(b.getChildren() == null || b.getChildren().isEmpty(),
+                    "No L2 children should be produced in this isolated test");
+        }
     }
 
     /**
