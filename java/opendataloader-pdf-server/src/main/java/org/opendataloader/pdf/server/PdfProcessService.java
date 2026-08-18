@@ -245,7 +245,9 @@ public class PdfProcessService {
             customOptions.put("extend", extend);
         }
         customOptions.put("basicEnv", basicProperties.env());
+        customOptions.put("basicIsImmediateOcr", basicProperties.isImmediateOcr());
         customOptions.put("basicParseStreamTable", basicProperties.parseStreamTable());
+        customOptions.put("basicFormulaRecognize", basicProperties.formulaRecognize());
         customOptions.put("pulsarReceiveTopicName", pulsarProperties.receiveTopicName());
         customOptions.put("ossTempBucketName", ossProperties.tempBucketName());
         customOptions.put("ossPermanentBucketName", ossProperties.permanentBucketName());

@@ -30,6 +30,8 @@ public record BasicProperties(
         @DefaultValue("dev") String env,
         @DefaultValue String pdfUrlPrefix,
         @DefaultValue("false") boolean isOcr,
+        @DefaultValue("false") boolean isImmediateOcr,
         @DefaultValue("false") boolean completeDisplay,
-        @DefaultValue("false") boolean parseStreamTable) {
+        @DefaultValue("false") boolean parseStreamTable,
+        @DefaultValue("false") boolean formulaRecognize) {
 }

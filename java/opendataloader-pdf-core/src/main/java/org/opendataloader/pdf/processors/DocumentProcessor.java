@@ -496,9 +496,15 @@ public class DocumentProcessor {
         } else {
             basicParseStreamTable = false;
         }
+        boolean basicFormulaRecognize;
+        if (config.getCustomOptions() != null && config.getCustomOptions().containsKey("basicFormulaRecognize")) {
+            basicFormulaRecognize = Boolean.valueOf(config.getCustomOptions().get("basicFormulaRecognize").toString());
+        } else {
+            basicFormulaRecognize = false;
+        }
         boolean isImmediateOcr;
-        if (config.getCustomOptions() != null && config.getCustomOptions().containsKey("is_immediate_ocr")) {
-            isImmediateOcr = Boolean.valueOf(config.getCustomOptions().get("is_immediate_ocr").toString());
+        if (config.getCustomOptions() != null && config.getCustomOptions().containsKey("basicIsImmediateOcr")) {
+            isImmediateOcr = Boolean.valueOf(config.getCustomOptions().get("basicIsImmediateOcr").toString());
         } else {
             isImmediateOcr = false;
         }
@@ -677,7 +683,7 @@ public class DocumentProcessor {
                     BarChartProcessor.processBarChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
                     FlowchartProcessor.processFlowchartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
                 }
-                if (false && paddleEnabled) {
+                if (basicFormulaRecognize && paddleEnabled) {
                     long count = pageContents.stream()
                         .filter(c -> c instanceof LineArtChunk && c.getHeight() <= 3 && c.getWidth() <= 300)
                         .count();
