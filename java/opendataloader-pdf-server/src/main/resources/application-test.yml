@@ -18,8 +18,10 @@ basic:
     env: test
     pdf_url_prefix: https://ydannouncementbucket.obs.cn-north-1.myhuaweicloud.com/
     is_ocr: true
+    is_immediate_ocr: false
     complete_display: false
     parse_stream_table: true
+    formula_recognize: false
 
 # pulsar监听
 pulsar:

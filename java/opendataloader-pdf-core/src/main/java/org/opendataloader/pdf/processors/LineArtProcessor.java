@@ -182,7 +182,7 @@ public final class LineArtProcessor {
             applyPageLevelOcr(pageContents, candidates, pageNumber, paddleUrl, pdfPath,
                 sourceWidth, sourceHeight);
         } else if (paddleEnabled) {
-            applyGroupLevelOcr(pageContents, candidates, pageNumber, paddleUrl);
+            applyGroupLevelOcr(pageContents, candidates, pdfPath, pageNumber, paddleUrl);
         }
         // When Paddle is disabled the merged ImageChunks remain in pageContents unchanged.
     }
@@ -281,7 +281,7 @@ public final class LineArtProcessor {
     // ------------------------------------------------------------------
 
     private static void applyGroupLevelOcr(List<IObject> pageContents, List<CandidateRange> candidates,
-                                            int pageNumber, String paddleUrl) {
+                                           String pdfPath, int pageNumber, String paddleUrl) {
         // Submit all OCR calls before draining — this is the key to the speedup:
         // while the paddle service is busy with group 1, our local executor can
         // keep submitting groups 2, 3, … so they pipeline on the network.
@@ -302,6 +302,7 @@ public final class LineArtProcessor {
         // path is only taken for candidate counts <= PAGE_LEVEL_OCR_THRESHOLD
         // (the public {@link processLineArtGroups} gates it), so we never
         // exceed a handful of OCR results here — no per-page counter needed.
+        int formulaCount = 0;
         for (int idx = 0; idx < candidates.size(); idx++) {
             CandidateRange range = candidates.get(idx);
             TextInOcrAnalysisResultDto ocr = drainFuture(futures.get(idx));
@@ -316,6 +317,7 @@ public final class LineArtProcessor {
                 replaceMergedChunkWithGroup(pageContents, range);
                 continue;
             }
+            formulaCount++;
             Double fontSize = range.union.getHeight() / 2.0 >= DEFAULT_FORMULA_FONT_SIZE ?
                 Math.round(100.0 * range.union.getHeight() / 2.0) / 100.0 : DEFAULT_FORMULA_FONT_SIZE;
             List<Double> fontSizes = new ArrayList<>();
@@ -329,6 +331,9 @@ public final class LineArtProcessor {
             }
             formulaChunk.setFontSize(fontSize);
             replaceMergedChunkWithObject(pageContents, range, formulaChunk);
+        }
+        if (formulaCount < candidates.size()) {
+            LOGGER.info(String.format("Page %d of %s: Only %d out of %d candidates were recognized as formulas.", pageNumber, pdfPath, formulaCount, candidates.size()));
         }
     }
 
@@ -376,6 +381,7 @@ public final class LineArtProcessor {
                 .collect(Collectors.toList());
             if (latexEntries.isEmpty()) {
                 restoreAllGroups(pageContents, candidates);
+                LOGGER.info(String.format("Page %d of %s 's OCR result has no latex formulas.", pageNumber, pdfPath));
                 return;
             }
 
