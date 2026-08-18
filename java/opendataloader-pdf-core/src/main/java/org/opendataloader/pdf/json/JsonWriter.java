@@ -83,6 +83,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -90,10 +91,21 @@ import java.util.Map;
 import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public class JsonWriter {
     private static final Logger LOGGER = Logger.getLogger(JsonWriter.class.getCanonicalName());
+
+    /**
+     * Matches an {@code <img>} tag and captures its {@code src} value.
+     * Group 1 is the opening quote, group 2 is the path/URL.
+     */
+    private static final Pattern IMG_SRC_PATTERN = Pattern.compile(
+            "<img\\b[^>]*?\\bsrc\\s*=\\s*(['\"])(.*?)\\1[^>]*?>",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+
     private static JsonGenerator getJsonGenerator(String fileName) throws IOException {
         JsonFactory jsonFactory = new JsonFactory();
         return jsonFactory.createGenerator(new File(fileName), JsonEncoding.UTF8)
@@ -336,7 +348,7 @@ public class JsonWriter {
         // Walk every page and upload images to the permanent bucket, replacing local paths with OSS URLs.
         try {
             if (ossEnabled) {
-                uploadImagesToOssAndUpdateMap(map, obsClient, ossConfig);
+                uploadImagesToOssAndUpdateMap(map, outputFolder, obsClient, ossConfig);
             }
 
             // Scan every page for OCR-eligible pages, write them to <pdfname>_ocr.json,
@@ -1450,8 +1462,16 @@ public class JsonWriter {
 
     /**
      * Walks every page of the main JSON, uploads images to the OSS permanent bucket, and replaces local paths in content with OSS URLs.
+     * <p>Handles:
+     * <ul>
+     *     <li>{@code item_type == "image"}: uploads {@code content[0]} as a local image path.</li>
+     *     <li>{@code item_type == "text"}: scans every text fragment for {@code <img src="...">} tags and uploads the referenced local images.</li>
+     *     <li>{@code item_type == "lattice_table"} / {@code "stream_table"}: scans every cell's {@code text} list for {@code <img>} tags.</li>
+     * </ul>
+     * The same local path is uploaded at most once per JSON; the resulting URL is reused for all references.
      */
     private static void uploadImagesToOssAndUpdateMap(Map<String, Object> map,
+                                                       String outputFolder,
                                                        HuaweiObsClient obsClient,
                                                        OssUploadConfig ossConfig) throws IOException {
         Object dataObj = map.get(JsonName.DATA);
@@ -1459,10 +1479,12 @@ public class JsonWriter {
             return;
         }
         List<?> pages = (List<?>) dataObj;
+        ImageUploadCache cache = new ImageUploadCache();
         for (Object pageObj : pages) {
             if (!(pageObj instanceof Map)) {
                 continue;
             }
+            @SuppressWarnings("unchecked")
             Map<String, Object> page = (Map<String, Object>) pageObj;
             Object itemsObj = page.get(JsonName.ITEMS);
             if (!(itemsObj instanceof List)) {
@@ -1472,35 +1494,264 @@ public class JsonWriter {
                 if (!(itemObj instanceof Map)) {
                     continue;
                 }
+                @SuppressWarnings("unchecked")
                 Map<String, Object> item = (Map<String, Object>) itemObj;
-                if (!"image".equals(item.get(JsonName.ITEM_TYPE))) {
-                    continue;
+                String itemType = (String) item.get(JsonName.ITEM_TYPE);
+                if ("image".equals(itemType)) {
+                    uploadImageItemContent(item, outputFolder, cache, obsClient, ossConfig);
+                } else if ("text".equals(itemType)) {
+                    processTextItemContent(item, outputFolder, cache, obsClient, ossConfig);
+                } else if ("lattice_table".equals(itemType) || "stream_table".equals(itemType)) {
+                    processTableItemContent(item, outputFolder, cache, obsClient, ossConfig);
                 }
-                Object contentObj = item.get(JsonName.CONTENT);
-                if (!(contentObj instanceof List) || ((List<?>) contentObj).isEmpty()) {
-                    continue;
-                }
-                Object first = ((List<?>) contentObj).get(0);
-                if (first == null) {
-                    continue;
-                }
-                String localPath = first.toString();
-                File imageFile = new File(localPath);
-                if (!imageFile.exists()) {
-                    LOGGER.log(Level.WARNING, "Image file not found, skip uploading: {0}", localPath);
-                    continue;
-                }
-                String imageName = imageFile.getName();
-                String objectKey = String.format("public/%s/%s_%s/%s",
-                    ossConfig.getBasicEnv(),
-                    ossConfig.getPulsarReceiveTopicName(),
-                    ossConfig.getBusinessId(),
-                    imageName);
-                String imageUrl = obsClient.uploadFile(
-                    ossConfig.getPermanentBucketName(), objectKey, imageFile, ossConfig.getDomainName());
-                ((List<Object>) contentObj).set(0, imageUrl);
-                LOGGER.log(Level.INFO, "Replaced image path with OBS URL: {0}", imageUrl);
             }
+        }
+    }
+
+    /**
+     * Uploads the local image referenced by an {@code item_type == "image"} item and replaces {@code content[0]} with the OSS URL.
+     */
+    private static void uploadImageItemContent(Map<String, Object> item,
+                                                String outputFolder,
+                                                ImageUploadCache cache,
+                                                HuaweiObsClient obsClient,
+                                                OssUploadConfig ossConfig) throws IOException {
+        Object contentObj = item.get(JsonName.CONTENT);
+        if (!(contentObj instanceof List) || ((List<?>) contentObj).isEmpty()) {
+            return;
+        }
+        Object first = ((List<?>) contentObj).get(0);
+        if (first == null) {
+            return;
+        }
+        String localPath = first.toString();
+        String imageUrl = uploadImageIfNeeded(localPath, outputFolder, cache, obsClient, ossConfig);
+        if (imageUrl != null) {
+            @SuppressWarnings("unchecked")
+            List<Object> contentList = (List<Object>) contentObj;
+            contentList.set(0, imageUrl);
+        }
+    }
+
+    /**
+     * Scans every text fragment inside a {@code text} item for {@code <img src="...">} tags,
+     * uploads the referenced local images, and replaces the {@code src} values with OSS URLs in-place.
+     */
+    private static void processTextItemContent(Map<String, Object> item,
+                                                String outputFolder,
+                                                ImageUploadCache cache,
+                                                HuaweiObsClient obsClient,
+                                                OssUploadConfig ossConfig) throws IOException {
+        Object contentObj = item.get(JsonName.CONTENT);
+        if (!(contentObj instanceof List)) {
+            return;
+        }
+        @SuppressWarnings("unchecked")
+        List<Object> contentList = (List<Object>) contentObj;
+        for (int i = 0; i < contentList.size(); i++) {
+            Object lineObj = contentList.get(i);
+            if (lineObj instanceof Map) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> lineMap = (Map<String, Object>) lineObj;
+                Object lineContentObj = lineMap.get(JsonName.CONTENT);
+                if (!(lineContentObj instanceof List)) {
+                    continue;
+                }
+                @SuppressWarnings("unchecked")
+                List<Object> lineContentList = (List<Object>) lineContentObj;
+                replaceImgSrcInStringList(lineContentList, outputFolder, cache, obsClient, ossConfig);
+            } else if (lineObj instanceof String) {
+                String line = (String) lineObj;
+                String newLine = replaceImgSrcWithOssUrl(line, outputFolder, cache, obsClient, ossConfig);
+                if (!newLine.equals(line)) {
+                    contentList.set(i, newLine);
+                }
+            }
+        }
+    }
+
+    /**
+     * Scans every cell's {@code text} list inside a table item for {@code <img src="...">} tags,
+     * uploads the referenced local images, and replaces the {@code src} values with OSS URLs in-place.
+     */
+    private static void processTableItemContent(Map<String, Object> item,
+                                                 String outputFolder,
+                                                 ImageUploadCache cache,
+                                                 HuaweiObsClient obsClient,
+                                                 OssUploadConfig ossConfig) throws IOException {
+        Object contentObj = item.get(JsonName.CONTENT);
+        if (!(contentObj instanceof List)) {
+            return;
+        }
+        for (Object rowObj : (List<?>) contentObj) {
+            if (!(rowObj instanceof List)) {
+                continue;
+            }
+            for (Object cellObj : (List<?>) rowObj) {
+                if (!(cellObj instanceof Map)) {
+                    continue;
+                }
+                @SuppressWarnings("unchecked")
+                Map<String, Object> cellMap = (Map<String, Object>) cellObj;
+                Object textObj = cellMap.get(JsonName.TEXT);
+                if (!(textObj instanceof List)) {
+                    continue;
+                }
+                @SuppressWarnings("unchecked")
+                List<Object> textList = (List<Object>) textObj;
+                replaceImgSrcInStringList(textList, outputFolder, cache, obsClient, ossConfig);
+            }
+        }
+    }
+
+    /**
+     * Walks a list of strings and replaces any local {@code <img src>} paths with OSS URLs in-place.
+     */
+    private static void replaceImgSrcInStringList(List<Object> fragments,
+                                                   String outputFolder,
+                                                   ImageUploadCache cache,
+                                                   HuaweiObsClient obsClient,
+                                                   OssUploadConfig ossConfig) throws IOException {
+        for (int i = 0; i < fragments.size(); i++) {
+            Object fragmentObj = fragments.get(i);
+            if (fragmentObj instanceof String) {
+                String fragment = (String) fragmentObj;
+                String newFragment = replaceImgSrcWithOssUrl(fragment, outputFolder, cache, obsClient, ossConfig);
+                if (!newFragment.equals(fragment)) {
+                    fragments.set(i, newFragment);
+                }
+            }
+        }
+    }
+
+    /**
+     * Replaces every local {@code src} value inside {@code <img>} tags of {@code text} with the corresponding OSS URL.
+     * Non-local paths and tags whose file cannot be found are left unchanged.
+     */
+    private static String replaceImgSrcWithOssUrl(String text,
+                                                   String outputFolder,
+                                                   ImageUploadCache cache,
+                                                   HuaweiObsClient obsClient,
+                                                   OssUploadConfig ossConfig) throws IOException {
+        if (text == null || text.isEmpty() || text.indexOf('<') < 0) {
+            return text;
+        }
+        Matcher matcher = IMG_SRC_PATTERN.matcher(text);
+        StringBuffer sb = new StringBuffer();
+        while (matcher.find()) {
+            String localPath = matcher.group(2);
+            String url = uploadImageIfNeeded(localPath, outputFolder, cache, obsClient, ossConfig);
+            if (url == null) {
+                matcher.appendReplacement(sb, Matcher.quoteReplacement(matcher.group(0)));
+                continue;
+            }
+            String beforeSrcValue = text.substring(matcher.start(0), matcher.start(2));
+            String afterSrcValue = text.substring(matcher.end(2), matcher.end(0));
+            String replacement = beforeSrcValue + url + afterSrcValue;
+            matcher.appendReplacement(sb, Matcher.quoteReplacement(replacement));
+        }
+        matcher.appendTail(sb);
+        return sb.toString();
+    }
+
+    /**
+     * Uploads a single local image file to the OSS permanent bucket if it has not already been uploaded
+     * and if its path is under the configured output folder.
+     *
+     * @return the OSS URL, or {@code null} if the path is empty, remote, outside the output folder,
+     *         missing, or already known to have failed upload
+     */
+    private static String uploadImageIfNeeded(String localPath,
+                                               String outputFolder,
+                                               ImageUploadCache cache,
+                                               HuaweiObsClient obsClient,
+                                               OssUploadConfig ossConfig) throws IOException {
+        if (localPath == null || localPath.isEmpty()) {
+            return null;
+        }
+        String cachedUrl = cache.getUrl(localPath);
+        if (cachedUrl != null) {
+            return cachedUrl;
+        }
+        if (cache.isMissingOrSkipped(localPath)) {
+            return null;
+        }
+        if (isRemoteOrDataUrl(localPath)) {
+            cache.markMissingOrSkipped(localPath);
+            return null;
+        }
+        if (!isPathUnderOutputFolder(localPath, outputFolder)) {
+            LOGGER.log(Level.WARNING,
+                "Image path is outside the output folder, skip uploading: {0}", localPath);
+            cache.markMissingOrSkipped(localPath);
+            return null;
+        }
+        File imageFile = new File(localPath);
+        if (!imageFile.exists()) {
+            LOGGER.log(Level.WARNING, "Image file not found, skip uploading: {0}", localPath);
+            cache.markMissingOrSkipped(localPath);
+            return null;
+        }
+        String imageName = imageFile.getName();
+        String objectKey = String.format("public/%s/%s_%s/%s",
+            ossConfig.getBasicEnv(),
+            ossConfig.getPulsarReceiveTopicName(),
+            ossConfig.getBusinessId(),
+            imageName);
+        String imageUrl = obsClient.uploadFile(
+            ossConfig.getPermanentBucketName(), objectKey, imageFile, ossConfig.getDomainName());
+        cache.putUrl(localPath, imageUrl);
+        LOGGER.log(Level.INFO, "Replaced image path with OBS URL: {0}", imageUrl);
+        return imageUrl;
+    }
+
+    /**
+     * Checks whether {@code localPath} is an HTTP/HTTPS or data URL (and therefore should not be uploaded).
+     */
+    private static boolean isRemoteOrDataUrl(String localPath) {
+        String lower = localPath.toLowerCase(Locale.ROOT);
+        return lower.startsWith("http://") || lower.startsWith("https://") || lower.startsWith("data:");
+    }
+
+    /**
+     * Checks whether {@code localPath} resolves to a path inside {@code outputFolder}.
+     * If {@code outputFolder} is empty, the check is skipped and the path is allowed.
+     */
+    private static boolean isPathUnderOutputFolder(String localPath, String outputFolder) {
+        if (outputFolder == null || outputFolder.isEmpty()) {
+            return true;
+        }
+        try {
+            Path base = Paths.get(outputFolder).toAbsolutePath().normalize();
+            Path candidate = Paths.get(localPath).toAbsolutePath().normalize();
+            return candidate.startsWith(base);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Cache for image uploads within a single JSON, mapping local paths to uploaded OSS URLs
+     * and remembering paths that should not be uploaded (missing, remote, or outside the output folder).
+     */
+    private static final class ImageUploadCache {
+        private final Map<String, String> pathToUrl = new HashMap<>();
+        private final Set<String> missingOrSkipped = new HashSet<>();
+
+        String getUrl(String localPath) {
+            return pathToUrl.get(localPath);
+        }
+
+        void putUrl(String localPath, String url) {
+            pathToUrl.put(localPath, url);
+        }
+
+        boolean isMissingOrSkipped(String localPath) {
+            return missingOrSkipped.contains(localPath);
+        }
+
+        void markMissingOrSkipped(String localPath) {
+            missingOrSkipped.add(localPath);
         }
     }
 
