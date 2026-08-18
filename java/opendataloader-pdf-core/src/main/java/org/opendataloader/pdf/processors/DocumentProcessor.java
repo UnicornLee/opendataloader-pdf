@@ -660,7 +660,7 @@ public class DocumentProcessor {
                     BarChartProcessor.processBarChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
                     FlowchartProcessor.processFlowchartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
                 }
-                if (paddleEnabled) {
+                if (false && paddleEnabled) {
                     long count = pageContents.stream()
                         .filter(c -> c instanceof LineArtChunk && c.getHeight() <= 3 && c.getWidth() <= 300)
                         .count();
