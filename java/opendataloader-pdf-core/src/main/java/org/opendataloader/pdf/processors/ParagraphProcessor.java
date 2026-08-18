@@ -282,6 +282,10 @@ public class ParagraphProcessor {
         if (textBlocks.size() > 1) {
             TextBlock previousBlock = newBlocks.get(newBlocks.size() - 1);
             TextBlock nextBlock = textBlocks.get(index);
+            if (previousBlock == null || previousBlock.getLastLine() == null
+                    || nextBlock == null || nextBlock.getFirstLine() == null) {
+                return hasJudge;
+            }
             String prevLastLineText = previousBlock.getLastLine().getValue().trim();
             String prevLastLineTextLastCh = prevLastLineText.isEmpty() ? "" : prevLastLineText.substring(prevLastLineText.length() - 1);
             double prevFontSize = previousBlock.getLastLine().getFontSize();
