@@ -33,6 +33,7 @@ import org.opendataloader.pdf.server.config.BasicProperties;
 import org.opendataloader.pdf.server.config.OssProperties;
 import org.opendataloader.pdf.server.config.PdfProperties;
 import org.opendataloader.pdf.server.config.PulsarProperties;
+import org.opendataloader.pdf.server.constant.Global;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -230,6 +231,10 @@ public class PulsarService {
             businessId = inbound.get("businessId");
             extend = (Map<String, Object>) inbound.get("extend");
             String fileUrl = resolveFileUrl(asString(inbound.get("fileUrl")));
+            if (shouldSkipAnnualReport(extend)) {
+                log.info("Skip annual report, businessId={}, fileUrl={}", businessId, fileUrl);
+                return;
+            }
 
             if (fileUrl == null || fileUrl.isBlank()) {
                 log.warn("inbound fileUrl is empty, businessId={}", businessId);
@@ -634,5 +639,20 @@ public class PulsarService {
             return Boolean.parseBoolean(s);
         }
         return null;
+    }
+
+    private static boolean shouldSkipAnnualReport(Map<String, Object> extend) {
+        if (extend == null || !extend.containsKey("newTypes")) {
+            return false;
+        }
+        if (!(extend.get("newTypes") instanceof List<?> newTypes)) {
+            return false;
+        }
+        for (Object type : newTypes) {
+            if (Global.ANNUAL_REPORT_TYPE_CODE.equals(type)) {
+                return true;
+            }
+        }
+        return false;
     }
 }
