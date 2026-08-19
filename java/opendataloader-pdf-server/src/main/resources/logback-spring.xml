@@ -7,6 +7,18 @@
     <springProperty scope="context" name="log.home" source="log.home" defaultValue="service_ticket"/>
     <springProperty scope="context" name="log.stash.addresses" source="log.stash.addresses" defaultValue=""/>
 
+    <!--
+      Suppress known-benign PDFBox 3.0.4 / veraPDF 1.31.x recover-and-continue
+      messages that fire on every page of malformed PDFs ("colorSpace is null,
+      will be rendered as transparency", "name for 'gs' operator not found in
+      resources: /GSx", "Operator X has too few operands", "Missing width of
+      glyph with code X in font Y"). See
+      org.opendataloader.pdf.server.logging.PdfBoxNoiseFilter for the exact
+      match list and rationale. Filtering on message content (not logger name)
+      keeps unrelated real errors from the same loggers visible.
+    -->
+    <turboFilter class="org.opendataloader.pdf.server.logging.PdfBoxNoiseFilter"/>
+
     <appender name="console" class="ch.qos.logback.core.ConsoleAppender">
         <encoder charset="UTF-8">
             <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%-5level] [%X{tid}] %logger %M - %msg%n</pattern>
