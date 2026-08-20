@@ -40,6 +40,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
@@ -133,24 +134,36 @@ public final class LineArtProcessor {
     /**
      * Walks {@code pageContents} once, merging any
      * {@link LineArtChunk}/{@link ShapeChunk} cluster with overlapping
-     * neighbours into one screenshot. When {@code paddleUrl} is set, the
-     * screenshot is OCR'd and may be replaced by a LaTeX formula
-     * {@link TextChunk}.
+     * neighbours into one screenshot. When {@code paddleUrl} is set and
+     * {@code basicFormulaRecognize} is {@code true}, the screenshot is
+     * OCR'd and may be replaced by a LaTeX formula {@link TextChunk}.
+     * When {@code basicFormulaRecognize} is {@code false}, OCR is
+     * skipped entirely; the candidate formula ranges discovered during
+     * the merge pass are logged (one summary line per page) and the
+     * merged screenshots are restored to the original group elements so
+     * {@code pageContents} ends up unchanged from the pre-merge state.
      *
-     * @param pageContents   the current page contents (will be replaced)
-     * @param pageNumber     0-based page number
-     * @param imagesUtils    image renderer / saver
-     * @param paddleUrl      PaddleOCR endpoint URL, or {@code null}/empty to skip OCR
-     * @param pdfPath        absolute path of the source PDF; required for the
-     *                        page-level fallback OCR (may be {@code null} when
-     *                        paddle is disabled)
-     * @param sourceWidth    page width in PDF user units; required for IoU
-     *                        matching of page-level OCR results
-     * @param sourceHeight   page height in PDF user units
+     * @param pageContents          the current page contents (will be replaced)
+     * @param pageNumber            0-based page number
+     * @param imagesUtils           image renderer / saver
+     * @param paddleUrl             PaddleOCR endpoint URL, or {@code null}/empty
+     *                              to skip OCR
+     * @param pdfPath               absolute path of the source PDF; required for
+     *                              the page-level fallback OCR (may be
+     *                              {@code null} when paddle is disabled)
+     * @param sourceWidth           page width in PDF user units; required for
+     *                              IoU matching of page-level OCR results
+     * @param sourceHeight          page height in PDF user units
+     * @param basicFormulaRecognize when {@code true}, run OCR-based formula
+     *                              recognition (still subject to {@code paddleUrl});
+     *                              when {@code false}, skip OCR, log the
+     *                              detected candidate ranges and restore merged
+     *                              ImageChunks to their original group elements
      */
     public static void processLineArtGroups(List<IObject> pageContents, int pageNumber,
                                              ImagesUtils imagesUtils, String paddleUrl,
-                                             String pdfPath, double sourceWidth, double sourceHeight) {
+                                             String pdfPath, double sourceWidth, double sourceHeight,
+                                             boolean basicFormulaRecognize) {
         if (pageContents == null || pageContents.isEmpty() || imagesUtils == null) {
             return;
         }
@@ -178,13 +191,34 @@ public final class LineArtProcessor {
             return; // pageContents already in final form
         }
 
-        if (paddleEnabled && candidates.size() > PAGE_LEVEL_OCR_THRESHOLD) {
-            applyPageLevelOcr(pageContents, candidates, pageNumber, paddleUrl, pdfPath,
-                sourceWidth, sourceHeight);
-        } else if (paddleEnabled) {
-            applyGroupLevelOcr(pageContents, candidates, pdfPath, pageNumber, paddleUrl);
+        if (basicFormulaRecognize) {
+            if (paddleEnabled && candidates.size() > PAGE_LEVEL_OCR_THRESHOLD) {
+                applyPageLevelOcr(pageContents, candidates, pageNumber, paddleUrl, pdfPath,
+                    sourceWidth, sourceHeight);
+            } else if (paddleEnabled) {
+                applyGroupLevelOcr(pageContents, candidates, pdfPath, pageNumber, paddleUrl);
+            }
+            // When Paddle is disabled the merged ImageChunks remain in pageContents unchanged.
+        } else {
+            // basicFormulaRecognize == false: skip OCR but report the candidate ranges
+            // we discovered during scanAndMerge, then restore pageContents so the
+            // screenshots don't replace the original LineArtChunks.
+            StringBuilder bboxList = new StringBuilder();
+            for (int i = 0; i < candidates.size(); i++) {
+                CandidateRange range = candidates.get(i);
+                BoundingBox union = range.union;
+                if (i > 0) {
+                    bboxList.append(", ");
+                }
+                bboxList.append(String.format(Locale.ROOT,
+                    "(x0=%.2f, y0=%.2f, x1=%.2f, y1=%.2f)",
+                    union.getLeftX(), union.getBottomY(), union.getRightX(), union.getTopY()));
+            }
+            LOGGER.log(Level.INFO,
+                "Page {0} of {1}: basicFormulaRecognize=false, detected {2} candidate formula range(s): [{3}]. Restoring merged ImageChunks to original group elements.",
+                new Object[]{pageNumber + 1, pdfPath, candidates.size(), bboxList.toString()});
+            restoreAllGroups(pageContents, candidates);
         }
-        // When Paddle is disabled the merged ImageChunks remain in pageContents unchanged.
     }
 
     /**

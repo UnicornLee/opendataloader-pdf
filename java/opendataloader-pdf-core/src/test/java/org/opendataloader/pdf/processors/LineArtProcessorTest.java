@@ -39,7 +39,7 @@ class LineArtProcessorTest {
         pageContents.add(lineArt);
 
         CapturingImagesUtils imagesUtils = new CapturingImagesUtils();
-        LineArtProcessor.processLineArtGroups(pageContents, 0, imagesUtils, null, null, 0.0, 0.0);
+        LineArtProcessor.processLineArtGroups(pageContents, 0, imagesUtils, null, null, 0.0, 0.0, true);
 
         Assertions.assertEquals(0, imagesUtils.saved.size(),
                 "A lone LineArtChunk has no neighbours and should not be screenshot");
@@ -64,7 +64,7 @@ class LineArtProcessorTest {
         pageContents.add(lineArt2);
 
         CapturingImagesUtils imagesUtils = new CapturingImagesUtils();
-        LineArtProcessor.processLineArtGroups(pageContents, 0, imagesUtils, null, null, 0.0, 0.0);
+        LineArtProcessor.processLineArtGroups(pageContents, 0, imagesUtils, null, null, 0.0, 0.0, true);
 
         Assertions.assertEquals(1, imagesUtils.saved.size(),
                 "Two overlapping LineArtChunks should merge into a single image");
@@ -84,7 +84,7 @@ class LineArtProcessorTest {
         pageContents.add(lineArt2);
 
         CapturingImagesUtils imagesUtils = new CapturingImagesUtils();
-        LineArtProcessor.processLineArtGroups(pageContents, 0, imagesUtils, null, null, 0.0, 0.0);
+        LineArtProcessor.processLineArtGroups(pageContents, 0, imagesUtils, null, null, 0.0, 0.0, true);
 
         Assertions.assertEquals(1, imagesUtils.saved.size());
         // With paddleUrl null, no formula TextChunk is produced; the result is an ImageChunk.
@@ -105,10 +105,41 @@ class LineArtProcessorTest {
         pageContents.add(lineArt2);
 
         CapturingImagesUtils imagesUtils = new CapturingImagesUtils();
-        LineArtProcessor.processLineArtGroups(pageContents, 0, imagesUtils, "", null, 0.0, 0.0);
+        LineArtProcessor.processLineArtGroups(pageContents, 0, imagesUtils, "", null, 0.0, 0.0, true);
 
         Assertions.assertEquals(1, imagesUtils.saved.size());
         Assertions.assertInstanceOf(ImageChunk.class, pageContents.get(0));
+    }
+
+    @Test
+    void basicFormulaRecognizeFalseRestoresOriginalChunks() {
+        // When basicFormulaRecognize=false, the merge pass still runs (so the
+        // pageContents -> ImageChunk swap still happens), but the OCR branches
+        // are skipped and restoreAllGroups() puts the original group elements
+        // back, leaving pageContents with the two LineArtChunks it started with.
+        List<IObject> pageContents = new ArrayList<>();
+        LineArtChunk lineArt1 = new LineArtChunk();
+        lineArt1.setBoundingBox(new BoundingBox(0, 100, 100, 200, 102));
+        LineArtChunk lineArt2 = new LineArtChunk();
+        lineArt2.setBoundingBox(new BoundingBox(0, 150, 100, 250, 102));
+
+        pageContents.add(lineArt1);
+        pageContents.add(lineArt2);
+
+        CapturingImagesUtils imagesUtils = new CapturingImagesUtils();
+        LineArtProcessor.processLineArtGroups(pageContents, 0, imagesUtils, null,
+            "test.pdf", 612.0, 792.0, false);
+
+        Assertions.assertEquals(1, imagesUtils.saved.size(),
+            "scanAndMerge still produces the merged ImageChunk during the merge pass");
+        Assertions.assertEquals(2, pageContents.size(),
+            "basicFormulaRecognize=false should restore the original group elements into pageContents");
+        Assertions.assertSame(lineArt1, pageContents.get(0),
+            "Restored pageContents should contain the original first LineArtChunk");
+        Assertions.assertSame(lineArt2, pageContents.get(1),
+            "Restored pageContents should contain the original second LineArtChunk");
+        Assertions.assertFalse(pageContents.contains(imagesUtils.saved.get(0)),
+            "The merged ImageChunk must NOT remain in pageContents after restore");
     }
 
     @Test
@@ -116,11 +147,11 @@ class LineArtProcessorTest {
         CapturingImagesUtils imagesUtils = new CapturingImagesUtils();
 
         Assertions.assertDoesNotThrow(() ->
-                LineArtProcessor.processLineArtGroups(null, 0, imagesUtils, null, null, 0.0, 0.0));
+                LineArtProcessor.processLineArtGroups(null, 0, imagesUtils, null, null, 0.0, 0.0, false));
         Assertions.assertDoesNotThrow(() ->
-                LineArtProcessor.processLineArtGroups(new ArrayList<>(), 0, imagesUtils, null, null, 0.0, 0.0));
+                LineArtProcessor.processLineArtGroups(new ArrayList<>(), 0, imagesUtils, null, null, 0.0, 0.0, false));
         Assertions.assertDoesNotThrow(() ->
-                LineArtProcessor.processLineArtGroups(new ArrayList<>(), 0, null, null, null, 0.0, 0.0));
+                LineArtProcessor.processLineArtGroups(new ArrayList<>(), 0, null, null, null, 0.0, 0.0, false));
         Assertions.assertEquals(0, imagesUtils.saved.size());
     }
 }
