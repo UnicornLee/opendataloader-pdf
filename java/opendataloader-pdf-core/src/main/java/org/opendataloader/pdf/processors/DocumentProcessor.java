@@ -666,7 +666,7 @@ public class DocumentProcessor {
                     BarChartProcessor.processBarChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
                     FlowchartProcessor.processFlowchartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
                 }
-                if (basicFormulaRecognize && paddleEnabled) {
+                if (paddleEnabled) {
                     long count = pageContents.stream()
                         .filter(c -> c instanceof LineArtChunk && c.getHeight() <= 3 && c.getWidth() <= 300)
                         .count();
@@ -675,7 +675,7 @@ public class DocumentProcessor {
                     // Page-level OCR converts pixel-space boxes back to PDF user units
                     // using the page's real width/height (from per-page arrays).
                     LineArtProcessor.processLineArtGroups(pageContents, pageNumber, imagesUtils, paddleUrl,
-                        inputPdfName, pageWidths[pageNumber], pageHeights[pageNumber]);
+                        inputPdfName, pageWidths[pageNumber], pageHeights[pageNumber], basicFormulaRecognize);
                 }
                 ConsecutiveImageProcessor.processConsecutiveImages(pageContents, pageNumber, imagesUtils);
             }
