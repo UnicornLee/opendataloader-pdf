@@ -34,6 +34,8 @@ import org.opendataloader.pdf.server.config.OssProperties;
 import org.opendataloader.pdf.server.config.PdfProperties;
 import org.opendataloader.pdf.server.config.PulsarProperties;
 import org.opendataloader.pdf.server.constant.Global;
+import org.springframework.core.env.Environment;
+import org.springframework.core.env.Profiles;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -94,18 +96,22 @@ public class PulsarService {
     private final List<Thread> receiveThreads = new ArrayList<>();
     private final List<Thread> ocrReceiveThreads = new ArrayList<>();
 
+    private final Environment env;
+
     public PulsarService(PulsarProperties pulsarProperties,
                          BasicProperties basicProperties,
                          OssProperties ossProperties,
                          PdfProperties pdfProperties,
                          PdfProcessService pdfProcessService,
-                         ObjectMapper objectMapper) {
+                         ObjectMapper objectMapper,
+                         Environment env) {
         this.pulsarProperties = pulsarProperties;
         this.basicProperties = basicProperties;
         this.ossProperties = ossProperties;
         this.pdfProperties = pdfProperties;
         this.pdfProcessService = pdfProcessService;
         this.objectMapper = objectMapper;
+        this.env = env;
     }
 
     @PostConstruct
@@ -231,8 +237,9 @@ public class PulsarService {
             businessId = inbound.get("businessId");
             extend = (Map<String, Object>) inbound.get("extend");
             String fileUrl = resolveFileUrl(asString(inbound.get("fileUrl")));
-            if (shouldSkipAnnualReport(extend)) {
+            if (shouldSkipAnnualReport(extend) && env.acceptsProfiles(Profiles.of("prod"))) {
                 log.info("Skip annual report, businessId={}, fileUrl={}", businessId, fileUrl);
+                acknowledgeQuietly(consumer, pulsarMsg, businessId);
                 return;
             }
 
