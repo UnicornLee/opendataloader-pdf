@@ -72,6 +72,7 @@ import java.io.UncheckedIOException;
 import java.awt.image.BufferedImage;
 import javax.imageio.ImageIO;
 import org.apache.pdfbox.Loader;
+import org.apache.pdfbox.pdmodel.common.PDRectangle;
 import org.apache.pdfbox.rendering.PDFRenderer;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -518,8 +519,12 @@ public class JsonWriter {
         // 对 pageContents 按照 topY 从大到小排序
         pageContents.sort(Comparator.comparingDouble(item -> item.getTopY()));
         Collections.reverse(pageContents);
+        Double[] headerPos = null;
+        Double[] footerPos = pageContents.size() > 1 ? headerFooterPos(pageContents.get(pageContents.size() - 1), height) : null;
         if (isHk) {
             pageContents = flattenHeaderFooterContents(pageContents);
+        } else {
+            headerPos = pageContents.isEmpty() ? null : headerFooterPos(pageContents.get(0), height);
         }
         List<IObject> layoutObjects = pageContents.stream()
             .filter(o -> !(o instanceof SemanticHeaderOrFooter))
@@ -535,7 +540,8 @@ public class JsonWriter {
         pageGenerator.writeNumberField(JsonName.MARGIN_LEFT, minX);
         pageGenerator.writeNumberField(JsonName.MARGIN_RIGHT, width - maxX);
         pageGenerator.writeNumberField(JsonName.MARGIN_TOP, height - maxY);
-        pageGenerator.writeNumberField(JsonName.MARGIN_BOTTOM, minY);
+        writePosArray(pageGenerator, JsonName.HEADER_POS, headerPos);
+        writePosArray(pageGenerator, JsonName.FOOTER_POS, footerPos);
         pageGenerator.writeArrayFieldStart(JsonName.ITEMS);
         generateJsonPageContentData(includeHeaderFooter, height, pageContents, pageGenerator);
         pageGenerator.writeEndArray();
@@ -570,6 +576,43 @@ public class JsonWriter {
             flattened.add(content);
         }
         return flattened;
+    }
+
+    /**
+     * Builds the 4-element bounding-box array for a header/footer content:
+     * {@code [leftX, height - topY, rightX, height - bottomY]} (PDF coords flipped to top-left origin).
+     * Returns {@code null} when the content is not a {@link SemanticHeaderOrFooter}.
+     */
+    private static Double[] headerFooterPos(IObject content, double height) {
+        if (!(content instanceof SemanticHeaderOrFooter)) {
+            return null;
+        }
+        BoundingBox box = ((SemanticHeaderOrFooter) content).getBoundingBox();
+        return new Double[]{
+                box.getLeftX(),
+                height - box.getTopY(),
+                box.getRightX(),
+                height - box.getBottomY()
+        };
+    }
+
+    /**
+     * Writes a header/footer position array as a JSON array field.
+     * Skips the field entirely when {@code pos} is {@code null} (no header/footer detected).
+     */
+    private static void writePosArray(JsonGenerator gen, String fieldName, Double[] pos) throws IOException {
+        if (pos == null) {
+            return;
+        }
+        gen.writeArrayFieldStart(fieldName);
+        for (Double value : pos) {
+            if (value == null) {
+                gen.writeNull();
+            } else {
+                gen.writeNumber(value);
+            }
+        }
+        gen.writeEndArray();
     }
 
     /**
@@ -1124,6 +1167,88 @@ public class JsonWriter {
     }
 
     /**
+     * Computes the y-range to clip a stream-table / formula screenshot to, based on the page's
+     * {@code header_pos} / {@code footer_pos} (4-element arrays: {@code [left, top, right, bottom]}
+     * in top-left PDF coordinates).
+     *
+     * <ul>
+     *   <li>Both present → {@code [header_pos[3], footer_pos[1]]} (drop both bands)</li>
+     *   <li>Only header_pos → {@code [header_pos[3], pageHeight]} (drop header band only)</li>
+     *   <li>Only footer_pos → {@code [0, footer_pos[1]]} (drop footer band only)</li>
+     *   <li>Neither present or malformed → {@code null} (render full page)</li>
+     * </ul>
+     *
+     * <p>The x-axis is always preserved in full; only the y-range is adjusted.</p>
+     */
+    private static double[] computeClipY(Map<String, Object> page) {
+        Object pageHeightObj = page.get(JsonName.HEIGHT);
+        if (!(pageHeightObj instanceof Number)) {
+            return null;
+        }
+        double pageHeight = ((Number) pageHeightObj).doubleValue();
+        if (pageHeight <= 0) {
+            return null;
+        }
+        Double[] headerPos = readPosArray(page.get(JsonName.HEADER_POS));
+        Double[] footerPos = readPosArray(page.get(JsonName.FOOTER_POS));
+        if (headerPos != null && footerPos != null) {
+            return new double[]{headerPos[3], footerPos[1]};
+        }
+        if (headerPos != null) {
+            return new double[]{headerPos[3], pageHeight};
+        }
+        if (footerPos != null) {
+            return new double[]{0.0, footerPos[1]};
+        }
+        return null;
+    }
+
+    /**
+     * Reads a {@code header_pos} / {@code footer_pos} value back from the JSON page map and
+     * materializes it as a 4-element {@code Double[]}. Returns {@code null} if the value is
+     * missing, not a list, shorter than 4, or contains any non-numeric element — all of
+     * those cases are treated as "no usable position" by {@link #computeClipY}.
+     */
+    private static Double[] readPosArray(Object value) {
+        if (!(value instanceof List)) {
+            return null;
+        }
+        List<?> list = (List<?>) value;
+        if (list.size() < 4) {
+            return null;
+        }
+        Double[] result = new Double[4];
+        for (int i = 0; i < 4; i++) {
+            Object element = list.get(i);
+            if (!(element instanceof Number)) {
+                return null;
+            }
+            result[i] = ((Number) element).doubleValue();
+        }
+        return result;
+    }
+
+    /**
+     * Reads {@code width} / {@code height} off a page map and returns them as a 2-element
+     * {@code double[]}: {@code [width, height]}. Missing or non-numeric values become 0.0.
+     * Used by all three screenshot passes (stream-table / formula / image-hit) so they
+     * share one definition of "page size" for entry size reporting.
+     */
+    private static double[] readPageDimensions(Map<String, Object> page) {
+        double pageWidth = 0.0;
+        double pageHeight = 0.0;
+        Object pageHeightObj = page.get(JsonName.HEIGHT);
+        if (pageHeightObj instanceof Number) {
+            pageHeight = ((Number) pageHeightObj).doubleValue();
+        }
+        Object pageWidthObj = page.get(JsonName.WIDTH);
+        if (pageWidthObj instanceof Number) {
+            pageWidth = ((Number) pageWidthObj).doubleValue();
+        }
+        return new double[]{pageWidth, pageHeight};
+    }
+
+    /**
      * Scans every page of the main JSON and, for pages that satisfy the OCR conditions:
      * <ul>
      *     <li>sets {@code is_ocr} to {@code true} on the page object (persisted to the main JSON when bookmarks are written back)</li>
@@ -1181,25 +1306,27 @@ public class JsonWriter {
                     continue;
                 }
                 Map<String, Object> page = data.get(i);
-                double pageHeight = 0.0;
-                double pageWidth = 0.0;
-                Object pageHeightObj = page.get(JsonName.HEIGHT);
-                if (pageHeightObj instanceof Number) {
-                    pageHeight = ((Number) pageHeightObj).doubleValue();
-                }
-                Object pageWidthObj = page.get(JsonName.WIDTH);
-                if (pageWidthObj instanceof Number) {
-                    pageWidth = ((Number) pageWidthObj).doubleValue();
-                }
+                double[] dims = readPageDimensions(page);
+                double pageWidth = dims[0];
+                double pageHeight = dims[1];
+                double[] clipY = computeClipY(page);
                 String imageUrl = renderStreamTablePageScreenshot(pdfFile, outputFolder, pdfBaseName, i,
-                    ossEnabled, ossConfig, obsClient);
+                    ossEnabled, ossConfig, obsClient, clipY);
                 if (imageUrl == null) {
                     continue;
                 }
+                // Mark is_ocr on the page (persisted to the main JSON when bookmarks are
+                // written back); also record that this page already produced an entry so the
+                // image-hit pass below skips it.
+                page.put(JsonName.IS_OCR, true);
                 Map<String, Object> entry = new LinkedHashMap<>();
                 entry.put(JsonName.PAGE_INDEX, page.get(JsonName.PAGE_INDEX));
                 entry.put("image_url", imageUrl);
-                entry.put("image_height", pageHeight);
+                // image_width/image_height describe the PDF region captured: x stays full page,
+                // y is the clip range (header/footer excluded) — falls back to the full page when
+                // neither header_pos nor footer_pos is available.
+                double capturedHeight = clipY != null ? (clipY[1] - clipY[0]) : pageHeight;
+                entry.put("image_height", capturedHeight);
                 entry.put("image_width", pageWidth);
                 ocrEntries.add(entry);
             }
@@ -1229,31 +1356,50 @@ public class JsonWriter {
                     continue;
                 }
                 Map<String, Object> page = data.get(i);
-                double pageHeight = 0.0;
-                double pageWidth = 0.0;
-                Object pageHeightObj = page.get(JsonName.HEIGHT);
-                if (pageHeightObj instanceof Number) {
-                    pageHeight = ((Number) pageHeightObj).doubleValue();
-                }
-                Object pageWidthObj = page.get(JsonName.WIDTH);
-                if (pageWidthObj instanceof Number) {
-                    pageWidth = ((Number) pageWidthObj).doubleValue();
-                }
+                double[] dims = readPageDimensions(page);
+                double pageWidth = dims[0];
+                double pageHeight = dims[1];
+                double[] clipY = computeClipY(page);
                 String imageUrl = renderFormulaPageScreenshot(pdfFile, outputFolder, pdfBaseName, i,
-                    ossEnabled, ossConfig, obsClient);
+                    ossEnabled, ossConfig, obsClient, clipY);
                 if (imageUrl == null) {
                     continue;
                 }
+                page.put(JsonName.IS_OCR, true);
                 Map<String, Object> entry = new LinkedHashMap<>();
                 entry.put(JsonName.PAGE_INDEX, page.get(JsonName.PAGE_INDEX));
                 entry.put("image_url", imageUrl);
-                entry.put("image_height", pageHeight);
+                double capturedHeight = clipY != null ? (clipY[1] - clipY[0]) : pageHeight;
+                entry.put("image_height", capturedHeight);
                 entry.put("image_width", pageWidth);
                 ocrEntries.add(entry);
             }
         }
 
-        for (Map<String, Object> page : data) {
+        // Pass 2: pages dominated by a single large image (height / page.height > 0.8) with no
+        // tables and few other items. Renders a fresh screenshot of the page (clipped to
+        // header/footer bands when header_pos / footer_pos is available) and writes it as the
+        // entry's image_url — the embedded image in the page is no longer used directly.
+        // Pages already covered by Pass 1 / Pass 1.5 are skipped so consumers see at most one
+        // image entry per page.
+        File pdfFile = new File(inputPdfName);
+        String pdfBaseName = pdfFileName;
+        if (pdfBaseName.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
+            pdfBaseName = pdfBaseName.substring(0, pdfBaseName.length() - 4);
+        }
+        if (pdfBaseName.endsWith(".")) {
+            pdfBaseName = pdfBaseName.substring(0, pdfBaseName.length() - 1);
+        }
+        for (int i = 0; i < data.size(); i++) {
+            // Skip pages already served by Pass 1 / Pass 1.5 so consumers see at most one
+            // image entry per page.
+            if (pageHaveStreamTables != null && i < pageHaveStreamTables.length && pageHaveStreamTables[i]) {
+                continue;
+            }
+            if (pageHaveFormulas != null && i < pageHaveFormulas.length && pageHaveFormulas[i]) {
+                continue;
+            }
+            Map<String, Object> page = data.get(i);
             Object itemsObj = page.get(JsonName.ITEMS);
             if (!(itemsObj instanceof List)) {
                 continue;
@@ -1288,8 +1434,7 @@ public class JsonWriter {
                 continue;
             }
 
-            Map<String, Object> bestImage = null;
-            double bestRatio = 0.0;
+            boolean hasLargeImage = false;
             for (Map<String, Object> item : items) {
                 String itemType = (String) item.get(JsonName.ITEM_TYPE);
                 if (!"image".equals(itemType)) {
@@ -1300,35 +1445,33 @@ public class JsonWriter {
                     continue;
                 }
                 double imageHeight = ((Number) imageHeightObj).doubleValue();
-                double ratio = imageHeight / pageHeight;
-                if (ratio > bestRatio) {
-                    bestRatio = ratio;
-                    bestImage = item;
+                if (imageHeight / pageHeight > 0.8) {
+                    hasLargeImage = true;
+                    break;
                 }
             }
-            if (bestImage == null || bestRatio <= 0.8) {
+            if (!hasLargeImage) {
                 continue;
             }
 
-            // Hit: mark is_ocr=true and collect into ocrEntries.
+            // Hit: mark is_ocr on the page and render a fresh screenshot (clipped to
+            // header/footer bands) so OCR gets the cleaned-up page rather than the embedded image.
             page.put(JsonName.IS_OCR, true);
 
-            String imageUrl = "";
-            Object contentObj = bestImage.get(JsonName.CONTENT);
-            if (contentObj instanceof List && !((List<?>) contentObj).isEmpty()) {
-                Object first = ((List<?>) contentObj).get(0);
-                if (first != null) {
-                    imageUrl = first.toString();
-                }
+            double[] dims = readPageDimensions(page);
+            double pageWidth = dims[0];
+            double[] clipY = computeClipY(page);
+            String imageUrl = renderOcrPageScreenshot(pdfFile, outputFolder, pdfBaseName, i,
+                ossEnabled, ossConfig, obsClient, clipY);
+            if (imageUrl == null) {
+                continue;
             }
-
-            Object pageWidthObj = page.get(JsonName.WIDTH);
-            double pageWidth = pageWidthObj instanceof Number ? ((Number) pageWidthObj).doubleValue() : 0.0;
 
             Map<String, Object> entry = new LinkedHashMap<>();
             entry.put(JsonName.PAGE_INDEX, page.get(JsonName.PAGE_INDEX));
             entry.put("image_url", imageUrl);
-            entry.put("image_height", pageHeight);
+            double capturedHeight = clipY != null ? (clipY[1] - clipY[0]) : pageHeight;
+            entry.put("image_height", capturedHeight);
             entry.put("image_width", pageWidth);
             ocrEntries.add(entry);
         }
@@ -1383,12 +1526,16 @@ public class JsonWriter {
      * (same as the main-JSON upload) and the local file is deleted; the returned value is
      * the OSS URL. When OSS is disabled the local absolute path is returned.
      *
-     * @return the absolute path or OSS URL, or {@code null} when rendering fails
+     * @param clipYPdf optional y-range to clip the screenshot to, in top-left PDF coordinates
+     *                 ({@code [top, bottom]}); {@code null} means render the full page.
+     * @return absolute local path or OSS URL on success, {@code null} on failure
+     *         (with a warning logged).
      */
     private static String renderStreamTablePageScreenshot(File pdfFile, String outputFolder, String pdfBaseName,
-                                                         int pageNumber, boolean ossEnabled,
-                                                         OssUploadConfig ossConfig,
-                                                         HuaweiObsClient obsClient) throws IOException {
+                                                          int pageNumber, boolean ossEnabled,
+                                                          OssUploadConfig ossConfig,
+                                                          HuaweiObsClient obsClient,
+                                                          double[] clipYPdf) throws IOException {
         if (!pdfFile.exists()) {
             LOGGER.log(Level.WARNING, "PDF not found for stream-table screenshot: {0}", pdfFile.getAbsolutePath());
             return null;
@@ -1400,10 +1547,9 @@ public class JsonWriter {
             return null;
         }
         File screenshot = new File(imagesDir, pdfBaseName + "_streamtable-" + pageNumber + ".png");
-        try (org.apache.pdfbox.pdmodel.PDDocument sourceDoc = Loader.loadPDF(pdfFile)) {
-            PDFRenderer renderer = new PDFRenderer(sourceDoc);
-            BufferedImage pageImage = renderer.renderImageWithDPI(pageNumber, 200.0f);
-            ImageIO.write(pageImage, "PNG", screenshot);
+        BufferedImage rendered;
+        try {
+            rendered = renderPage(pdfFile, pageNumber, clipYPdf);
         } catch (IOException ex) {
             LOGGER.log(Level.WARNING,
                 "Failed to render stream-table screenshot for page " + (pageNumber + 1)
@@ -1411,6 +1557,13 @@ public class JsonWriter {
                 ex);
             return null;
         }
+        if (rendered == null) {
+            // clip range ended up empty (header and footer overlapping or fully covering the page).
+            LOGGER.log(Level.WARNING, "Empty clip range for stream-table screenshot on page {0}",
+                pageNumber + 1);
+            return null;
+        }
+        ImageIO.write(rendered, "PNG", screenshot);
 
         if (!ossEnabled) {
             return screenshot.getAbsolutePath();
@@ -1452,13 +1605,16 @@ public class JsonWriter {
      * {@code cleanupLocalFiles} {@code name.startsWith(pdfBaseName + "_")}
      * allowlist.
      *
+     * @param clipYPdf optional y-range to clip the screenshot to, in top-left PDF coordinates
+     *                 ({@code [top, bottom]}); {@code null} means render the full page.
      * @return absolute local path or OBS URL on success, {@code null} on failure
      *         (with a warning logged).
      */
     private static String renderFormulaPageScreenshot(File pdfFile, String outputFolder, String pdfBaseName,
                                                      int pageNumber, boolean ossEnabled,
                                                      OssUploadConfig ossConfig,
-                                                     HuaweiObsClient obsClient) throws IOException {
+                                                     HuaweiObsClient obsClient,
+                                                     double[] clipYPdf) throws IOException {
         if (!pdfFile.exists()) {
             LOGGER.log(Level.WARNING, "PDF not found for formula screenshot: {0}", pdfFile.getAbsolutePath());
             return null;
@@ -1470,10 +1626,9 @@ public class JsonWriter {
             return null;
         }
         File screenshot = new File(imagesDir, pdfBaseName + "_formula-" + pageNumber + ".png");
-        try (org.apache.pdfbox.pdmodel.PDDocument sourceDoc = Loader.loadPDF(pdfFile)) {
-            PDFRenderer renderer = new PDFRenderer(sourceDoc);
-            BufferedImage pageImage = renderer.renderImageWithDPI(pageNumber, 200.0f);
-            ImageIO.write(pageImage, "PNG", screenshot);
+        BufferedImage rendered;
+        try {
+            rendered = renderPage(pdfFile, pageNumber, clipYPdf);
         } catch (IOException ex) {
             LOGGER.log(Level.WARNING,
                 "Failed to render formula screenshot for page " + (pageNumber + 1)
@@ -1481,6 +1636,12 @@ public class JsonWriter {
                 ex);
             return null;
         }
+        if (rendered == null) {
+            LOGGER.log(Level.WARNING, "Empty clip range for formula screenshot on page {0}",
+                pageNumber + 1);
+            return null;
+        }
+        ImageIO.write(rendered, "PNG", screenshot);
 
         if (!ossEnabled) {
             return screenshot.getAbsolutePath();
@@ -1508,6 +1669,124 @@ public class JsonWriter {
                 uploadEx);
             // Fallback: keep the local file so downstream consumers can still access the image.
             return screenshot.getAbsolutePath();
+        }
+    }
+
+    /**
+     * Renders a page screenshot for the image-hit Pass 2 (large single-image page) and
+     * either uploads it to the OSS temp bucket (when OSS is enabled) or returns the local
+     * absolute path. Structurally identical to {@link #renderStreamTablePageScreenshot} /
+     * {@link #renderFormulaPageScreenshot}; differs only in the {@code _ocr-} file-name
+     * pattern and the {@code _ocr_} OSS object-key suffix so the three kinds don't collide
+     * on disk or in the bucket. All three share the {@code {baseName}_} prefix so they fall
+     * under {@link #cleanupLocalFiles}'s {@code name.startsWith(pdfBaseName + "_")} allowlist.
+     *
+     * @param clipYPdf optional y-range to clip the screenshot to, in top-left PDF coordinates
+     *                 ({@code [top, bottom]}); {@code null} means render the full page.
+     * @return absolute local path or OBS URL on success, {@code null} on failure
+     *         (with a warning logged).
+     */
+    private static String renderOcrPageScreenshot(File pdfFile, String outputFolder, String pdfBaseName,
+                                                  int pageNumber, boolean ossEnabled,
+                                                  OssUploadConfig ossConfig,
+                                                  HuaweiObsClient obsClient,
+                                                  double[] clipYPdf) throws IOException {
+        if (!pdfFile.exists()) {
+            LOGGER.log(Level.WARNING, "PDF not found for ocr screenshot: {0}", pdfFile.getAbsolutePath());
+            return null;
+        }
+        File imagesDir = new File(outputFolder, pdfBaseName + MarkdownSyntax.IMAGES_DIRECTORY_SUFFIX);
+        if (!imagesDir.exists() && !imagesDir.mkdirs()) {
+            LOGGER.log(Level.WARNING, "Unable to create images directory for ocr screenshot: {0}",
+                imagesDir.getAbsolutePath());
+            return null;
+        }
+        File screenshot = new File(imagesDir, pdfBaseName + "_ocr-" + pageNumber + ".png");
+        BufferedImage rendered;
+        try {
+            rendered = renderPage(pdfFile, pageNumber, clipYPdf);
+        } catch (IOException ex) {
+            LOGGER.log(Level.WARNING,
+                "Failed to render ocr screenshot for page " + (pageNumber + 1)
+                    + ": " + ex.getClass().getSimpleName() + ": " + ex.getMessage(),
+                ex);
+            return null;
+        }
+        if (rendered == null) {
+            LOGGER.log(Level.WARNING, "Empty clip range for ocr screenshot on page {0}",
+                pageNumber + 1);
+            return null;
+        }
+        ImageIO.write(rendered, "PNG", screenshot);
+
+        if (!ossEnabled) {
+            return screenshot.getAbsolutePath();
+        }
+
+        String objectKey = String.format("public/%s/%s_%s_ocr_%d.png",
+            ossConfig.getBasicEnv(),
+            ossConfig.getPulsarReceiveTopicName(),
+            ossConfig.getBusinessId(),
+            pageNumber + 1);
+        try {
+            String url = obsClient.uploadFile(ossConfig.getTempBucketName(), objectKey, screenshot,
+                ossConfig.getTempDomainName());
+            try {
+                Files.delete(screenshot.toPath());
+            } catch (IOException delEx) {
+                LOGGER.log(Level.WARNING, "Failed to delete local ocr screenshot after upload: {0}: {1}",
+                    new Object[]{screenshot.getAbsolutePath(), delEx.getMessage()});
+            }
+            return url;
+        } catch (IOException uploadEx) {
+            LOGGER.log(Level.WARNING,
+                "Failed to upload ocr screenshot for page " + (pageNumber + 1)
+                    + " to OBS: " + uploadEx.getClass().getSimpleName() + ": " + uploadEx.getMessage(),
+                uploadEx);
+            // Fallback: keep the local file so downstream consumers can still access the image.
+            return screenshot.getAbsolutePath();
+        }
+    }
+
+    /**
+     * Renders a page to a {@link BufferedImage} at 200 DPI. When {@code clipYPdf} is non-null,
+     * the page's {@code cropBox} is temporarily narrowed to the requested y-band so the
+     * renderer outputs exactly that PDF region — no {@code getSubimage} on top of a full-page
+     * render, so the pixel grid is exactly {@code cropBox.width × DPI / 72} wide and
+     * {@code bandHeight × DPI / 72} tall, with no subpixel drift from rounding the y-start.
+     *
+     * <p>{@code clipYPdf} is in top-left PDF coordinates ({@code [top, bottom]}); x is always
+     * preserved in full (i.e. {@code x = 0}, width = current cropBox width).</p>
+     *
+     * @return the rendered image, or {@code null} when the clip range collapses to zero
+     *         height (header and footer bands overlapping or fully covering the page).
+     */
+    private static BufferedImage renderPage(File pdfFile, int pageNumber, double[] clipYPdf) throws IOException {
+        try (org.apache.pdfbox.pdmodel.PDDocument sourceDoc = Loader.loadPDF(pdfFile)) {
+            PDFRenderer renderer = new PDFRenderer(sourceDoc);
+            org.apache.pdfbox.pdmodel.PDPage page = sourceDoc.getPage(pageNumber);
+
+            if (clipYPdf == null) {
+                return renderer.renderImageWithDPI(pageNumber, 300.0f);
+            }
+
+            // PDFBox uses bottom-left origin while clipYPdf is top-left, so flip y. The width
+            // comes from the current cropBox (which matches what DocumentProcessor reports as
+            // the page size and what writeOcrDetectionJson records as image_width).
+            PDRectangle originalCropBox = page.getCropBox();
+            float pdfY = (float) (originalCropBox.getHeight() - clipYPdf[1]);
+            float pdfH = (float) (clipYPdf[1] - clipYPdf[0]);
+            if (pdfH <= 0) {
+                return null;
+            }
+            page.setCropBox(new PDRectangle(0.0f, pdfY, originalCropBox.getWidth(), pdfH));
+            try {
+                return renderer.renderImageWithDPI(pageNumber, 300.0f);
+            } finally {
+                // PDFBox reads cropBox fresh on every render call, but restoring keeps the
+                // PDDocument consistent for any code that might look at it later.
+                page.setCropBox(originalCropBox);
+            }
         }
     }
 
