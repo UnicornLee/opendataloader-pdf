@@ -34,11 +34,28 @@ public class StreamTableProcessor {
 
     private static final Logger LOGGER = Logger.getLogger(StreamTableProcessor.class.getCanonicalName());
 
-    /** Maximum number of attempts (initial + retries) when calling Paddle OCR. */
+    /**
+     * Maximum number of attempts (initial + retries) when calling Paddle OCR.
+     */
     private static final int PADDLE_MAX_RETRIES = 3;
 
-    /** Sleep duration between failed Paddle OCR attempts, in seconds. */
+    /**
+     * Sleep duration between failed Paddle OCR attempts, in seconds.
+     */
     private static final long PADDLE_RETRY_SLEEP_SECONDS = 3L;
+
+    public static boolean haveStreamTables(String pdfPath, List<IObject> contents, int pageNumber, double width, double height, String paddleUrl) {
+        // 1. 先将文本信息按行进行聚合
+        List<List<IObject>> rows = groupByRows(contents);
+        // 2. 收集行内文本间的空隙范围
+        // 3. 根据空隙范围是否存在无线表格
+        boolean isExisted = existStreamTable(rows);
+        // 4. 对整页内容进行截图发给大模型进行内容的识别
+        if (isExisted) {
+            LOGGER.info(String.format("Page %d of %s contains stream tables.", pageNumber, pdfPath));
+        }
+        return isExisted;
+    }
 
     public static List<IObject> processStreamTables(String pdfPath, List<IObject> contents, int pageNumber, double width, double height, String paddleUrl) throws IOException {
         // 1. 先将文本信息按行进行聚合

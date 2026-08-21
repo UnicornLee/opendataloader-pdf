@@ -33,17 +33,44 @@ public class ExtractionResult {
     private final long extractionNs;
     private final JsonNode hybridTimings;
     private final Map<Long, ElementMetadata> elementMetadata;
+    /**
+     * Per-page flag indicating whether the page contains wireless (stream) tables.
+     * Indexed by 0-based page number; {@code null} when detection was not performed
+     * (e.g. tagged-PDF or hybrid-extraction paths that do not run the detection).
+     */
+    private final boolean[] pageHaveStreamTables;
+    /**
+     * Per-page flag indicating whether the page contains formula candidates.
+     * Indexed by 0-based page number; {@code null} when detection was not performed
+     * (e.g. tagged-PDF or hybrid-extraction paths that do not run the detection).
+     */
+    private final boolean[] pageHaveFormulas;
 
     public ExtractionResult(List<List<IObject>> contents, long extractionNs, JsonNode hybridTimings,
-                             Map<Long, ElementMetadata> elementMetadata) {
+                             Map<Long, ElementMetadata> elementMetadata,
+                             boolean[] pageHaveStreamTables,
+                             boolean[] pageHaveFormulas) {
         this.contents = contents;
         this.extractionNs = extractionNs;
         this.hybridTimings = hybridTimings;
         this.elementMetadata = elementMetadata != null ? elementMetadata : Collections.emptyMap();
+        this.pageHaveStreamTables = pageHaveStreamTables;
+        this.pageHaveFormulas = pageHaveFormulas;
+    }
+
+    public ExtractionResult(List<List<IObject>> contents, long extractionNs, JsonNode hybridTimings,
+                             Map<Long, ElementMetadata> elementMetadata,
+                             boolean[] pageHaveStreamTables) {
+        this(contents, extractionNs, hybridTimings, elementMetadata, pageHaveStreamTables, null);
+    }
+
+    public ExtractionResult(List<List<IObject>> contents, long extractionNs, JsonNode hybridTimings,
+                             Map<Long, ElementMetadata> elementMetadata) {
+        this(contents, extractionNs, hybridTimings, elementMetadata, null, null);
     }
 
     public ExtractionResult(List<List<IObject>> contents, long extractionNs, JsonNode hybridTimings) {
-        this(contents, extractionNs, hybridTimings, Collections.emptyMap());
+        this(contents, extractionNs, hybridTimings, Collections.emptyMap(), null, null);
     }
 
     public List<List<IObject>> getContents() {
@@ -60,5 +87,13 @@ public class ExtractionResult {
 
     public Map<Long, ElementMetadata> getElementMetadata() {
         return elementMetadata;
+    }
+
+    public boolean[] getPageHaveStreamTables() {
+        return pageHaveStreamTables;
+    }
+
+    public boolean[] getPageHaveFormulas() {
+        return pageHaveFormulas;
     }
 }

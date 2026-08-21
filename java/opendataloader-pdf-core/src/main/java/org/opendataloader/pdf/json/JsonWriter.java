@@ -69,6 +69,10 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.awt.image.BufferedImage;
+import javax.imageio.ImageIO;
+import org.apache.pdfbox.Loader;
+import org.apache.pdfbox.rendering.PDFRenderer;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
@@ -132,7 +136,7 @@ public class JsonWriter {
                                           Map<Long, ElementMetadata> elementMetadata,
                                           Map<String, Object> hybridInfo,
                                           boolean includeHeaderFooter) throws IOException {
-        return writeToCustomJson(inputPdfName, outputFolder, contents, elementMetadata, hybridInfo, includeHeaderFooter, null);
+        return writeToCustomJson(inputPdfName, outputFolder, contents, elementMetadata, hybridInfo, includeHeaderFooter, null, null);
     }
 
     /**
@@ -251,6 +255,26 @@ public class JsonWriter {
                                           Map<String, Object> hybridInfo,
                                           boolean includeHeaderFooter,
                                           Config config) throws IOException {
+        return writeToCustomJson(inputPdfName, outputFolder, contents, elementMetadata, hybridInfo, includeHeaderFooter, config, null);
+    }
+
+    public static CustomOutputResult writeToCustomJson(String inputPdfName, String outputFolder, List<List<IObject>> contents,
+                                          Map<Long, ElementMetadata> elementMetadata,
+                                          Map<String, Object> hybridInfo,
+                                          boolean includeHeaderFooter,
+                                          Config config,
+                                          boolean[] pageHaveStreamTables) throws IOException {
+        return writeToCustomJson(inputPdfName, outputFolder, contents, elementMetadata, hybridInfo,
+            includeHeaderFooter, config, pageHaveStreamTables, null);
+    }
+
+    public static CustomOutputResult writeToCustomJson(String inputPdfName, String outputFolder, List<List<IObject>> contents,
+                                          Map<Long, ElementMetadata> elementMetadata,
+                                          Map<String, Object> hybridInfo,
+                                          boolean includeHeaderFooter,
+                                          Config config,
+                                          boolean[] pageHaveStreamTables,
+                                          boolean[] pageHaveFormulas) throws IOException {
         StaticLayoutContainers.resetImageIndex();
         File inputPDF = new File(inputPdfName);
         String jsonFileName = outputFolder + File.separator + inputPDF.getName().substring(0, inputPDF.getName().length() - 3) + "json";
@@ -289,7 +313,7 @@ public class JsonWriter {
                         ByteArrayOutputStream pageBuffer = new ByteArrayOutputStream();
                         try (JsonGenerator pageGenerator = pageJsonFactory.createGenerator(pageBuffer, JsonEncoding.UTF8)
                                 .setCodec(ObjectMapperHolder.getObjectMapper())) {
-                            writePageToGenerator(pageNumber, includeHeaderFooter, contents, pageGenerator, config);
+                            writePageToGenerator(pageNumber, includeHeaderFooter, contents, pageGenerator, config, pageHaveStreamTables, pageHaveFormulas);
                         }
                         // close() (via try-with-resources) flushes the generator's
                         // internal buffer, so the bytes here are the complete page JSON.
@@ -354,7 +378,8 @@ public class JsonWriter {
             // Scan every page for OCR-eligible pages, write them to <pdfname>_ocr.json,
             // and mark is_ocr=true on hit pages (persisted to the main JSON later when bookmarks are written back).
             try {
-                writeOcrDetectionJson(mapper, map, outputFolder, inputPDF.getName(), config);
+                writeOcrDetectionJson(mapper, map, outputFolder, config,
+                    pageHaveStreamTables, pageHaveFormulas, ossEnabled, ossConfig, obsClient, inputPdfName);
             } catch (Exception ocrEx) {
                 LOGGER.log(Level.WARNING, "Unable to create OCR detection JSON: " + ocrEx.getClass().getSimpleName() + ": " + ocrEx.getMessage(), ocrEx);
             }
@@ -468,7 +493,8 @@ public class JsonWriter {
      */
     private static void writePageToGenerator(int pageNumber, boolean includeHeaderFooter,
                                             List<List<IObject>> contents, JsonGenerator pageGenerator,
-                                             Config config) throws IOException {
+                                             Config config, boolean[] pageHaveStreamTables,
+                                             boolean[] pageHaveFormulas) throws IOException {
         boolean isHk = false;
         if (config != null && config.getCustomOptions() != null && config.getCustomOptions().containsKey("pulsarReceiveTopicName")) {
             String pulsarReceiveTopicName = config.getCustomOptions().get("pulsarReceiveTopicName").toString();
@@ -484,6 +510,10 @@ public class JsonWriter {
         pageGenerator.writeNumberField(JsonName.WIDTH, width);
         pageGenerator.writeNumberField(JsonName.HEIGHT, height);
         pageGenerator.writeBooleanField(JsonName.IS_OCR, false);
+        pageGenerator.writeBooleanField(JsonName.HAVE_STREAM_TABLE,
+            pageHaveStreamTables != null && pageHaveStreamTables[pageNumber]);
+        pageGenerator.writeBooleanField(JsonName.HAVE_FORMULA,
+            pageHaveFormulas != null && pageHaveFormulas[pageNumber]);
         List<IObject> pageContents = contents.get(pageNumber);
         // 对 pageContents 按照 topY 从大到小排序
         pageContents.sort(Comparator.comparingDouble(item -> item.getTopY()));
@@ -551,6 +581,8 @@ public class JsonWriter {
         Map<String, Object> placeholder = new LinkedHashMap<>();
         placeholder.put(JsonName.PAGE_INDEX, pageIndex);
         placeholder.put(JsonName.IS_OCR, false);
+        placeholder.put(JsonName.HAVE_STREAM_TABLE, false);
+        placeholder.put(JsonName.HAVE_FORMULA, false);
         placeholder.put(JsonName.ITEMS, Collections.emptyList());
         return ObjectMapperHolder.getObjectMapper().writeValueAsString(placeholder);
     }
@@ -1114,14 +1146,112 @@ public class JsonWriter {
     private static void writeOcrDetectionJson(ObjectMapper mapper,
                                               Map<String, Object> map,
                                               String outputFolder,
-                                              String pdfFileName,
-                                              Config config) throws IOException {
+                                              Config config,
+                                              boolean[] pageHaveStreamTables,
+                                              boolean[] pageHaveFormulas,
+                                              boolean ossEnabled,
+                                              OssUploadConfig ossConfig,
+                                              HuaweiObsClient obsClient,
+                                              String inputPdfName) throws IOException {
         Object dataObj = map.get(JsonName.DATA);
         if (!(dataObj instanceof List)) {
             return;
         }
+        String pdfFileName = new File(inputPdfName).getName();
         List<Map<String, Object>> data = (List<Map<String, Object>>) dataObj;
         List<Map<String, Object>> ocrEntries = new ArrayList<>();
+
+        // Pass 1: pages flagged with have_stream_table=true are rendered to PNG and
+        // uploaded to the temp bucket (when OSS is enabled), then emitted as their own
+        // entries in _ocr.json with have_stream_table=true so downstream OCR tooling
+        // can distinguish stream-table-triggered entries from image-triggered ones.
+        if (pageHaveStreamTables != null) {
+            // inputPdfName is the absolute path of the local PDF after download; using it
+            // directly avoids accidentally picking up the cloud url stored in map("url").
+            File pdfFile = new File(inputPdfName);
+            String pdfBaseName = pdfFileName;
+            if (pdfBaseName.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
+                pdfBaseName = pdfBaseName.substring(0, pdfBaseName.length() - 4);
+            }
+            if (pdfBaseName.endsWith(".")) {
+                pdfBaseName = pdfBaseName.substring(0, pdfBaseName.length() - 1);
+            }
+            for (int i = 0; i < pageHaveStreamTables.length && i < data.size(); i++) {
+                if (!pageHaveStreamTables[i]) {
+                    continue;
+                }
+                Map<String, Object> page = data.get(i);
+                double pageHeight = 0.0;
+                double pageWidth = 0.0;
+                Object pageHeightObj = page.get(JsonName.HEIGHT);
+                if (pageHeightObj instanceof Number) {
+                    pageHeight = ((Number) pageHeightObj).doubleValue();
+                }
+                Object pageWidthObj = page.get(JsonName.WIDTH);
+                if (pageWidthObj instanceof Number) {
+                    pageWidth = ((Number) pageWidthObj).doubleValue();
+                }
+                String imageUrl = renderStreamTablePageScreenshot(pdfFile, outputFolder, pdfBaseName, i,
+                    ossEnabled, ossConfig, obsClient);
+                if (imageUrl == null) {
+                    continue;
+                }
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put(JsonName.PAGE_INDEX, page.get(JsonName.PAGE_INDEX));
+                entry.put("image_url", imageUrl);
+                entry.put("image_height", pageHeight);
+                entry.put("image_width", pageWidth);
+                ocrEntries.add(entry);
+            }
+        }
+
+        // Pass 1.5: pages flagged with have_formula=true are rendered to PNG and uploaded to
+        // the temp bucket (when OSS is enabled), then emitted as their own entries with
+        // have_formula=true. Mutually exclusive with Pass 1 (stream-table): if a page already
+        // got a stream-table entry it is skipped here so consumers see at most one image
+        // entry per detected page.
+        if (pageHaveFormulas != null) {
+            // Reuse the same inputPdfName/pdFBasename derivation as Pass 1.
+            File pdfFile = new File(inputPdfName);
+            String pdfBaseName = pdfFileName;
+            if (pdfBaseName.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
+                pdfBaseName = pdfBaseName.substring(0, pdfBaseName.length() - 4);
+            }
+            if (pdfBaseName.endsWith(".")) {
+                pdfBaseName = pdfBaseName.substring(0, pdfBaseName.length() - 1);
+            }
+            for (int i = 0; i < pageHaveFormulas.length && i < data.size(); i++) {
+                if (!pageHaveFormulas[i]) {
+                    continue;
+                }
+                // Mutex: a page already served by Pass 1 (stream-table) keeps that entry.
+                if (pageHaveStreamTables != null && i < pageHaveStreamTables.length && pageHaveStreamTables[i]) {
+                    continue;
+                }
+                Map<String, Object> page = data.get(i);
+                double pageHeight = 0.0;
+                double pageWidth = 0.0;
+                Object pageHeightObj = page.get(JsonName.HEIGHT);
+                if (pageHeightObj instanceof Number) {
+                    pageHeight = ((Number) pageHeightObj).doubleValue();
+                }
+                Object pageWidthObj = page.get(JsonName.WIDTH);
+                if (pageWidthObj instanceof Number) {
+                    pageWidth = ((Number) pageWidthObj).doubleValue();
+                }
+                String imageUrl = renderFormulaPageScreenshot(pdfFile, outputFolder, pdfBaseName, i,
+                    ossEnabled, ossConfig, obsClient);
+                if (imageUrl == null) {
+                    continue;
+                }
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put(JsonName.PAGE_INDEX, page.get(JsonName.PAGE_INDEX));
+                entry.put("image_url", imageUrl);
+                entry.put("image_height", pageHeight);
+                entry.put("image_width", pageWidth);
+                ocrEntries.add(entry);
+            }
+        }
 
         for (Map<String, Object> page : data) {
             Object itemsObj = page.get(JsonName.ITEMS);
@@ -1243,6 +1373,142 @@ public class JsonWriter {
         // Compact JSON (single-line, matching the sample 202604231785283947722051256_ocr.json format).
         mapper.writeValue(new File(ocrFileName), ocrResult);
         LOGGER.log(Level.INFO, "Created {0}", ocrFileName);
+    }
+
+    /**
+     * Renders the {@code pageNumber}-th page (0-based) of {@code pdfFile} to a PNG in the
+     * PDF's images directory. The file name starts with {@code pdfBaseName + "_streamtable-"}
+     * so that {@link #cleanupLocalFiles} (allowlist: {@code name.startsWith(pdfBaseName + "_")})
+     * removes it after upload. When OSS is enabled the PNG is uploaded to the temp bucket
+     * (same as the main-JSON upload) and the local file is deleted; the returned value is
+     * the OSS URL. When OSS is disabled the local absolute path is returned.
+     *
+     * @return the absolute path or OSS URL, or {@code null} when rendering fails
+     */
+    private static String renderStreamTablePageScreenshot(File pdfFile, String outputFolder, String pdfBaseName,
+                                                         int pageNumber, boolean ossEnabled,
+                                                         OssUploadConfig ossConfig,
+                                                         HuaweiObsClient obsClient) throws IOException {
+        if (!pdfFile.exists()) {
+            LOGGER.log(Level.WARNING, "PDF not found for stream-table screenshot: {0}", pdfFile.getAbsolutePath());
+            return null;
+        }
+        File imagesDir = new File(outputFolder, pdfBaseName + MarkdownSyntax.IMAGES_DIRECTORY_SUFFIX);
+        if (!imagesDir.exists() && !imagesDir.mkdirs()) {
+            LOGGER.log(Level.WARNING, "Unable to create images directory for stream-table screenshot: {0}",
+                imagesDir.getAbsolutePath());
+            return null;
+        }
+        File screenshot = new File(imagesDir, pdfBaseName + "_streamtable-" + pageNumber + ".png");
+        try (org.apache.pdfbox.pdmodel.PDDocument sourceDoc = Loader.loadPDF(pdfFile)) {
+            PDFRenderer renderer = new PDFRenderer(sourceDoc);
+            BufferedImage pageImage = renderer.renderImageWithDPI(pageNumber, 200.0f);
+            ImageIO.write(pageImage, "PNG", screenshot);
+        } catch (IOException ex) {
+            LOGGER.log(Level.WARNING,
+                "Failed to render stream-table screenshot for page " + (pageNumber + 1)
+                    + ": " + ex.getClass().getSimpleName() + ": " + ex.getMessage(),
+                ex);
+            return null;
+        }
+
+        if (!ossEnabled) {
+            return screenshot.getAbsolutePath();
+        }
+
+        String objectKey = String.format("public/%s/%s_%s_streamtable_%d.png",
+            ossConfig.getBasicEnv(),
+            ossConfig.getPulsarReceiveTopicName(),
+            ossConfig.getBusinessId(),
+            pageNumber + 1);
+        try {
+            String url = obsClient.uploadFile(ossConfig.getTempBucketName(), objectKey, screenshot,
+                ossConfig.getTempDomainName());
+            try {
+                Files.delete(screenshot.toPath());
+            } catch (IOException delEx) {
+                LOGGER.log(Level.WARNING, "Failed to delete local stream-table screenshot after upload: {0}: {1}",
+                    new Object[]{screenshot.getAbsolutePath(), delEx.getMessage()});
+            }
+            return url;
+        } catch (IOException uploadEx) {
+            LOGGER.log(Level.WARNING,
+                "Failed to upload stream-table screenshot for page " + (pageNumber + 1)
+                    + " to OBS: " + uploadEx.getClass().getSimpleName() + ": " + uploadEx.getMessage(),
+                uploadEx);
+            // Fallback: keep the local file so downstream consumers can still access the image.
+            return screenshot.getAbsolutePath();
+        }
+    }
+
+    /**
+     * Renders a page screenshot for a {@code have_formula}-flagged page and either uploads it
+     * to the OSS temp bucket (when OSS is enabled) or returns the local absolute path.
+     * <p>
+     * Mirrors {@link #renderStreamTablePageScreenshot} structurally but uses the
+     * {@code _formula-} file name pattern and the {@code _formula_} OSS object-key
+     * suffix so the two kinds don't collide on disk or in the bucket. Both file
+     * name patterns share the {@code {baseName}_} prefix so they fall under the
+     * {@code cleanupLocalFiles} {@code name.startsWith(pdfBaseName + "_")}
+     * allowlist.
+     *
+     * @return absolute local path or OBS URL on success, {@code null} on failure
+     *         (with a warning logged).
+     */
+    private static String renderFormulaPageScreenshot(File pdfFile, String outputFolder, String pdfBaseName,
+                                                     int pageNumber, boolean ossEnabled,
+                                                     OssUploadConfig ossConfig,
+                                                     HuaweiObsClient obsClient) throws IOException {
+        if (!pdfFile.exists()) {
+            LOGGER.log(Level.WARNING, "PDF not found for formula screenshot: {0}", pdfFile.getAbsolutePath());
+            return null;
+        }
+        File imagesDir = new File(outputFolder, pdfBaseName + MarkdownSyntax.IMAGES_DIRECTORY_SUFFIX);
+        if (!imagesDir.exists() && !imagesDir.mkdirs()) {
+            LOGGER.log(Level.WARNING, "Unable to create images directory for formula screenshot: {0}",
+                imagesDir.getAbsolutePath());
+            return null;
+        }
+        File screenshot = new File(imagesDir, pdfBaseName + "_formula-" + pageNumber + ".png");
+        try (org.apache.pdfbox.pdmodel.PDDocument sourceDoc = Loader.loadPDF(pdfFile)) {
+            PDFRenderer renderer = new PDFRenderer(sourceDoc);
+            BufferedImage pageImage = renderer.renderImageWithDPI(pageNumber, 200.0f);
+            ImageIO.write(pageImage, "PNG", screenshot);
+        } catch (IOException ex) {
+            LOGGER.log(Level.WARNING,
+                "Failed to render formula screenshot for page " + (pageNumber + 1)
+                    + ": " + ex.getClass().getSimpleName() + ": " + ex.getMessage(),
+                ex);
+            return null;
+        }
+
+        if (!ossEnabled) {
+            return screenshot.getAbsolutePath();
+        }
+
+        String objectKey = String.format("public/%s/%s_%s_formula_%d.png",
+            ossConfig.getBasicEnv(),
+            ossConfig.getPulsarReceiveTopicName(),
+            ossConfig.getBusinessId(),
+            pageNumber + 1);
+        try {
+            String url = obsClient.uploadFile(ossConfig.getTempBucketName(), objectKey, screenshot,
+                ossConfig.getTempDomainName());
+            try {
+                Files.delete(screenshot.toPath());
+            } catch (IOException delEx) {
+                LOGGER.log(Level.WARNING, "Failed to delete local formula screenshot after upload: {0}: {1}",
+                    new Object[]{screenshot.getAbsolutePath(), delEx.getMessage()});
+            }
+            return url;
+        } catch (IOException uploadEx) {
+            LOGGER.log(Level.WARNING,
+                "Failed to upload formula screenshot for page " + (pageNumber + 1)
+                    + " to OBS: " + uploadEx.getClass().getSimpleName() + ": " + uploadEx.getMessage(),
+                uploadEx);
+            // Fallback: keep the local file so downstream consumers can still access the image.
+            return screenshot.getAbsolutePath();
+        }
     }
 
     /**
