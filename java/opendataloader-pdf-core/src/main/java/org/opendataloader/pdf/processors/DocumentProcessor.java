@@ -181,7 +181,8 @@ public class DocumentProcessor {
             // Phase 2: Output (JSON/MD/HTML/PDF/Text)
             long t0 = System.nanoTime();
             long extractionNs = t0 - startTime;
-            customOutput = generateCustomOutputs(inputPdfName, extraction.getContents(), config, extraction.getElementMetadata());
+            customOutput = generateCustomOutputs(inputPdfName, extraction.getContents(), config, extraction.getElementMetadata(),
+                extraction.getPageHaveStreamTables(), extraction.getPageHaveFormulas());
             long outputNs = System.nanoTime() - t0;
             String fileName = inputPdfName;
             Map<String, Object> docCustomOptions = config.getCustomOptions();
@@ -279,6 +280,12 @@ public class DocumentProcessor {
         calculateDocumentInfo();
         Set<Integer> pagesToProcess = getValidPageNumbers(config);
         List<List<IObject>> contents;
+        // Per-page stream-table detection flag. Only populated by the default processDocument path;
+        // tagged-PDF / hybrid paths do not run detection, so the flag stays null downstream.
+        boolean[] pageHaveStreamTables = null;
+        // Per-page formula candidate detection flag. Populated in Loop 4 of processDocument;
+        // tagged-PDF / hybrid paths do not run that loop, so the flag stays null downstream.
+        boolean[] pageHaveFormulas = null;
         if (StaticLayoutContainers.isUseStructTree()) {
             if (config.isHybridEnabled()) {
                 // Counterpart to the "no structure tree" warning emitted in preprocessing():
@@ -294,7 +301,10 @@ public class DocumentProcessor {
         } else if (config.isHybridEnabled()) {
             contents = HybridDocumentProcessor.processDocument(inputPdfName, config, pagesToProcess);
         } else {
-            contents = processDocument(inputPdfName, config, pagesToProcess);
+            ProcessDocumentResult result = processDocument(inputPdfName, config, pagesToProcess);
+            contents = result.getContents();
+            pageHaveStreamTables = result.getPageHaveStreamTables();
+            pageHaveFormulas = result.getPageHaveFormulas();
         }
         sortContents(contents, config);
         ContentSanitizer contentSanitizer = new ContentSanitizer(config.getFilterConfig().getFilterRules(),
@@ -310,7 +320,7 @@ public class DocumentProcessor {
         Map<Long, ElementMetadata> remappedMetadata = remapMetadataToContents(rawMetadata, contents);
 
         return new ExtractionResult(contents, extractionNs, HybridDocumentProcessor.getLastHybridTimings(),
-            remappedMetadata);
+            remappedMetadata, pageHaveStreamTables, pageHaveFormulas);
     }
 
     /**
@@ -356,10 +366,18 @@ public class DocumentProcessor {
     }
 
     @SuppressWarnings("unchecked")
-    private static List<List<IObject>> processDocument(String inputPdfName, Config config, Set<Integer> pagesToProcess) throws IOException {
+    private static ProcessDocumentResult processDocument(String inputPdfName, Config config, Set<Integer> pagesToProcess) throws IOException {
         String absoluteImagesDirectory = StaticLayoutContainers.getImagesDirectory();
         int totalPages = StaticContainers.getDocument().getNumberOfPages();
         List<List<IObject>> contents = new ArrayList<>(Collections.nCopies(totalPages, null));
+        // Per-page stream-table detection flag. Each worker writes its own index,
+        // matching the pageWidths / pageHeights pattern (see ForkJoinPool note below).
+        final boolean[] pageHaveStreamTables = new boolean[totalPages];
+        // Per-page formula candidate detection flag. Populated by the sequential Loop 4
+        // (which runs after the ForkJoinPool loops shut down) — see the `haveFormulas`
+        // call at the per-page Loop 4 below. Loop 4 is sequential so no per-index write
+        // contention; left default `false` for any page the loop doesn't reach.
+        final boolean[] pageHaveFormulas = new boolean[totalPages];
 
         // Capture ALL ThreadLocal state from main thread for propagation to workers
         final var document = StaticContainers.getDocument();
@@ -598,13 +616,22 @@ public class DocumentProcessor {
                     // in descending order so the final order runs from top to bottom.
                     pageContents.sort(Comparator.comparingDouble(item -> item.getTopY()));
                     Collections.reverse(pageContents);
-                    // Stream-table recognition (skip pages already replaced by fallback OCR to avoid double OCR).
+                    // Stream-table detection only (skip pages already replaced by fallback OCR to avoid double OCR).
+                    // Page contents are NOT rewritten here — the detection flag is the only output, exposed downstream
+                    // so consumers can hand stream-table pages to OCR out-of-band (see JsonWriter.writeOcrDetectionJson).
                     if (basicParseStreamTable && paddleUrl != null && !"".equals(paddleUrl) && !ocrFallbackPages.contains(pageNumber)) {
                         try {
-                            pageContents = StreamTableProcessor.processStreamTables(inputPdfName, pageContents, pageNumber, pageWidths[pageNumber], pageHeights[pageNumber], paddleUrl);
-                        } catch (IOException e) {
-                            throw new RuntimeException(e);
+                            pageHaveStreamTables[pageNumber] = StreamTableProcessor.haveStreamTables(
+                                inputPdfName, pageContents, pageNumber,
+                                pageWidths[pageNumber], pageHeights[pageNumber], paddleUrl);
+                        } catch (Exception e) {
+                            LOGGER.log(Level.WARNING,
+                                "haveStreamTables failed for page " + pageNumber + " of " + inputPdfName
+                                    + ": " + e.getClass().getSimpleName() + ": " + e.getMessage(), e);
+                            pageHaveStreamTables[pageNumber] = false;
                         }
+                    } else {
+                        pageHaveStreamTables[pageNumber] = false;
                     }
                     contents.set(pageNumber, pageContents);
                 })
@@ -672,10 +699,24 @@ public class DocumentProcessor {
                         .count();
                     LOGGER.log(Level.INFO, "Page {0} - LineArtChunk count with height <= 3 and width <= 300 in pageContents: {1}.",
                         new Object[]{pageNumber + 1, count});
-                    // Page-level OCR converts pixel-space boxes back to PDF user units
-                    // using the page's real width/height (from per-page arrays).
-                    LineArtProcessor.processLineArtGroups(pageContents, pageNumber, imagesUtils, paddleUrl,
-                        inputPdfName, pageWidths[pageNumber], pageHeights[pageNumber], basicFormulaRecognize);
+                    // Per-page lightweight formula detection (no OCR rewrite). The boolean result
+                    // is exposed via the main JSON's `have_formula` field and surfaces as an entry in
+                    // `_ocr.json`; this replaces the previous `processLineArtGroups` call here so
+                    // pageContents is no longer rewritten by this stage. Callers that need the actual
+                    // formula OCR + ImageChunk/TextChunk substitution must invoke
+                    // `LineArtProcessor.processLineArtGroups` separately.
+                    try {
+                        pageHaveFormulas[pageNumber] = LineArtProcessor.haveFormulas(
+                            pageContents, pageNumber, imagesUtils, paddleUrl,
+                            inputPdfName, pageWidths[pageNumber], pageHeights[pageNumber], basicFormulaRecognize);
+                    } catch (Exception e) {
+                        LOGGER.log(Level.WARNING,
+                            "haveFormulas failed for page " + pageNumber + " of " + inputPdfName
+                                + ": " + e.getClass().getSimpleName() + ": " + e.getMessage(), e);
+                        pageHaveFormulas[pageNumber] = false;
+                    }
+                } else {
+                    pageHaveFormulas[pageNumber] = false;
                 }
                 ConsecutiveImageProcessor.processConsecutiveImages(pageContents, pageNumber, imagesUtils);
             }
@@ -718,7 +759,38 @@ public class DocumentProcessor {
         } finally {
             pool.shutdown();
         }
-        return contents;
+        return new ProcessDocumentResult(contents, pageHaveStreamTables, pageHaveFormulas);
+    }
+
+    /**
+     * Carries the per-page extraction output alongside the per-page stream-table
+     * detection flag so the call site ({@link #extractContents}) can attach the
+     * flag to the resulting {@link ExtractionResult} without leaking the array
+     * out of the internal pipeline.
+     */
+    private static final class ProcessDocumentResult {
+        private final List<List<IObject>> contents;
+        private final boolean[] pageHaveStreamTables;
+        private final boolean[] pageHaveFormulas;
+
+        ProcessDocumentResult(List<List<IObject>> contents, boolean[] pageHaveStreamTables,
+                              boolean[] pageHaveFormulas) {
+            this.contents = contents;
+            this.pageHaveStreamTables = pageHaveStreamTables;
+            this.pageHaveFormulas = pageHaveFormulas;
+        }
+
+        List<List<IObject>> getContents() {
+            return contents;
+        }
+
+        boolean[] getPageHaveStreamTables() {
+            return pageHaveStreamTables;
+        }
+
+        boolean[] getPageHaveFormulas() {
+            return pageHaveFormulas;
+        }
     }
 
     /**
@@ -819,9 +891,11 @@ public class DocumentProcessor {
     }
 
     public static CustomOutputResult generateCustomOutputs(String inputPdfName, List<List<IObject>> contents, Config config,
-                                       Map<Long, ElementMetadata> elementMetadata) throws IOException {
+                                       Map<Long, ElementMetadata> elementMetadata,
+                                       boolean[] pageHaveStreamTables,
+                                       boolean[] pageHaveFormulas) throws IOException {
         return JsonWriter.writeToCustomJson(inputPdfName, config.getOutputFolder(), contents, elementMetadata,
-            null, config.isIncludeHeaderFooter(), config);
+            null, config.isIncludeHeaderFooter(), config, pageHaveStreamTables, pageHaveFormulas);
     }
 
     /**

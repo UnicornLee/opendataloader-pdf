@@ -222,6 +222,114 @@ public final class LineArtProcessor {
     }
 
     /**
+     * Lightweight formula detection sibling of {@link #processLineArtGroups}.
+     * <p>
+     * Runs the same merge pass ({@link #scanAndMerge}) used by the full pipeline
+     * to identify candidate formula regions on the page, then immediately
+     * restores the original group elements via {@link #restoreAllGroups} so
+     * {@code pageContents} ends up effectively unchanged (modulo the
+     * top-to-bottom re-sort at the top of this method).
+     * <p>
+     * <strong>It does NOT run OCR</strong> — callers that need OCR + pageContents
+     * rewriting still have to invoke {@link #processLineArtGroups} (Loop 4 of
+     * {@code DocumentProcessor#processDocument}). This method only answers the
+     * boolean "does this page look like it has formula candidates?" question
+     * so the answer can be surfaced in JSON output and consumed by downstream
+     * tooling.
+     * <p>
+     * Return semantics:
+     * <ul>
+     *   <li>{@code true} — candidate regions exist AND {@code basicFormulaRecognize}
+     *       is {@code true} (i.e. the page is actually configured for formula
+     *       recognition this run).</li>
+     *   <li>{@code false} — no candidate regions, OR {@code basicFormulaRecognize}
+     *       is {@code false}. When candidates exist but the flag is off, the
+     *       discovered ranges are still reported in the log for diagnostics.</li>
+     * </ul>
+     *
+     * @param pageContents          page element list, mutated in-place by the
+     *                              sort / merge / restore pass.
+     * @param pageNumber            zero-based page index.
+     * @param imagesUtils           shared image utility (used by
+     *                              {@link #scanAndMerge} to write temp PNGs);
+     *                              required, {@code null} short-circuits to
+     *                              {@code false}.
+     * @param paddleUrl             Paddle service URL; required so
+     *                              {@link #scanAndMerge} knows whether OCR is
+     *                              actually enabled.
+     * @param pdfPath               source PDF path used in the diagnostic log
+     *                              message.
+     * @param sourceWidth           page width in PDF user-space units (unused
+     *                              here, kept for parity with
+     *                              {@link #processLineArtGroups}).
+     * @param sourceHeight          page height in PDF user-space units (unused
+     *                              here, kept for parity with
+     *                              {@link #processLineArtGroups}).
+     * @param basicFormulaRecognize whether the surrounding pipeline will
+     *                              actually run formula OCR this run. The
+     *                              boolean return value is gated on this flag.
+     * @return {@code true} iff candidate formula regions exist and the run is
+     *         configured for formula recognition.
+     */
+    public static boolean haveFormulas(List<IObject> pageContents, int pageNumber,
+                                            ImagesUtils imagesUtils, String paddleUrl,
+                                            String pdfPath, double sourceWidth, double sourceHeight,
+                                            boolean basicFormulaRecognize) {
+        if (pageContents == null || pageContents.isEmpty() || imagesUtils == null) {
+            return false;
+        }
+        // Sort page contents from top to bottom (topY descending) so the forward/backward
+        // overlap scan finds neighbours in the correct vertical order, regardless of
+        // how earlier processors may have rearranged the list.
+        pageContents.sort(Comparator.comparingDouble(IObject::getTopY).reversed());
+
+        // ------------------------------------------------------------------
+        // Pass 1 — collect candidate formula ranges AND, in-place, swap the
+        // candidate groups in pageContents for placeholder ImageChunks. After
+        // this pass:
+        //   - candidates holds every LineArtChunk group with its union bbox;
+        //   - pageContents is already "merged" (each group replaced by a
+        //     single ImageChunk) so the per-group and page-level paths
+        //     converge on the same intermediate state.
+        // Merging / screenshotting is performed even when Paddle is disabled
+        // so that decorative line-art is still collapsed into a single image.
+        // ------------------------------------------------------------------
+        List<CandidateRange> candidates = scanAndMerge(pageContents, pageNumber, imagesUtils);
+
+        if (candidates.isEmpty()) {
+            return false; // pageContents already in final form
+        }
+
+        // Restore the original group elements unconditionally: this method is
+        // detection-only and must leave pageContents effectively unchanged
+        // (only the top-to-bottom re-sort above is observable to the caller).
+        restoreAllGroups(pageContents, candidates);
+
+        // basicFormulaRecognize == false: skip OCR but report the candidate ranges
+        // we discovered during scanAndMerge for downstream diagnostics.
+        StringBuilder bboxList = new StringBuilder();
+        for (int i = 0; i < candidates.size(); i++) {
+            CandidateRange range = candidates.get(i);
+            BoundingBox union = range.union;
+            if (i > 0) {
+                bboxList.append(", ");
+            }
+            bboxList.append(String.format(Locale.ROOT,
+                "(x0=%.2f, y0=%.2f, x1=%.2f, y1=%.2f)",
+                union.getLeftX(), union.getBottomY(), union.getRightX(), union.getTopY()));
+        }
+        LOGGER.log(Level.INFO,
+            "Page {0} of {1}: basicFormulaRecognize=false, detected {2} candidate formula range(s): [{3}].",
+            new Object[]{pageNumber + 1, pdfPath, candidates.size(), bboxList.toString()});
+
+        if (basicFormulaRecognize) {
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    /**
      * Single scan that does both candidate discovery and in-place merging.
      * Returns the list of candidate ranges so pass-2 can decide which OCR
      * strategy to apply. The placeholder ImageChunk (or original group, if
