@@ -74,6 +74,8 @@ public class JsonName {
     public static final String WIDTH = "width";
     public static final String HEIGHT = "height";
     public static final String IS_OCR = "is_ocr";
+    public static final String HAVE_STREAM_TABLE = "have_stream_table";
+    public static final String HAVE_FORMULA = "have_formula";
     public static final String MARGIN_LEFT = "margin_left";
     public static final String MARGIN_RIGHT = "margin_right";
     public static final String MARGIN_TOP = "margin_top";

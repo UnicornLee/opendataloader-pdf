@@ -39,24 +39,54 @@ public class ExtractionResult implements AutoCloseable {
     private final JsonNode hybridTimings;
     private final Map<Long, ElementMetadata> elementMetadata;
     private final PDDocument document;
+    /**
+     * Per-page flag indicating whether the page contains wireless (stream) tables.
+     * Indexed by 0-based page number; {@code null} when detection was not performed
+     * (e.g. tagged-PDF or hybrid-extraction paths that do not run the detection).
+     */
+    private final boolean[] pageHaveStreamTables;
+    /**
+     * Per-page flag indicating whether the page contains formula candidates.
+     * Indexed by 0-based page number; {@code null} when detection was not performed
+     * (e.g. tagged-PDF or hybrid-extraction paths that do not run the detection).
+     */
+    private final boolean[] pageHaveFormulas;
 
     /** Used by {@link DocumentProcessor#extractContents}: the result owns the document. */
     ExtractionResult(List<List<IObject>> contents, long extractionNs, JsonNode hybridTimings,
-                     Map<Long, ElementMetadata> elementMetadata, PDDocument document) {
+                     Map<Long, ElementMetadata> elementMetadata,
+                     boolean[] pageHaveStreamTables,
+                     boolean[] pageHaveFormulas,
+                     PDDocument document) {
         this.contents = contents;
         this.extractionNs = extractionNs;
         this.hybridTimings = hybridTimings;
         this.elementMetadata = elementMetadata != null ? elementMetadata : Collections.emptyMap();
+        this.pageHaveStreamTables = pageHaveStreamTables;
+        this.pageHaveFormulas = pageHaveFormulas;
         this.document = document;
     }
 
     public ExtractionResult(List<List<IObject>> contents, long extractionNs, JsonNode hybridTimings,
+                             Map<Long, ElementMetadata> elementMetadata,
+                             boolean[] pageHaveStreamTables,
+                             boolean[] pageHaveFormulas) {
+        this(contents, extractionNs, hybridTimings, elementMetadata, pageHaveStreamTables, pageHaveFormulas, null);
+    }
+
+    public ExtractionResult(List<List<IObject>> contents, long extractionNs, JsonNode hybridTimings,
+                             Map<Long, ElementMetadata> elementMetadata,
+                             boolean[] pageHaveStreamTables) {
+        this(contents, extractionNs, hybridTimings, elementMetadata, pageHaveStreamTables, null, null);
+    }
+
+    public ExtractionResult(List<List<IObject>> contents, long extractionNs, JsonNode hybridTimings,
                              Map<Long, ElementMetadata> elementMetadata) {
-        this(contents, extractionNs, hybridTimings, elementMetadata, null);
+        this(contents, extractionNs, hybridTimings, elementMetadata, null, null, null);
     }
 
     public ExtractionResult(List<List<IObject>> contents, long extractionNs, JsonNode hybridTimings) {
-        this(contents, extractionNs, hybridTimings, Collections.emptyMap());
+        this(contents, extractionNs, hybridTimings, Collections.emptyMap(), null, null);
     }
 
     public List<List<IObject>> getContents() {
@@ -73,6 +103,14 @@ public class ExtractionResult implements AutoCloseable {
 
     public Map<Long, ElementMetadata> getElementMetadata() {
         return elementMetadata;
+    }
+
+    public boolean[] getPageHaveStreamTables() {
+        return pageHaveStreamTables;
+    }
+
+    public boolean[] getPageHaveFormulas() {
+        return pageHaveFormulas;
     }
 
     /**
