@@ -50,7 +50,7 @@
             </encoder>
         </appender>
     </springProfile>
-    <springProfile name="prepub-sz">
+    <springProfile name="prepub-sz,prepub-hk">
         <appender name="stash" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
             <destination>${log.stash.addresses}</destination>
             <keepAliveDuration>5 minutes</keepAliveDuration>
