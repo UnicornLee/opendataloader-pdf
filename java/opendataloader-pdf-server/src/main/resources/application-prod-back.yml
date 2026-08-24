@@ -18,7 +18,7 @@ consul:
 basic:
     version: 2.0
     env: prod
-    pdf_url_prefix: https://ydannouncementbucket.obs.cn-north-1.myhuaweicloud.com/
+    pdf_url_prefix: https://announcement.valueonline.cn/
     is_ocr: true
     is_immediate_ocr: false
     complete_display: false
