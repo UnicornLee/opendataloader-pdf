@@ -119,6 +119,7 @@ public class TextLineProcessor {
                 TextLine textLine = (TextLine) content;
                 textLine.getTextChunks().sort(TEXT_CHUNK_COMPARATOR);
                 List<TextChunk> textChunks = textLine.getTextChunks();
+                String superscriptType = "";
                 for (int j = 0; j < textChunks.size(); j++) {
                     if (j > 0) {
                         TextChunk prevChunk = textChunks.get(j - 1);
@@ -126,11 +127,36 @@ public class TextLineProcessor {
                         if (prevChunk.getFontSize() - currentChunk.getFontSize() > 3) {
                             if (prevChunk.getBaseLine() <= currentChunk.getBoundingBox().getBottomY() || currentChunk.getBaseLine() - prevChunk.getBaseLine() > 3) {
                                 currentChunk.setValue("<sup>" + currentChunk.getValue() + "</sup>");
+                                superscriptType = "sup";
                                 continue;
                             } else if (prevChunk.getBaseLine() >= currentChunk.getBoundingBox().getTopY() || prevChunk.getBaseLine() - currentChunk.getBaseLine() > 3) {
                                 currentChunk.setValue("<sub>" + currentChunk.getValue() + "</sub>");
+                                superscriptType = "sub";
                                 continue;
                             }
+                        } else if (!"".equals(superscriptType) && Math.abs(prevChunk.getFontSize() - currentChunk.getFontSize()) < 1) {
+                            if (Math.abs(currentChunk.getBaseLine() - prevChunk.getBaseLine()) < 1) {
+                                if ("sup".equals(superscriptType)) {
+                                    currentChunk.setValue("<sup>" + currentChunk.getValue() + "</sup>");
+                                } else {
+                                    currentChunk.setValue("<sub>" + currentChunk.getValue() + "</sub>");
+                                }
+                                continue;
+                            } else if (prevChunk.getBaseLine() <= currentChunk.getBoundingBox().getBottomY()) {
+                                currentChunk.setValue("<sup>" + currentChunk.getValue() + "</sup>");
+                                superscriptType = "sup";
+                                continue;
+                            } else if (prevChunk.getBaseLine() >= currentChunk.getBoundingBox().getTopY()) {
+                                currentChunk.setValue("<sub>" + currentChunk.getValue() + "</sub>");
+                                superscriptType = "sub";
+                                continue;
+                            } else {
+                                superscriptType = "";
+                                continue;
+                            }
+                        } else {
+                            superscriptType = "";
+                            continue;
                         }
                     }
                     if (j < textChunks.size() - 1) {
@@ -139,8 +165,10 @@ public class TextLineProcessor {
                         if (nextChunk.getFontSize() - currentChunk.getFontSize() >= 2.5) {
                             if (nextChunk.getBaseLine() <= currentChunk.getBoundingBox().getBottomY() || currentChunk.getBaseLine() - nextChunk.getBaseLine() > 3) {
                                 currentChunk.setValue("<sup>" + currentChunk.getValue() + "</sup>");
+                                superscriptType = "sup";
                             } else if (nextChunk.getBaseLine() >= currentChunk.getBoundingBox().getTopY() || nextChunk.getBaseLine() - currentChunk.getBaseLine() > 3) {
                                 currentChunk.setValue("<sub>" + currentChunk.getValue() + "</sub>");
+                                superscriptType = "sub";
                             }
                         }
                     }
