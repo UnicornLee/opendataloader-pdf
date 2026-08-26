@@ -892,7 +892,9 @@ public class JsonWriter {
                     textLineMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - textLine.getTopY());
                     String lineText = textLine.getTextChunks().stream().map(chunk -> {
                         String val = chunk.getValue();
-                        if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
+                        if ("".equals(val.trim()) && (chunk.getRightX() - chunk.getLeftX()) / chunk.getFontSize() < 0.4) {
+                            return "";
+                        } else if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
                             return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
                         } else {
                             return val;
