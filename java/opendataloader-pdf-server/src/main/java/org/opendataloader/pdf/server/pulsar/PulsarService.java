@@ -237,11 +237,11 @@ public class PulsarService {
             businessId = inbound.get("businessId");
             extend = (Map<String, Object>) inbound.get("extend");
             String fileUrl = resolveFileUrl(asString(inbound.get("fileUrl")));
-            if (shouldSkipAnnualReport(extend) && env.acceptsProfiles(Profiles.of("prod"))) {
+            /*if (shouldSkipAnnualReport(extend) && env.acceptsProfiles(Profiles.of("prod"))) {
                 log.info("Skip annual report, businessId={}, fileUrl={}", businessId, fileUrl);
                 acknowledgeQuietly(consumer, pulsarMsg, businessId);
                 return;
-            }
+            }*/
 
             if (fileUrl == null || fileUrl.isBlank()) {
                 log.warn("inbound fileUrl is empty, businessId={}", businessId);
