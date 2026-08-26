@@ -485,6 +485,9 @@ public class JsonWriter {
         pageGenerator.writeNumberField(JsonName.HEIGHT, height);
         pageGenerator.writeBooleanField(JsonName.IS_OCR, false);
         List<IObject> pageContents = contents.get(pageNumber);
+        // 对 pageContents 按照 topY 从大到小排序
+        pageContents.sort(Comparator.comparingDouble(item -> item.getTopY()));
+        Collections.reverse(pageContents);
         if (isHk) {
             pageContents = flattenHeaderFooterContents(pageContents);
         }
