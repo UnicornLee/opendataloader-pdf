@@ -24,6 +24,7 @@ import com.fasterxml.jackson.core.io.SerializedString;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.core.util.DefaultPrettyPrinter;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.jetbrains.annotations.NotNull;
 import org.opendataloader.pdf.api.Config;
 import org.opendataloader.pdf.api.RebuildBookmarksResult;
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
@@ -694,14 +695,7 @@ public class JsonWriter {
                             textMap.put(JsonName.WIDTH, line.getWidth());
                             textMap.put(JsonName.HEIGHT, line.getHeight());
                             textMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
-                            String lineText = line.getTextChunks().stream().map(chunk -> {
-                                String val = chunk.getValue();
-                                if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
-                                    return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
-                                } else {
-                                    return val;
-                                }
-                            }).collect(Collectors.joining(""));
+                            String lineText = getText(line.getTextChunks());
                             textMap.put(JsonName.CONTENT, Arrays.asList(lineText));
                             lineList.add(textMap);
                             lineBottomY[0] = line.getBottomY();
@@ -744,14 +738,7 @@ public class JsonWriter {
                         textMap.put(JsonName.WIDTH, line.getWidth());
                         textMap.put(JsonName.HEIGHT, line.getHeight());
                         textMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
-                        String lineText = line.getTextChunks().stream().map(chunk -> {
-                            String val = chunk.getValue();
-                            if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
-                                return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
-                            } else {
-                                return val;
-                            }
-                        }).collect(Collectors.joining(""));
+                        String lineText = getText(line.getTextChunks());
                         textMap.put(JsonName.CONTENT, Arrays.asList(lineText));
                         lineList.add(textMap);
                         lineBottomY[0] = line.getBottomY();
@@ -794,14 +781,7 @@ public class JsonWriter {
                             textMap.put(JsonName.WIDTH, line.getWidth());
                             textMap.put(JsonName.HEIGHT, line.getHeight());
                             textMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
-                            String lineText = line.getTextChunks().stream().map(chunk -> {
-                                String val = chunk.getValue();
-                                if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
-                                    return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
-                                } else {
-                                    return val;
-                                }
-                            }).collect(Collectors.joining(""));
+                            String lineText = getText(line.getTextChunks());
                             textMap.put(JsonName.CONTENT, Arrays.asList(lineText));
                             lineList.add(textMap);
                             lineBottomY[0] = line.getBottomY();
@@ -845,14 +825,7 @@ public class JsonWriter {
                             tocItemMap.put(JsonName.WIDTH, line.getWidth());
                             tocItemMap.put(JsonName.HEIGHT, line.getHeight());
                             tocItemMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
-                            String lineText = line.getTextChunks().stream().map(chunk -> {
-                                String val = chunk.getValue();
-                                if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
-                                    return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
-                                } else {
-                                    return val;
-                                }
-                            }).collect(Collectors.joining(""));
+                            String lineText = getText(line.getTextChunks());
                             tocItemMap.put(JsonName.CONTENT, Arrays.asList(lineText));
                             paragraphMap.put(JsonName.CONTENT, Arrays.asList(tocItemMap));
                             tocList.add(paragraphMap);
@@ -913,16 +886,7 @@ public class JsonWriter {
                     textLineMap.put(JsonName.Y0, height - textLine.getTopY());
                     textLineMap.put(JsonName.Y1, height - textLine.getBottomY());
                     textLineMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - textLine.getTopY());
-                    String lineText = textLine.getTextChunks().stream().map(chunk -> {
-                        String val = chunk.getValue();
-                        if ("".equals(val.trim()) && (chunk.getRightX() - chunk.getLeftX()) / chunk.getFontSize() < 0.4) {
-                            return "";
-                        } else if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
-                            return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
-                        } else {
-                            return val;
-                        }
-                    }).collect(Collectors.joining(""));
+                    String lineText = getText(textLine.getTextChunks());
                     textLineMap.put(JsonName.CONTENT, Arrays.asList(lineText));
                     paragraphContentList.add(textLineMap);
                     lineBottomY[0] = textLine.getBottomY();
@@ -1132,6 +1096,52 @@ public class JsonWriter {
                 textId++;
             }
             prevBottomY[0] = content.getBottomY();
+        }
+    }
+
+    private static String getText(List<TextChunk> textChunks) {
+        if (textChunks == null || textChunks.isEmpty()) {
+            return "";
+        }
+        String text = "";
+        for (int i = 0; i < textChunks.size(); i++) {
+            TextChunk chunk = textChunks.get(i);
+            String val = chunk.getValue();
+            if (i > 0) {
+                TextChunk prevTextChunk = textChunks.get(i - 1);
+                text += getSpaceStr(chunk.getLeftX() - prevTextChunk.getRightX(),
+                    chunk.getFontSize() > prevTextChunk.getFontSize() ? chunk.getFontSize() : prevTextChunk.getFontSize());
+            }
+            if ("".equals(val.trim())) {
+                text += getSpaceStr(chunk);
+            } else if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
+                text += GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
+            } else {
+                text += val;
+            }
+        }
+        return text.replaceAll("</sup><sup>", "").replaceAll("</sub><sub>", "");
+    }
+
+    @NotNull
+    private static String getSpaceStr(TextChunk chunk) {
+        double ratio = (chunk.getRightX() - chunk.getLeftX()) / chunk.getFontSize();
+        if (ratio < 0.4) {
+            return "";
+        } else if (ratio < 1) {
+            return " ";
+        } else {
+            return " ".repeat((int) Math.ceil(ratio));
+        }
+    }
+
+    private static String getSpaceStr(double width, double fontSize) {
+        if (fontSize == 0 || width / fontSize < 0.4) {
+            return "";
+        } else if (width / fontSize < 1) {
+            return " ";
+        } else {
+            return " ".repeat((int) Math.ceil(width / fontSize));
         }
     }
 
