@@ -120,42 +120,77 @@ public class TextLineProcessor {
                 textLine.getTextChunks().sort(TEXT_CHUNK_COMPARATOR);
                 List<TextChunk> textChunks = textLine.getTextChunks();
                 String superscriptType = "";
+                double fontSize = 0.0;
+                double topY = 0.0;
+                double bottomY = 0.0;
+                double baseLine = 0.0;
                 for (int j = 0; j < textChunks.size(); j++) {
                     if (j > 0) {
                         TextChunk prevChunk = textChunks.get(j - 1);
                         TextChunk currentChunk = textChunks.get(j);
-                        if (prevChunk.getFontSize() - currentChunk.getFontSize() > 3) {
-                            if (prevChunk.getBaseLine() <= currentChunk.getBoundingBox().getBottomY() || currentChunk.getBaseLine() - prevChunk.getBaseLine() > 3) {
+                        if (prevChunk.getFontSize() - currentChunk.getFontSize() > 2.5) {
+                            fontSize = prevChunk.getFontSize();
+                            topY = prevChunk.getTopY();
+                            bottomY = prevChunk.getBottomY();
+                            baseLine = prevChunk.getBaseLine();
+                            if (prevChunk.getBaseLine() <= currentChunk.getBottomY() || currentChunk.getBaseLine() - prevChunk.getBaseLine() > 3) {
                                 currentChunk.setValue("<sup>" + currentChunk.getValue() + "</sup>");
                                 superscriptType = "sup";
                                 continue;
-                            } else if (prevChunk.getBaseLine() >= currentChunk.getBoundingBox().getTopY() || prevChunk.getBaseLine() - currentChunk.getBaseLine() > 3) {
+                            } else if (prevChunk.getBaseLine() >= currentChunk.getTopY() || prevChunk.getBaseLine() - currentChunk.getBaseLine() > 3) {
                                 currentChunk.setValue("<sub>" + currentChunk.getValue() + "</sub>");
                                 superscriptType = "sub";
                                 continue;
                             }
-                        } else if (!"".equals(superscriptType) && Math.abs(prevChunk.getFontSize() - currentChunk.getFontSize()) < 1) {
-                            if (Math.abs(currentChunk.getBaseLine() - prevChunk.getBaseLine()) < 1) {
-                                if ("sup".equals(superscriptType)) {
+                        } else if (!"".equals(superscriptType)) {
+                            if (Math.abs(prevChunk.getFontSize() - currentChunk.getFontSize()) < 1) {
+                                if (Math.abs(currentChunk.getBaseLine() - prevChunk.getBaseLine()) < 1) {
+                                    if ("sup".equals(superscriptType)) {
+                                        currentChunk.setValue("<sup>" + currentChunk.getValue() + "</sup>");
+                                    } else {
+                                        currentChunk.setValue("<sub>" + currentChunk.getValue() + "</sub>");
+                                    }
+                                    continue;
+                                } else if (prevChunk.getBaseLine() <= currentChunk.getBottomY()) {
                                     currentChunk.setValue("<sup>" + currentChunk.getValue() + "</sup>");
-                                } else {
+                                    superscriptType = "sup";
+                                    continue;
+                                } else if (prevChunk.getBaseLine() >= currentChunk.getTopY()) {
                                     currentChunk.setValue("<sub>" + currentChunk.getValue() + "</sub>");
+                                    superscriptType = "sub";
+                                    continue;
+                                } else {
+                                    superscriptType = "";
+                                    fontSize = 0.0;
+                                    topY = 0.0;
+                                    bottomY = 0.0;
+                                    baseLine = 0.0;
+                                    continue;
                                 }
-                                continue;
-                            } else if (prevChunk.getBaseLine() <= currentChunk.getBoundingBox().getBottomY()) {
-                                currentChunk.setValue("<sup>" + currentChunk.getValue() + "</sup>");
-                                superscriptType = "sup";
-                                continue;
-                            } else if (prevChunk.getBaseLine() >= currentChunk.getBoundingBox().getTopY()) {
-                                currentChunk.setValue("<sub>" + currentChunk.getValue() + "</sub>");
-                                superscriptType = "sub";
-                                continue;
+                            } else if (fontSize != 0.0 && fontSize - currentChunk.getFontSize() > 3) {
+                                if (baseLine <= currentChunk.getBottomY() || currentChunk.getBaseLine() - baseLine > 3) {
+                                    currentChunk.setValue("<sup>" + currentChunk.getValue() + "</sup>");
+                                    superscriptType = "sup";
+                                    continue;
+                                } else if (baseLine >= currentChunk.getTopY() || baseLine - currentChunk.getBaseLine() > 3) {
+                                    currentChunk.setValue("<sub>" + currentChunk.getValue() + "</sub>");
+                                    superscriptType = "sub";
+                                    continue;
+                                }
                             } else {
                                 superscriptType = "";
+                                fontSize = 0.0;
+                                topY = 0.0;
+                                bottomY = 0.0;
+                                baseLine = 0.0;
                                 continue;
                             }
                         } else {
                             superscriptType = "";
+                            fontSize = 0.0;
+                            topY = 0.0;
+                            bottomY = 0.0;
+                            baseLine = 0.0;
                             continue;
                         }
                     }
@@ -163,13 +198,17 @@ public class TextLineProcessor {
                         TextChunk nextChunk = textChunks.get(j + 1);
                         TextChunk currentChunk = textChunks.get(j);
                         if (nextChunk.getFontSize() - currentChunk.getFontSize() >= 2.5) {
-                            if (nextChunk.getBaseLine() <= currentChunk.getBoundingBox().getBottomY() || currentChunk.getBaseLine() - nextChunk.getBaseLine() > 3) {
+                            if (nextChunk.getBaseLine() <= currentChunk.getBottomY() || currentChunk.getBaseLine() - nextChunk.getBaseLine() > 3) {
                                 currentChunk.setValue("<sup>" + currentChunk.getValue() + "</sup>");
                                 superscriptType = "sup";
-                            } else if (nextChunk.getBaseLine() >= currentChunk.getBoundingBox().getTopY() || nextChunk.getBaseLine() - currentChunk.getBaseLine() > 3) {
+                            } else if (nextChunk.getBaseLine() >= currentChunk.getTopY() || nextChunk.getBaseLine() - currentChunk.getBaseLine() > 3) {
                                 currentChunk.setValue("<sub>" + currentChunk.getValue() + "</sub>");
                                 superscriptType = "sub";
                             }
+                            fontSize = nextChunk.getFontSize();
+                            topY = nextChunk.getTopY();
+                            bottomY = nextChunk.getBottomY();
+                            baseLine = nextChunk.getBaseLine();
                         }
                     }
                 }
