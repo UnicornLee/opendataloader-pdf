@@ -1,0 +1,54 @@
+server:
+    port: 8089
+
+log:
+    level: INFO
+    appender: stash
+    home:
+    stash:
+        addresses: node01.public.logstash.prod:9999
+
+consul:
+    # 替换 172.16.20.98
+    host: 192.168.0.126
+    port: 8500
+    datacenter: 'dc1'
+    acl-token: '5c78cbaf-5234-4d13-92bc-870e01ad6118'
+
+basic:
+    version: 2.0
+    env: prod
+    pdf_url_prefix: https://announcement.valueonline.cn/
+    is_ocr: true
+    is_immediate_ocr: false
+    complete_display: false
+    parse_stream_table: true
+    formula_recognize: false
+
+# pulsar监听
+pulsar:
+    servers: pulsar://node01.public.pulsar.prod:6650,node02.public.pulsar.prod:6650,node03.public.pulsar.prod:6650
+    token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwdWxzYXItdXNlciJ9.dCSlOU2r55_Lr8ABbHQgjTONjv7Lq_ZuqpNCa9iJJMg
+    receive_topic_name: capital/pdf_parse/hk_announcement_parse_inc
+    send_topic_name: capital/pdf_parse/hk_announcement_parse_inc_result
+    count: 7
+    ocr_send_topic_name: capital/pdf_parse/hk_announcement_ocr_image_analysis_inc
+    ocr_receive_topic_name: capital/pdf_parse/hk_announcement_ocr_image_analysis_inc_result
+    ocrCount: 3
+
+oss:
+    temp_bucket_name: stock-temp-bucket
+    permanent_bucket_name: announcement-pdf-bucket
+    endpoint: https://obs.cn-north-1.myhuaweicloud.com
+    access_key: EUD3T68PPED8VI2ZHX2K
+    secret_key: qOe8kcPGpJk0ZTIo1baWqQubShQoiyfOZThbp5dE
+    domain_name: https://announcement-pdf-bucket.obs.cn-north-1.myhuaweicloud.com/
+
+paddle:
+    url: http://node02.public.vllm.prod:80/layout-parsing
+
+pdf:
+    temp:
+        path: /tmp/pdf_parse
+    output:
+        path: /tmp/pdf_parse/output
