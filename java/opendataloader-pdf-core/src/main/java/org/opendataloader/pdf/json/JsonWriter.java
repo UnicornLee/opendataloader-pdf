@@ -1084,12 +1084,26 @@ public class JsonWriter {
         for (int i = 0; i < textChunks.size(); i++) {
             TextChunk chunk = textChunks.get(i);
             String val = chunk.getValue();
+            boolean haveChinese = false;
             if (i > 0) {
                 TextChunk prevTextChunk = textChunks.get(i - 1);
+                String prevVal = prevTextChunk.getValue();
+                if (prevVal.length() > 0) {
+                    char lastCh = prevVal.charAt(prevVal.length() - 1);
+                    haveChinese = isChinese(lastCh);
+                }
                 text += getSpaceStr(chunk.getLeftX() - prevTextChunk.getRightX(),
                     chunk.getFontSize() > prevTextChunk.getFontSize() ? chunk.getFontSize() : prevTextChunk.getFontSize());
             }
-            if ("".equals(val.trim())) {
+            if (i < textChunks.size() - 1) {
+                TextChunk nextChunk = textChunks.get(i + 1);
+                String nextVal = nextChunk.getValue();
+                if (nextVal.length() > 0 ) {
+                    char firstCh = nextVal.charAt(0);
+                    haveChinese =  isChinese(firstCh) || haveChinese;
+                }
+            }
+            if ("".equals(val.trim()) && haveChinese) {
                 text += getSpaceStr(chunk);
             } else if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
                 text += GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
@@ -1098,6 +1112,11 @@ public class JsonWriter {
             }
         }
         return text.replaceAll("</sup><sup>", "").replaceAll("</sub><sub>", "");
+    }
+
+    public static boolean isChinese(char c) {
+        return (c >= '\u4E00' && c <= '\u9FFF')      // 基本汉字
+            || (c >= '\u3000' && c <= '\u303F');     // CJK 符号和标点
     }
 
     @NotNull
