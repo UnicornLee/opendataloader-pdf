@@ -59,6 +59,7 @@ import org.verapdf.wcag.algorithms.entities.SemanticTOCI;
 import org.verapdf.wcag.algorithms.entities.content.ImageChunk;
 import org.verapdf.wcag.algorithms.entities.content.LineArtChunk;
 import org.verapdf.wcag.algorithms.entities.content.TextChunk;
+import org.verapdf.wcag.algorithms.entities.content.TextLine;
 import org.verapdf.wcag.algorithms.entities.geometry.BoundingBox;
 import org.verapdf.wcag.algorithms.entities.lists.PDFList;
 import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorder;
@@ -315,7 +316,7 @@ public class JsonWriter {
                         ByteArrayOutputStream pageBuffer = new ByteArrayOutputStream();
                         try (JsonGenerator pageGenerator = pageJsonFactory.createGenerator(pageBuffer, JsonEncoding.UTF8)
                                 .setCodec(ObjectMapperHolder.getObjectMapper())) {
-                            writePageToGenerator(pageNumber, includeHeaderFooter, contents, pageGenerator, config, pageHaveStreamTables, pageHaveFormulas);
+                            writePageToGenerator(url, pageNumber, includeHeaderFooter, contents, pageGenerator, config, pageHaveStreamTables, pageHaveFormulas);
                         }
                         // close() (via try-with-resources) flushes the generator's
                         // internal buffer, so the bytes here are the complete page JSON.
@@ -493,7 +494,7 @@ public class JsonWriter {
      * Any exception is propagated upward so the caller can discard this page's buffer
      * without affecting the main JSON stream structure.
      */
-    private static void writePageToGenerator(int pageNumber, boolean includeHeaderFooter,
+    private static void writePageToGenerator(String url, int pageNumber, boolean includeHeaderFooter,
                                             List<List<IObject>> contents, JsonGenerator pageGenerator,
                                              Config config, boolean[] pageHaveStreamTables,
                                              boolean[] pageHaveFormulas) throws IOException {
@@ -544,7 +545,7 @@ public class JsonWriter {
         writePosArray(pageGenerator, JsonName.HEADER_POS, headerPos);
         writePosArray(pageGenerator, JsonName.FOOTER_POS, footerPos);
         pageGenerator.writeArrayFieldStart(JsonName.ITEMS);
-        generateJsonPageContentData(includeHeaderFooter, height, pageContents, pageGenerator);
+        generateJsonPageContentData(url, pageNumber, includeHeaderFooter, height, pageContents, pageGenerator);
         pageGenerator.writeEndArray();
         pageGenerator.writeEndObject();
     }
@@ -631,7 +632,7 @@ public class JsonWriter {
         return ObjectMapperHolder.getObjectMapper().writeValueAsString(placeholder);
     }
 
-    private static void generateJsonPageContentData(boolean includeHeaderFooter, double height, List<IObject> pageContents, JsonGenerator jsonGenerator) throws IOException {
+    private static void generateJsonPageContentData(String url, int pageNumber, boolean includeHeaderFooter, double height, List<IObject> pageContents, JsonGenerator jsonGenerator) throws IOException {
         final double[] prevBottomY = {height};
         int textId = 1;
         for (IObject content : pageContents) {
@@ -1015,50 +1016,30 @@ public class JsonWriter {
                             int b = Math.max(0, Math.min(255, (int) Math.round(backgroundColor[2] * 255)));
                             cellMap.put(JsonName.BACKGROUND_COLOR, String.format("#%02x%02x%02x", r, g, b));
                         }
-                        String text = "";
-                        List<String> textList = new ArrayList<>();
+                        List<String> cellTextLines = new ArrayList<>();
                         for (int n = cell.getRowNumber(); n < cell.getRowNumber() + cell.getRowSpan(); n++) {
                             for (int k = cell.getColNumber(); k < cell.getColNumber() + cell.getColSpan(); k++) {
                                 if (n < tableBorder.getRows().length && k < tableBorder.getRows()[n].getCells().length) {
                                     TableBorderCell cellItem = tableBorder.getRows()[n].getCells()[k];
-                                    String currentText = "";
-                                    for (IObject cellContent : cellItem.getContents()) {
-                                        if (cellContent instanceof CustomSemanticParagraph) {
-                                            currentText += ((CustomSemanticParagraph) cellContent).getTextLines().stream()
-                                                .map(line ->
-                                                    line.getTextChunks().stream().map(chunk -> {
-                                                        String val = chunk.getValue();
-                                                        if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
-                                                            return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
-                                                        } else {
-                                                            return val;
-                                                        }
-                                                    }).collect(Collectors.joining("")))
-                                                .collect(Collectors.joining(""));
+                                    List<IObject> cellItemContents = flattenCellContents(cellItem.getContents());
+                                    if (!cellItemContents.isEmpty()) {
+                                        // Sort topY descending (PDF coords: larger topY = higher on page),
+                                        // so groups are built top-down to match reading order.
+                                        cellItemContents.sort(Comparator.comparingDouble(IObject::getTopY).reversed());
+                                        List<List<IObject>> cellItemGroups = groupChunksByLine(cellItemContents);
+                                        for (List<IObject> group : cellItemGroups) {
+                                            String currentText = assembleGroupText(group, url, pageNumber);
+                                            if (currentText.length() > 0 && !cellTextLines.contains(currentText)) {
+                                                cellTextLines.add(currentText);
+                                            }
                                         }
-                                        if (cellContent instanceof TextChunk) {
-                                            String val = ((TextChunk) cellContent).getValue();
-                                            currentText += GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val) ?
-                                                GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val)) :
-                                                val;
-                                        }
-                                        if (cellContent instanceof ImageChunk) {
-                                            ImageChunk imageChunk = (ImageChunk) cellContent;
-                                            String absoluteImagesDirectory = StaticLayoutContainers.getImagesDirectory();
-                                            String imageFormat = StaticLayoutContainers.getImageFormat();
-                                            String absolutePath = String.format(MarkdownSyntax.IMAGE_FILE_NAME_FORMAT, absoluteImagesDirectory,
-                                                File.separator, imageChunk.getIndex(), imageFormat);
-                                            currentText += "<img src='" + absolutePath + "' style='height: " + imageChunk.getHeight() + "pt !important; width: " + imageChunk.getWidth() + "pt !important;' />";
-                                        }
-                                    }
-                                    if (!textList.contains(currentText) && currentText.length() > 0) {
-                                        textList.add(currentText);
                                     }
                                 }
                             }
                         }
-                        if (textList.size() > 0) {
-                            text = String.join("", textList);
+                        String text = "";
+                        if (cellTextLines.size() > 0) {
+                            text = String.join("", cellTextLines);
                         }
                         cellMap.put(JsonName.TEXT, Arrays.asList(text));
                         cellMap.put(JsonName.CELL_TYPE, "text");
@@ -1074,6 +1055,183 @@ public class JsonWriter {
             }
             prevBottomY[0] = content.getBottomY();
         }
+    }
+
+    /**
+     * Flattens the contents of a {@link TableBorderCell} into a list of leaf {@link IObject}
+     * elements: text chunks from {@link CustomSemanticParagraph} / {@link SemanticCaption}
+     * are extracted, a nested 1x1 {@link TableBorder} is inlined (with a placeholder chunk
+     * when its single cell has no contents), and other elements pass through unchanged.
+     */
+    private static List<IObject> flattenCellContents(List<IObject> contents) {
+        if (contents == null || contents.isEmpty()) {
+            return new ArrayList<>();
+        }
+        List<IObject> flat = new ArrayList<>();
+        for (IObject cellContent : contents) {
+            if (cellContent instanceof TableBorder) {
+                TableBorder subTableBorder = (TableBorder) cellContent;
+                if (subTableBorder.getNumberOfColumns() == 1 && subTableBorder.getRows().length == 1) {
+                    TableBorderCell subCellItem = subTableBorder.getRows()[0].getCells()[0];
+                    if (subCellItem.getContents() != null && !subCellItem.getContents().isEmpty()) {
+                        for (IObject contentItem : subCellItem.getContents()) {
+                            if (contentItem instanceof CustomSemanticParagraph) {
+                                addTextChunksFromParagraph((CustomSemanticParagraph) contentItem, flat);
+                            } else {
+                                flat.add(contentItem);
+                            }
+                        }
+                    } else {
+                        // SPECIAL_CHARACTER_TARGET.get(0) is a non-breaking space used as
+                        // a placeholder to preserve the empty nested cell's geometry.
+                        TextChunk placeholder = new TextChunk(subCellItem.getBoundingBox(),
+                            GlobalConstant.SPECIAL_CHARACTER_TARGET.get(0), subCellItem.getHeight(),
+                            (subCellItem.getTopY() + subCellItem.getBottomY()) / 2);
+                        flat.add(placeholder);
+                    }
+                } else {
+                    flat.add(cellContent);
+                }
+            } else if (cellContent instanceof CustomSemanticParagraph) {
+                addTextChunksFromParagraph((CustomSemanticParagraph) cellContent, flat);
+            } else if (cellContent instanceof SemanticCaption) {
+                ((SemanticCaption) cellContent).getColumns().forEach(column -> {
+                    column.getBlocks().forEach(block -> {
+                        block.getLines().forEach(line -> flat.addAll(line.getTextChunks()));
+                    });
+                });
+            } else {
+                flat.add(cellContent);
+            }
+        }
+        return flat;
+    }
+
+    private static void addTextChunksFromParagraph(CustomSemanticParagraph paragraph, List<IObject> sink) {
+        for (TextLine textLine : paragraph.getTextLines()) {
+            sink.addAll(textLine.getTextChunks());
+        }
+    }
+
+    /**
+     * Groups adjacent cell contents into "lines": consecutive {@link TextChunk}s whose vertical
+     * range overlaps (the new chunk's middleY falls strictly inside the running maxTopY /
+     * minBottomY of the current group) stay together; non-text elements (images, sub-tables)
+     * become single-element groups so they cannot be silently merged with text.
+     *
+     * <p>Expects the input to be pre-sorted topY descending. Each emitted group is itself
+     * sorted leftX ascending before being returned.</p>
+     */
+    private static List<List<IObject>> groupChunksByLine(List<IObject> contents) {
+        List<List<IObject>> groups = new ArrayList<>();
+        List<IObject> currentGroup = new ArrayList<>();
+        double groupMaxTopY = 0;
+        double groupMinBottomY = 0;
+        for (IObject cellContent : contents) {
+            if (cellContent instanceof TextChunk) {
+                if (currentGroup.isEmpty()) {
+                    currentGroup.add(cellContent);
+                    groupMaxTopY = cellContent.getTopY();
+                    groupMinBottomY = cellContent.getBottomY();
+                    continue;
+                }
+                double middleY = (cellContent.getTopY() + cellContent.getBottomY()) / 2;
+                boolean overlaps = Double.isFinite(middleY) && Double.isFinite(groupMaxTopY)
+                    && Double.isFinite(groupMinBottomY)
+                    && middleY > groupMinBottomY && middleY < groupMaxTopY;
+                if (overlaps) {
+                    currentGroup.add(cellContent);
+                    if (cellContent.getTopY() > groupMaxTopY) {
+                        groupMaxTopY = cellContent.getTopY();
+                    }
+                    if (cellContent.getBottomY() < groupMinBottomY) {
+                        groupMinBottomY = cellContent.getBottomY();
+                    }
+                } else {
+                    flushGroupSortedByLeftX(currentGroup, groups);
+                    currentGroup = new ArrayList<>();
+                    currentGroup.add(cellContent);
+                    groupMaxTopY = cellContent.getTopY();
+                    groupMinBottomY = cellContent.getBottomY();
+                }
+            } else {
+                flushGroupSortedByLeftX(currentGroup, groups);
+                groups.add(Collections.singletonList(cellContent));
+                currentGroup = new ArrayList<>();
+            }
+        }
+        flushGroupSortedByLeftX(currentGroup, groups);
+        return groups;
+    }
+
+    private static void flushGroupSortedByLeftX(List<IObject> group, List<List<IObject>> sink) {
+        if (!group.isEmpty()) {
+            group.sort(Comparator.comparingDouble(IObject::getLeftX));
+            sink.add(group);
+        }
+    }
+
+    /**
+     * Concatenates one group into a single text line: {@link ImageChunk}s become inline
+     * {@code <img>} tags, {@link TextChunk}s are joined with width-derived spaces, and
+     * nested {@link TableBorder}s are logged but not serialized (would change schema).
+     *
+     * <p>Skips the gap-filling space when either adjacent character is CJK to avoid
+     * inserting visible spaces between Chinese characters.</p>
+     */
+    private static String assembleGroupText(List<IObject> group, String url, int pageNumber) {
+        StringBuilder sb = new StringBuilder();
+        TextChunk prevChunk = null;
+        for (IObject cellContent : group) {
+            if (cellContent instanceof ImageChunk) {
+                ImageChunk imageChunk = (ImageChunk) cellContent;
+                String absoluteImagesDirectory = StaticLayoutContainers.getImagesDirectory();
+                String imageFormat = StaticLayoutContainers.getImageFormat();
+                String absolutePath = String.format(MarkdownSyntax.IMAGE_FILE_NAME_FORMAT, absoluteImagesDirectory,
+                    File.separator, imageChunk.getIndex(), imageFormat);
+                sb.append("<img src='").append(absolutePath)
+                    .append("' style='height: ").append(imageChunk.getHeight()).append("pt !important; width: ")
+                    .append(imageChunk.getWidth()).append("pt !important;' />");
+                prevChunk = null;
+            } else if (cellContent instanceof TableBorder) {
+                // Nested table inside a cell: detected but not serialized here because it would
+                // change the JSON data structure. Frontend consumers must handle the resulting
+                // schema. Logged for diagnosis.
+                LOGGER.log(Level.WARNING, "[JsonWriter] Table cell contains a table on " + pageNumber + " page of " + url);
+                prevChunk = null;
+            } else if (cellContent instanceof TextChunk) {
+                TextChunk chunk = (TextChunk) cellContent;
+                if (prevChunk != null && !isChineseAdjacent(prevChunk, chunk)) {
+                    double fontSize = Math.max(chunk.getFontSize(), prevChunk.getFontSize());
+                    sb.append(getSpaceStr(chunk.getLeftX() - prevChunk.getRightX(), fontSize));
+                }
+                sb.append(renderTextChunkValue(chunk));
+                prevChunk = chunk;
+            }
+        }
+        return sb.toString();
+    }
+
+    private static boolean isChineseAdjacent(TextChunk prev, TextChunk curr) {
+        String prevVal = prev.getValue();
+        String currVal = curr.getValue();
+        if (prevVal.isEmpty() || currVal.isEmpty()) {
+            return false;
+        }
+        return isChinese(prevVal.charAt(prevVal.length() - 1))
+            || isChinese(currVal.charAt(0));
+    }
+
+    private static String renderTextChunkValue(TextChunk chunk) {
+        String val = chunk.getValue();
+        if ("".equals(val.trim())) {
+            String spaceStr = getSpaceStr(chunk);
+            return spaceStr.isEmpty() ? " " : spaceStr;
+        }
+        if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
+            return GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
+        }
+        return val;
     }
 
     private static String getText(List<TextChunk> textChunks) {
@@ -1863,9 +2021,9 @@ public class JsonWriter {
         List<?> contentList = (List<?>) contentObj;
         Object first = contentList.get(0);
         if (first instanceof Map) {
-            Object textListObj = ((Map<?, ?>) first).get(JsonName.CONTENT);
-            if (textListObj instanceof List && !((List<?>) textListObj).isEmpty()) {
-                return ((List<?>) textListObj).get(0).toString();
+            Object cellTextLinesObj = ((Map<?, ?>) first).get(JsonName.CONTENT);
+            if (cellTextLinesObj instanceof List && !((List<?>) cellTextLinesObj).isEmpty()) {
+                return ((List<?>) cellTextLinesObj).get(0).toString();
             }
         }
         return first.toString();
@@ -1886,9 +2044,9 @@ public class JsonWriter {
         List<String> pieces = new ArrayList<>();
         for (Object lineObj : (List<?>) contentObj) {
             if (lineObj instanceof Map) {
-                Object textListObj = ((Map<?, ?>) lineObj).get(JsonName.CONTENT);
-                if (textListObj instanceof List) {
-                    for (Object t : (List<?>) textListObj) {
+                Object cellTextLinesObj = ((Map<?, ?>) lineObj).get(JsonName.CONTENT);
+                if (cellTextLinesObj instanceof List) {
+                    for (Object t : (List<?>) cellTextLinesObj) {
                         if (t != null) {
                             String s = t.toString();
                             if (!s.isEmpty()) {
@@ -2177,8 +2335,8 @@ public class JsonWriter {
                     continue;
                 }
                 @SuppressWarnings("unchecked")
-                List<Object> textList = (List<Object>) textObj;
-                replaceImgSrcInStringList(textList, outputFolder, cache, obsClient, ossConfig);
+                List<Object> cellTextLines = (List<Object>) textObj;
+                replaceImgSrcInStringList(cellTextLines, outputFolder, cache, obsClient, ossConfig);
             }
         }
     }
