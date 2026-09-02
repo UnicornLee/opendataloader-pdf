@@ -1021,7 +1021,7 @@ public class JsonWriter {
                             for (int k = cell.getColNumber(); k < cell.getColNumber() + cell.getColSpan(); k++) {
                                 if (n < tableBorder.getRows().length && k < tableBorder.getRows()[n].getCells().length) {
                                     TableBorderCell cellItem = tableBorder.getRows()[n].getCells()[k];
-                                    List<IObject> cellItemContents = flattenCellContents(cellItem.getContents());
+                                    List<IObject> cellItemContents = flattenCellContents(cellItem.getContents(), url, pageNumber);
                                     if (!cellItemContents.isEmpty()) {
                                         // Sort topY descending (PDF coords: larger topY = higher on page),
                                         // so groups are built top-down to match reading order.
@@ -1057,13 +1057,18 @@ public class JsonWriter {
         }
     }
 
+    /** Maximum nesting depth (inclusive) for HTML-rendered nested tables. */
+    private static final int MAX_NESTED_TABLE_DEPTH = 5;
+
     /**
      * Flattens the contents of a {@link TableBorderCell} into a list of leaf {@link IObject}
      * elements: text chunks from {@link CustomSemanticParagraph} / {@link SemanticCaption}
      * are extracted, a nested 1x1 {@link TableBorder} is inlined (with a placeholder chunk
-     * when its single cell has no contents), and other elements pass through unchanged.
+     * when its single cell has no contents), a nested multi-row/column {@link TableBorder}
+     * is rendered as an HTML {@code <table>} string wrapped in a single {@link TextChunk},
+     * and other elements pass through unchanged.
      */
-    private static List<IObject> flattenCellContents(List<IObject> contents) {
+    private static List<IObject> flattenCellContents(List<IObject> contents, String url, int pageNumber) {
         if (contents == null || contents.isEmpty()) {
             return new ArrayList<>();
         }
@@ -1090,7 +1095,23 @@ public class JsonWriter {
                         flat.add(placeholder);
                     }
                 } else {
-                    flat.add(cellContent);
+                    // Multi-row/multi-column sub-table inside a cell: render it as an HTML
+                    // <table> string and wrap it in a single TextChunk so the cell's text
+                    // preserves the nested structure without losing data.
+                    String html = renderTableBorderToHtml(subTableBorder, 0, url, pageNumber);
+                    BoundingBox bbox = subTableBorder.getBoundingBox();
+                    if (bbox == null) {
+                        bbox = new BoundingBox(subTableBorder.getLeftX(), subTableBorder.getTopY(),
+                            subTableBorder.getRightX(), subTableBorder.getBottomY());
+                    }
+                    // Pick a representative font size for the wrapper TextChunk: mode
+                    // of all TextChunk.fontSize values inside the sub-table, mean if
+                    // the mode is not unique, 0 if the sub-table has no text at all.
+                    double[] sizes = collectCellFontSizes(java.util.Collections.singletonList(subTableBorder), 0);
+                    double fontSize = computeFontSize(sizes);
+                    double middleY = (subTableBorder.getTopY() + subTableBorder.getBottomY()) / 2;
+                    TextChunk htmlChunk = new TextChunk(bbox, html, fontSize, middleY);
+                    flat.add(htmlChunk);
                 }
             } else if (cellContent instanceof CustomSemanticParagraph) {
                 addTextChunksFromParagraph((CustomSemanticParagraph) cellContent, flat);
@@ -1111,6 +1132,36 @@ public class JsonWriter {
         for (TextLine textLine : paragraph.getTextLines()) {
             sink.addAll(textLine.getTextChunks());
         }
+    }
+
+    /**
+     * Like {@link #flattenCellContents} but drops every {@link TableBorder} element
+     * entirely (the caller is expected to render sub-tables itself). Used by
+     * {@link #renderTableCellToHtml} so sub-tables are not double-rendered: once as
+     * an HTML {@code <table>} string inside the parent cell text, and again via
+     * {@link #flattenCellContents}.
+     */
+    private static List<IObject> flattenCellContentsSkipTable(List<IObject> contents, String url, int pageNumber) {
+        if (contents == null || contents.isEmpty()) {
+            return new ArrayList<>();
+        }
+        List<IObject> flat = new ArrayList<>();
+        for (IObject cellContent : contents) {
+            if (cellContent instanceof TableBorder) {
+                continue;
+            } else if (cellContent instanceof CustomSemanticParagraph) {
+                addTextChunksFromParagraph((CustomSemanticParagraph) cellContent, flat);
+            } else if (cellContent instanceof SemanticCaption) {
+                ((SemanticCaption) cellContent).getColumns().forEach(column -> {
+                    column.getBlocks().forEach(block -> {
+                        block.getLines().forEach(line -> flat.addAll(line.getTextChunks()));
+                    });
+                });
+            } else {
+                flat.add(cellContent);
+            }
+        }
+        return flat;
     }
 
     /**
@@ -1212,6 +1263,121 @@ public class JsonWriter {
         return sb.toString();
     }
 
+    /**
+     * Renders a {@link TableBorder} (and any nested sub-tables up to
+     * {@link #MAX_NESTED_TABLE_DEPTH}) as an HTML {@code <table>} string.
+     *
+     * <p>The structure is intentionally minimal: no border or style attributes, only
+     * {@code colspan}/{@code rowspan} when larger than 1. Cell text is escaped via
+     * {@link #escapeHtml}. Empty cells get {@code &nbsp;} so the table keeps a
+     * visible grid when rendered.</p>
+     *
+     * @param tableBorder the table to render
+     * @param depth       current nesting depth (0 for the outermost sub-table inside a cell)
+     * @param url         source PDF URL/path, used for warning logs
+     * @param pageNumber  1-based page number, used for warning logs
+     * @return the HTML serialization, or {@code ""} when {@code tableBorder} has no rows
+     */
+    private static String renderTableBorderToHtml(TableBorder tableBorder, int depth, String url, int pageNumber) {
+        TableBorderRow[] rows = tableBorder.getRows();
+        if (rows == null || rows.length == 0) {
+            return "<table></table>";
+        }
+        // Diagnostic: log every nested table the JSON path embeds as inline HTML
+        // (previously this scenario only logged a single warning and dropped the
+        // cell's contents). The depth field tells operators how deeply nested the
+        // table is, so they can spot documents that hit MAX_NESTED_TABLE_DEPTH.
+        LOGGER.log(Level.INFO,
+            "[JsonWriter] Multi-row/multi-column sub-table rendered as HTML at depth "
+                + depth + " on " + pageNumber + " page of " + url
+                + " (rows=" + rows.length
+                + ", cols=" + tableBorder.getNumberOfColumns() + ").");
+        StringBuilder sb = new StringBuilder();
+        sb.append("<table>");
+        for (TableBorderRow row : rows) {
+            sb.append(renderTableRowToHtml(row, depth, url, pageNumber));
+        }
+        sb.append("</table>");
+        return sb.toString();
+    }
+
+    private static String renderTableRowToHtml(TableBorderRow row, int depth, String url, int pageNumber) {
+        if (row == null || row.getCells() == null) {
+            return "<tr></tr>";
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("<tr>");
+        for (TableBorderCell cell : row.getCells()) {
+            sb.append(renderTableCellToHtml(cell, depth, url, pageNumber));
+        }
+        sb.append("</tr>");
+        return sb.toString();
+    }
+
+    private static String renderTableCellToHtml(TableBorderCell cell, int depth, String url, int pageNumber) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<td");
+        if (cell.getColSpan() > 1) {
+            sb.append(" colspan=\"").append(cell.getColSpan()).append('"');
+        }
+        if (cell.getRowSpan() > 1) {
+            sb.append(" rowspan=\"").append(cell.getRowSpan()).append('"');
+        }
+        sb.append('>');
+
+        List<IObject> contents = cell.getContents();
+        if (contents == null || contents.isEmpty()) {
+            sb.append("&nbsp;");
+            sb.append("</td>");
+            return sb.toString();
+        }
+
+        // Render sub-tables up to MAX_NESTED_TABLE_DEPTH as inline HTML, then assemble
+        // remaining text/image content via the standard line grouping path. The two
+        // passes use disjoint subsets of contents to avoid double-rendering.
+        StringBuilder body = new StringBuilder();
+        for (IObject obj : contents) {
+            if (obj instanceof TableBorder) {
+                if (depth + 1 >= MAX_NESTED_TABLE_DEPTH) {
+                    LOGGER.log(Level.WARNING,
+                        "[JsonWriter] Nested table depth " + (depth + 1)
+                            + " exceeds limit " + MAX_NESTED_TABLE_DEPTH
+                            + " on " + pageNumber + " page of " + url
+                            + " -- dropping deeper sub-tables.");
+                    body.append("&nbsp;");
+                } else {
+                    body.append(renderTableBorderToHtml((TableBorder) obj, depth + 1, url, pageNumber));
+                }
+            }
+        }
+        List<IObject> flat = flattenCellContentsSkipTable(contents, url, pageNumber);
+        boolean hasAnyText = false;
+        if (!flat.isEmpty()) {
+            flat.sort(Comparator.comparingDouble(IObject::getTopY).reversed());
+            List<List<IObject>> groups = groupChunksByLine(flat);
+            for (List<IObject> group : groups) {
+                String lineText = assembleGroupText(group, url, pageNumber);
+                if (!lineText.isEmpty()) {
+                    body.append(escapeHtml(lineText));
+                    hasAnyText = true;
+                }
+            }
+        }
+
+        if (body.length() == 0) {
+            sb.append("&nbsp;");
+        } else if (!hasAnyText && body.indexOf("<table") < 0) {
+            // No real text and no embedded table; emit a non-breaking space so the
+            // <td> still has visible content (e.g. an image-only cell).
+            sb.append("&nbsp;");
+        } else {
+            sb.append(body);
+        }
+
+        sb.append("</td>");
+        return sb.toString();
+    }
+
     private static boolean isChineseAdjacent(TextChunk prev, TextChunk curr) {
         String prevVal = prev.getValue();
         String currVal = curr.getValue();
@@ -1270,6 +1436,146 @@ public class JsonWriter {
             }
         }
         return text.replaceAll("</sup><sup>", "").replaceAll("</sub><sub>", "");
+    }
+
+    /**
+     * Escapes the five HTML-significant characters in {@code s}.
+     * Used when serializing cell text inside HTML markup produced by
+     * {@link #renderTableBorderToHtml}.
+     */
+    private static String escapeHtml(String s) {
+        if (s == null || s.isEmpty()) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '&':
+                    out.append("&amp;");
+                    break;
+                case '<':
+                    out.append("&lt;");
+                    break;
+                case '>':
+                    out.append("&gt;");
+                    break;
+                case '"':
+                    out.append("&quot;");
+                    break;
+                case '\'':
+                    out.append("&#39;");
+                    break;
+                default:
+                    out.append(c);
+            }
+        }
+        return out.toString();
+    }
+
+    /**
+     * Recursively walks a cell's {@link IObject} contents and collects every
+     * {@link TextChunk#getFontSize()} value. Nested {@link TableBorder}s are
+     * traversed up to {@link #MAX_NESTED_TABLE_DEPTH}; deeper tables are
+     * skipped to bound the work.
+     */
+    private static double[] collectCellFontSizes(List<IObject> contents, int depth) {
+        if (contents == null || contents.isEmpty()) {
+            return new double[0];
+        }
+        List<Double> sizes = new ArrayList<>();
+        for (IObject obj : contents) {
+            collectFontSizesRecursive(obj, sizes, depth);
+        }
+        double[] result = new double[sizes.size()];
+        for (int i = 0; i < result.length; i++) {
+            result[i] = sizes.get(i);
+        }
+        return result;
+    }
+
+    private static void collectFontSizesRecursive(IObject obj, List<Double> sink, int depth) {
+        if (obj instanceof TextChunk) {
+            sink.add(((TextChunk) obj).getFontSize());
+        } else if (obj instanceof CustomSemanticParagraph) {
+            for (TextLine line : ((CustomSemanticParagraph) obj).getTextLines()) {
+                for (TextChunk chunk : line.getTextChunks()) {
+                    sink.add(chunk.getFontSize());
+                }
+            }
+        } else if (obj instanceof SemanticCaption) {
+            ((SemanticCaption) obj).getColumns().forEach(column ->
+                column.getBlocks().forEach(block ->
+                    block.getLines().forEach(line -> {
+                        for (TextChunk chunk : line.getTextChunks()) {
+                            sink.add(chunk.getFontSize());
+                        }
+                    })));
+        } else if (obj instanceof TableBorder) {
+            if (depth >= MAX_NESTED_TABLE_DEPTH) {
+                return;
+            }
+            TableBorder sub = (TableBorder) obj;
+            TableBorderRow[] rows = sub.getRows();
+            if (rows == null) {
+                return;
+            }
+            for (TableBorderRow row : rows) {
+                TableBorderCell[] cells = row.getCells();
+                if (cells == null) {
+                    continue;
+                }
+                for (TableBorderCell cell : cells) {
+                    List<IObject> cellContents = cell.getContents();
+                    if (cellContents == null) {
+                        continue;
+                    }
+                    for (IObject inner : cellContents) {
+                        collectFontSizesRecursive(inner, sink, depth + 1);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Returns the most representative font size from {@code sizes}: the unique mode
+     * (rounded to 3 decimals so floating-point noise does not split modes); otherwise
+     * the mean. Returns {@code 0.0} for an empty array.
+     */
+    private static double computeFontSize(double[] sizes) {
+        if (sizes == null || sizes.length == 0) {
+            return 0.0;
+        }
+        Map<Long, Integer> roundedCounts = new HashMap<>();
+        Map<Long, Double> exactForKey = new HashMap<>();
+        double sum = 0.0;
+        for (double s : sizes) {
+            long key = Math.round(s * 1000.0);
+            roundedCounts.merge(key, 1, Integer::sum);
+            exactForKey.putIfAbsent(key, s);
+            sum += s;
+        }
+        long modeKey = Long.MIN_VALUE;
+        int modeCount = 0;
+        for (Map.Entry<Long, Integer> entry : roundedCounts.entrySet()) {
+            if (entry.getValue() > modeCount) {
+                modeCount = entry.getValue();
+                modeKey = entry.getKey();
+            }
+        }
+        final int finalModeCount = modeCount;
+        long modeHits = 0;
+        for (Integer count : roundedCounts.values()) {
+            if (count != null && count == finalModeCount) {
+                modeHits++;
+            }
+        }
+        boolean uniqueMode = modeCount > 0 && modeHits == 1;
+        if (uniqueMode) {
+            return exactForKey.get(modeKey);
+        }
+        return sum / sizes.length;
     }
 
     public static boolean isChinese(char c) {
