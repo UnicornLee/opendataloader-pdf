@@ -29,6 +29,7 @@ import org.verapdf.wcag.algorithms.semanticalgorithms.utils.NodeUtils;
 import org.verapdf.wcag.algorithms.semanticalgorithms.utils.TextChunkUtils;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -207,14 +208,22 @@ public class TableBorderProcessor {
      *
      * <p>The original ShapeChunks remain top-level page contents; this method only
      * annotates the affected cells.</p>
+     *
+     * <p>Cells are enumerated directly instead of going through
+     * {@link TableBorder#getTableBorderCells(IObject)}: that helper collapses an
+     * object spanning several rows into the single row with the largest vertical
+     * intersection (see its {@code getRowNumber}), so a background rectangle that
+     * covers a whole column would only ever color one row.</p>
+     *
+     * <p>Overlap is measured against the individual filled areas of a shape
+     * (see {@link #getFillBoxes(ShapeChunk)}), not against its merged bounding
+     * box.</p>
      */
     private static void assignBackgroundColorsFromRectangleShapes(List<IObject> rawPageContents, TableBorder tableBorder) {
         if (tableBorder == null || tableBorder.isTextBlock() || rawPageContents == null || rawPageContents.isEmpty()) {
             return;
         }
-        // Track the best matching rectangle shape for each cell to avoid relying on
-        // arbitrary iteration order when multiple shapes overlap the same cell.
-        Map<TableBorderCell, BestShapeMatch> bestMatches = new HashMap<>();
+        List<ShapeChunk> rectangleShapes = new ArrayList<>();
         for (IObject content : rawPageContents) {
             if (!(content instanceof ShapeChunk)) {
                 continue;
@@ -227,16 +236,32 @@ public class TableBorderProcessor {
             if (color == null || color.length != 3) {
                 continue;
             }
-            Set<TableBorderCell> cells = tableBorder.getTableBorderCells(shapeChunk);
-            if (cells == null || cells.isEmpty()) {
-                continue;
-            }
-            for (TableBorderCell cell : cells) {
-                double overlap = cell.getBoundingBox().getIntersectionPercent(shapeChunk.getBoundingBox());
-                if (overlap > CELL_BACKGROUND_OVERLAP_THRESHOLD) {
-                    BestShapeMatch current = bestMatches.get(cell);
-                    if (current == null || overlap > current.overlap) {
-                        bestMatches.put(cell, new BestShapeMatch(color, overlap));
+            rectangleShapes.add(shapeChunk);
+        }
+        if (rectangleShapes.isEmpty()) {
+            return;
+        }
+        // Track the best matching rectangle shape for each cell to avoid relying on
+        // arbitrary iteration order when multiple shapes overlap the same cell.
+        Map<TableBorderCell, BestShapeMatch> bestMatches = new HashMap<>();
+        for (int rowNumber = 0; rowNumber < tableBorder.getNumberOfRows(); rowNumber++) {
+            TableBorderRow row = tableBorder.getRow(rowNumber);
+            for (int colNumber = 0; colNumber < tableBorder.getNumberOfColumns(); colNumber++) {
+                TableBorderCell cell = row.getCell(colNumber);
+                // Skip nulls and cells that are only covered by a row/column span;
+                // those are handled when their owning cell is visited.
+                if (cell == null || cell.getRowNumber() != rowNumber || cell.getColNumber() != colNumber) {
+                    continue;
+                }
+                for (ShapeChunk shapeChunk : rectangleShapes) {
+                    for (BoundingBox fillBox : getFillBoxes(shapeChunk)) {
+                        double overlap = cell.getBoundingBox().getIntersectionPercent(fillBox);
+                        if (overlap > CELL_BACKGROUND_OVERLAP_THRESHOLD) {
+                            BestShapeMatch current = bestMatches.get(cell);
+                            if (current == null || overlap > current.overlap) {
+                                bestMatches.put(cell, new BestShapeMatch(shapeChunk.getColor(), overlap));
+                            }
+                        }
                     }
                 }
             }
@@ -244,6 +269,26 @@ public class TableBorderProcessor {
         for (Map.Entry<TableBorderCell, BestShapeMatch> entry : bestMatches.entrySet()) {
             entry.getKey().setBackgroundColor(entry.getValue().color);
         }
+    }
+
+    /**
+     * Returns the filled areas that make up the given rectangle shape.
+     *
+     * <p>{@link ShapeRecognizer} merges filled pieces that are merely adjacent
+     * into a single shape, and its adjacency test tolerates a gap on both axes
+     * independently, so pieces that only touch at a corner end up in the same
+     * shape. The merged bounding box then spans areas that were never painted
+     * (for example table cells next to and below a filled cell). The
+     * per-component boxes are the original filled rectangles, so they are the
+     * accurate source for background-color matching. The merged box is only
+     * used when a shape carries no component information.</p>
+     */
+    private static List<BoundingBox> getFillBoxes(ShapeChunk shapeChunk) {
+        List<BoundingBox> componentBBoxes = shapeChunk.getComponentBBoxes();
+        if (componentBBoxes == null || componentBBoxes.isEmpty()) {
+            return Collections.singletonList(shapeChunk.getBoundingBox());
+        }
+        return componentBBoxes;
     }
 
     /**
