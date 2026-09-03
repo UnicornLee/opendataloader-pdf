@@ -42,7 +42,7 @@ public class BookmarkUtils {
         PDOutlineItem item = node.getFirstChild();
         while (item != null) {
             Bookmark bookmark = new Bookmark();
-            bookmark.setText(item.getTitle());
+            bookmark.setText(truncateTitle(item.getTitle()));
             if (doc != null) {
                 try {
                     PDPage page = item.findDestinationPage(doc);
@@ -59,6 +59,27 @@ public class BookmarkUtils {
             item = item.getNextSibling();
         }
         return selfBookmarks;
+    }
+
+    /**
+     * Returns the given outline title unchanged when it is at most
+     * {@link #MAX_TITLE_LENGTH} chars long; otherwise truncates it to
+     * {@link #MAX_TITLE_LENGTH} chars so no single bookmark text can exceed the
+     * limit. Truncation never splits a surrogate pair (e.g. emoji) in half.
+     *
+     * @param title the raw outline title, possibly {@code null}
+     * @return the title itself, or a truncated copy
+     */
+    private static String truncateTitle(String title) {
+        if (title == null || title.length() <= MAX_TITLE_LENGTH) {
+            return title;
+        }
+        String truncated = title.substring(0, MAX_TITLE_LENGTH);
+        int lastIndex = truncated.length() - 1;
+        if (lastIndex >= 0 && Character.isHighSurrogate(truncated.charAt(lastIndex))) {
+            truncated = truncated.substring(0, lastIndex);
+        }
+        return truncated;
     }
 
     /**
