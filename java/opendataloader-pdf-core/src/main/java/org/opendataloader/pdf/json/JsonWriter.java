@@ -522,11 +522,12 @@ public class JsonWriter {
         pageContents.sort(Comparator.comparingDouble(item -> item.getTopY()));
         Collections.reverse(pageContents);
         Double[] headerPos = null;
-        Double[] footerPos = pageContents.size() > 1 ? headerFooterPos(pageContents.get(pageContents.size() - 1), height) : null;
+        Double[] footerPos = null;
+        // Double[] footerPos = pageContents.size() > 1 ? headerFooterPos(pageContents.get(pageContents.size() - 1), height) : null;
         if (isHk) {
             pageContents = flattenHeaderFooterContents(pageContents);
         } else {
-            headerPos = pageContents.isEmpty() ? null : headerFooterPos(pageContents.get(0), height);
+            // headerPos = pageContents.isEmpty() ? null : headerFooterPos(pageContents.get(0), height);
         }
         List<IObject> layoutObjects = pageContents.stream()
             .filter(o -> !(o instanceof SemanticHeaderOrFooter))
