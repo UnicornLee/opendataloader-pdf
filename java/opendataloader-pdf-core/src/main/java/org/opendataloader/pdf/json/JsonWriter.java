@@ -1021,6 +1021,7 @@ public class JsonWriter {
                         for (int n = cell.getRowNumber(); n < cell.getRowNumber() + cell.getRowSpan(); n++) {
                             for (int k = cell.getColNumber(); k < cell.getColNumber() + cell.getColSpan(); k++) {
                                 if (n < tableBorder.getRows().length && k < tableBorder.getRows()[n].getCells().length) {
+                                    List<String> currentCellTextLines = new ArrayList<>();
                                     TableBorderCell cellItem = tableBorder.getRows()[n].getCells()[k];
                                     List<IObject> cellItemContents = flattenCellContents(cellItem.getContents(), url, pageNumber);
                                     if (!cellItemContents.isEmpty()) {
@@ -1028,21 +1029,49 @@ public class JsonWriter {
                                         // so groups are built top-down to match reading order.
                                         cellItemContents.sort(Comparator.comparingDouble(IObject::getTopY).reversed());
                                         List<List<IObject>> cellItemGroups = groupChunksByLine(cellItemContents);
+                                        boolean nextNewLine = false;
                                         for (List<IObject> group : cellItemGroups) {
                                             String currentText = assembleGroupText(group, url, pageNumber);
-                                            if (currentText.length() > 0 && !cellTextLines.contains(currentText)) {
-                                                cellTextLines.add(currentText);
+                                            if (currentText.isEmpty()) {
+                                                continue;
+                                            }
+                                            // The gap is measured on the PREVIOUS line and decides whether THIS
+                                            // line starts a new entry: a previous line that stopped more than
+                                            // MAX_CELL_LINE_RIGHT_GAP short of the cell's right edge ended a
+                                            // paragraph, so this line starts a new entry; a previous line that
+                                            // reached the edge was wrapped, so this line is appended to it.
+                                            // Images and embedded nested-table HTML always stand alone
+                                            // (see containsEmbeddedBlock).
+                                            boolean newLine = containsEmbeddedBlock(group) || nextNewLine;
+                                            nextNewLine = cell.getRightX() - getGroupMaxRightX(group) > MAX_CELL_LINE_RIGHT_GAP;
+                                            if (newLine) {
+                                                if (!currentCellTextLines.contains(currentText)) {
+                                                    currentCellTextLines.add(currentText);
+                                                }
+                                            } else if (currentCellTextLines.isEmpty()) {
+                                                currentCellTextLines.add(currentText);
+                                            } else {
+                                                if (!currentCellTextLines.contains(currentText)) {
+                                                    int lastIndex = currentCellTextLines.size() - 1;
+                                                    currentCellTextLines.set(lastIndex, currentCellTextLines.get(lastIndex) + currentText);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Each spanned (n, k) position yields its own line list; merge them
+                                    // into the enclosing cell's list, keeping only the first occurrence
+                                    // of an identical line (spanned positions can repeat the same text).
+                                    if (!currentCellTextLines.isEmpty()) {
+                                        for (String text : currentCellTextLines) {
+                                            if (!cellTextLines.contains(text)) {
+                                                cellTextLines.add(text);
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                        String text = "";
-                        if (cellTextLines.size() > 0) {
-                            text = String.join("", cellTextLines);
-                        }
-                        cellMap.put(JsonName.TEXT, Arrays.asList(text));
+                        cellMap.put(JsonName.TEXT, cellTextLines);
                         cellMap.put(JsonName.CELL_TYPE, "text");
                         oneRowList.add(cellMap);
                     }
@@ -1060,6 +1089,15 @@ public class JsonWriter {
 
     /** Maximum nesting depth (inclusive) for HTML-rendered nested tables. */
     private static final int MAX_NESTED_TABLE_DEPTH = 5;
+
+    /**
+     * Gap (in points) used to decide whether a text line was wrapped onto the next one.
+     * Measured on a line against the cell's right edge: a line ending further than this
+     * from the edge is considered complete, so the NEXT line starts a new entry in the
+     * cell's text list; otherwise the next line is the wrapped continuation of that line
+     * and is appended to it.
+     */
+    private static final double MAX_CELL_LINE_RIGHT_GAP = 15;
 
     /**
      * Flattens the contents of a {@link TableBorderCell} into a list of leaf {@link IObject}
@@ -1262,6 +1300,53 @@ public class JsonWriter {
             }
         }
         return sb.toString();
+    }
+
+    /**
+     * Right-most x coordinate covered by a line group. Compared against the cell's right
+     * edge to decide whether the FOLLOWING line starts a new entry or is appended to this
+     * one as its wrapped continuation.
+     *
+     * @return the largest {@code rightX} of the group, or {@link Double#NEGATIVE_INFINITY}
+     * for a {@code null}/empty group (the gap then evaluates to {@code +Infinity}, i.e. the
+     * next line always starts a new entry)
+     */
+    private static double getGroupMaxRightX(List<IObject> group) {
+        double maxRightX = Double.NEGATIVE_INFINITY;
+        if (group == null) {
+            return maxRightX;
+        }
+        for (IObject cellContent : group) {
+            if (cellContent != null && cellContent.getRightX() > maxRightX) {
+                maxRightX = cellContent.getRightX();
+            }
+        }
+        return maxRightX;
+    }
+
+    /**
+     * Whether a line group carries block-level markup that must always start its own entry
+     * instead of being appended to the previous text line: an {@link ImageChunk} (rendered
+     * as an {@code <img>} tag) or a {@link TextChunk} holding an embedded nested table (a
+     * multi-row/column {@link TableBorder} is flattened into an HTML {@code <table>} string
+     * wrapped in a single {@link TextChunk} by {@link #flattenCellContents}).
+     */
+    private static boolean containsEmbeddedBlock(List<IObject> group) {
+        if (group == null) {
+            return false;
+        }
+        for (IObject cellContent : group) {
+            if (cellContent instanceof ImageChunk) {
+                return true;
+            }
+            if (cellContent instanceof TextChunk) {
+                String value = ((TextChunk) cellContent).getValue();
+                if (value != null && value.contains("<table")) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
