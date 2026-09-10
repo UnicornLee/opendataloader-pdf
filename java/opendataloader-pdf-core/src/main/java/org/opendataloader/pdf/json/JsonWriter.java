@@ -225,7 +225,7 @@ public class JsonWriter {
                     data, catalogStartPage, catalogEndPage);
 
                 CatalogBookmarkProcessor.fillCatalogChildrenFromPageData(
-                    data, catalogStartPage, catalogEndPage, catalogBookmarks, pageBookmarks);
+                    data, catalogStartPage, catalogEndPage, catalogBookmarks);
 
                 if (catalogStartPage >= 0 && catalogEndPage >= catalogStartPage) {
                     map.put("catalog_page_range_start", catalogStartPage + 1);
@@ -431,7 +431,7 @@ public class JsonWriter {
                     // Complement missing L2/L3 sub-bookmarks in the catalog tree from
                     // the page bookmark candidates (sliced by anchor ranges).
                     CatalogBookmarkProcessor.fillCatalogChildrenFromPageData(
-                        data, catalogStartPage, catalogEndPage, catalogBookmarks, pageBookmarks);
+                        data, catalogStartPage, catalogEndPage, catalogBookmarks);
 
                     if (catalogStartPage >= 0 && catalogEndPage >= catalogStartPage) {
                         map.put("catalog_page_range_start", catalogStartPage + 1);

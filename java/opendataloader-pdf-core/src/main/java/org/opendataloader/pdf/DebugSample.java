@@ -2,6 +2,7 @@ package org.opendataloader.pdf;
 
 import org.opendataloader.pdf.api.Config;
 import org.opendataloader.pdf.api.OpenDataLoaderPDF;
+import org.opendataloader.pdf.api.RebuildBookmarksResult;
 import org.opendataloader.pdf.processors.ProcessingResult;
 
 import java.util.HashMap;
@@ -40,7 +41,7 @@ public class DebugSample {
 //        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202303181679059838994480-252(公式).pdf", config);
 //        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202303181679059838994480-314(公式).pdf", config);
 //        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\20260507AN202606291826520711.pdf", config);
-        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202609031788345926201019610.pdf", config);
+        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202609081788820439508064469.pdf", config);
         System.out.println("JSON URL / local path: " + result.getJsonUrlOrPath());
         System.out.println("OCR JSON local path: " + result.getOcrJsonLocalPath());
         OpenDataLoaderPDF.shutdown();
