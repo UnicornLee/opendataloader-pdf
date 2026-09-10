@@ -226,7 +226,7 @@ public class StreamTableProcessor {
      * @return absolute path of the newly written single-page PNG
      * @throws IOException if loading the source PDF or writing the image fails
      */
-    private static File extractSinglePageImage(String pdfPath, int pageNumber) throws IOException {
+    public static File extractSinglePageImage(String pdfPath, int pageNumber) throws IOException {
         File source = new File(pdfPath);
         String baseName = source.getName();
         int dotIdx = baseName.lastIndexOf('.');
