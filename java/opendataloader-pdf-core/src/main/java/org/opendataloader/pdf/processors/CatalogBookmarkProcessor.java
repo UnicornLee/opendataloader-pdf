@@ -1158,6 +1158,32 @@ public class CatalogBookmarkProcessor {
         return "text".equals(itemType);
     }
 
+    /**
+     * Returns true when {@code item} is a text item that may carry a bookmark
+     * title: either a paragraph or a heading (current schema, where the JSON
+     * writer emits {@code source_type}), <strong>or</strong> a legacy text item
+     * whose {@code source_type} is missing entirely.
+     *
+     * <p>Older versions of {@link org.opendataloader.pdf.json.JsonWriter} (and
+     * some external producers) wrote {@code item_type == "text"} without a
+     * {@code source_type} field. With the strict {@code source_type}-only
+     * filter those items were silently dropped, so catalog resolution would
+     * fall back to the printed TOC page number (e.g. the first chapter's
+     * {@code page_num} stayed at {@code 1} instead of resolving to the real
+     * physical page {@code 4}). The {@code item_type} guard below keeps
+     * non-text items (tables, images) out of the candidate pool even when
+     * {@code source_type} is absent.</p>
+     */
+    private static boolean isParagraphOrHeadingItem(Map<String, Object> item) {
+        Object sourceTypeObj = item.get(JsonName.SOURCE_TYPE);
+        if (JsonName.SOURCE_TYPE_PARAGRAPH.equals(sourceTypeObj)
+                || JsonName.SOURCE_TYPE_HEADING.equals(sourceTypeObj)) {
+            return true;
+        }
+        return sourceTypeObj == null
+                && "text".equals(item.get(JsonName.ITEM_TYPE));
+    }
+
     private static List<JsonPageRange> detectJsonRanges(List<JsonPageTocInfo> pageInfos) {
         List<JsonPageRange> ranges = new ArrayList<>();
         JsonPageRange current = null;
@@ -1463,12 +1489,7 @@ public class CatalogBookmarkProcessor {
                 continue;
             }
             for (Map<String, Object> item : items) {
-                if (!isTextItem(item)) {
-                    continue;
-                }
-                String sourceType = (String) item.get(JsonName.SOURCE_TYPE);
-                if (!JsonName.SOURCE_TYPE_HEADING.equals(sourceType)
-                        && !JsonName.SOURCE_TYPE_PARAGRAPH.equals(sourceType)) {
+                if (!isParagraphOrHeadingItem(item)) {
                     continue;
                 }
                 String itemText = getJsonItemFullText(item);
@@ -1623,12 +1644,7 @@ public class CatalogBookmarkProcessor {
                 MatchQuality bestQuality = null;
                 int bestRelatedId = 0;
                 for (Map<String, Object> item : items) {
-                    if (!isTextItem(item)) {
-                        continue;
-                    }
-                    String sourceType = (String) item.get(JsonName.SOURCE_TYPE);
-                    if (!JsonName.SOURCE_TYPE_HEADING.equals(sourceType)
-                            && !JsonName.SOURCE_TYPE_PARAGRAPH.equals(sourceType)) {
+                    if (!isParagraphOrHeadingItem(item)) {
                         continue;
                     }
                     String itemText = getJsonItemFullText(item);
@@ -1732,12 +1748,7 @@ public class CatalogBookmarkProcessor {
         int bestRelatedId = 0;
         MatchQuality bestQuality = null;
         for (Map<String, Object> item : items) {
-            if (!isTextItem(item)) {
-                continue;
-            }
-            String sourceType = (String) item.get(JsonName.SOURCE_TYPE);
-            if (!JsonName.SOURCE_TYPE_HEADING.equals(sourceType)
-                    && !JsonName.SOURCE_TYPE_PARAGRAPH.equals(sourceType)) {
+            if (!isParagraphOrHeadingItem(item)) {
                 continue;
             }
             String itemText = getJsonItemFullText(item);
