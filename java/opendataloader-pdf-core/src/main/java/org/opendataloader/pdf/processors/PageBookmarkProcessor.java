@@ -102,6 +102,24 @@ public class PageBookmarkProcessor {
     /** Chinese full-stop / period "\u3002". */
     private static final char CHINESE_PERIOD = '。';
 
+    /**
+     * Maximum allowed length (in Java chars) of an "attachment" bookmark
+     * entry's full text. Real attachment titles (e.g. `附件一`) are
+     * short; an entry longer than this is not treated as a L1 attachment.
+     */
+    private static final int MAX_ATTACHMENT_TEXT_LENGTH = 20;
+
+    /** Prefix that triggers L1 "attachment" detection on the first text item of a page. */
+    private static final String ATTACHMENT_PREFIX = "附件";
+
+    /**
+     * Sentinel template key assigned to attachment candidates so they can be
+     * identified by {@link Candidate#isAttachment} in the anchor loop and
+     * skipped by template selection.
+     */
+    private static final TemplateKey ATTACHMENT_TEMPLATE_KEY =
+        new TemplateKey("ATTACHMENT_MARKER", NumberSystem.ARABIC);
+
     private enum NumberSystem {
         ARABIC, CHINESE
     }
@@ -190,25 +208,36 @@ public class PageBookmarkProcessor {
         final int relatedId;
         final int pageLastId;
         final boolean pageIdOneIsText;
+        /** True when this candidate represents a L1 "attachment" bookmark. */
+        final boolean isAttachment;
 
         Candidate(int pageIndex, String text, String fullText, boolean singleLine,
                   TemplateKey templateKey, int value,
                   double fontSize, double leftX, double topY) {
             this(pageIndex, text, fullText, singleLine, templateKey, value,
-                fontSize, leftX, topY, 0, 0, false);
+                fontSize, leftX, topY, 0, 0, false, false);
         }
 
         Candidate(int pageIndex, String text, String fullText, boolean singleLine,
                   TemplateKey templateKey, int value,
                   double fontSize, double leftX, double topY, int relatedId) {
             this(pageIndex, text, fullText, singleLine, templateKey, value,
-                fontSize, leftX, topY, relatedId, 0, false);
+                fontSize, leftX, topY, relatedId, 0, false, false);
         }
 
         Candidate(int pageIndex, String text, String fullText, boolean singleLine,
                   TemplateKey templateKey, int value,
                   double fontSize, double leftX, double topY, int relatedId,
                   int pageLastId, boolean pageIdOneIsText) {
+            this(pageIndex, text, fullText, singleLine, templateKey, value,
+                fontSize, leftX, topY, relatedId, pageLastId, pageIdOneIsText,
+                false);
+        }
+
+        Candidate(int pageIndex, String text, String fullText, boolean singleLine,
+                  TemplateKey templateKey, int value,
+                  double fontSize, double leftX, double topY, int relatedId,
+                  int pageLastId, boolean pageIdOneIsText, boolean isAttachment) {
             this.pageIndex = pageIndex;
             this.text = text;
             this.fullText = fullText;
@@ -221,6 +250,7 @@ public class PageBookmarkProcessor {
             this.relatedId = relatedId;
             this.pageLastId = pageLastId;
             this.pageIdOneIsText = pageIdOneIsText;
+            this.isAttachment = isAttachment;
         }
     }
 
@@ -272,7 +302,18 @@ public class PageBookmarkProcessor {
             return Collections.emptyList();
         }
 
-        return buildBookmarksFromCandidates(collectCandidates(contents));
+        int catalogStart = StaticLayoutContainers.getCatalogBookmarkStartPage();
+        int catalogEnd = StaticLayoutContainers.getCatalogBookmarkEndPage();
+        if (catalogStart < 0 || catalogEnd < catalogStart) {
+            catalogStart = -1;
+            catalogEnd = -1;
+        }
+        List<Candidate> candidates = collectCandidates(contents);
+        List<Candidate> attachments = collectAttachmentCandidates(contents, catalogStart, catalogEnd);
+        if (!attachments.isEmpty()) {
+            candidates.addAll(attachments);
+        }
+        return buildBookmarksFromCandidates(candidates);
     }
 
     /**
@@ -291,7 +332,12 @@ public class PageBookmarkProcessor {
         if (data == null || data.isEmpty()) {
             return Collections.emptyList();
         }
-        return buildBookmarksFromCandidates(collectJsonCandidates(data, catalogStartPage, catalogEndPage));
+        List<Candidate> candidates = collectJsonCandidates(data, catalogStartPage, catalogEndPage);
+        List<Candidate> attachments = collectAttachmentCandidatesFromJson(data, catalogStartPage, catalogEndPage);
+        if (!attachments.isEmpty()) {
+            candidates.addAll(attachments);
+        }
+        return buildBookmarksFromCandidates(candidates);
     }
 
     /**
@@ -624,6 +670,34 @@ public class PageBookmarkProcessor {
 
         TemplateKey selectedTemplate = selectTemplateForLevel(candidates, start, end, level, usedTemplates);
         if (selectedTemplate == null) {
+            // At L1, fall back to emitting any attachment candidates in range
+            // even when no regular numbered template passes selection. This
+            // covers documents where the only L1 anchors are "附件" entries
+            // (no chapter spine at all) or where a lone attachment page sits
+            // outside any regular chapter range.
+            if (level == 1) {
+                List<Candidate> onlyAttachments = new ArrayList<>();
+                for (int i = start; i <= end; i++) {
+                    Candidate c = candidates.get(i);
+                    if (c.isAttachment) {
+                        onlyAttachments.add(c);
+                    }
+                }
+                if (onlyAttachments.isEmpty()) {
+                    return Collections.emptyList();
+                }
+                List<Bookmark> fallback = new ArrayList<>();
+                for (Candidate c : onlyAttachments) {
+                    int idx = candidates.indexOf(c);
+                    int childStart = idx + 1;
+                    int childEnd = end;
+                    List<Bookmark> children = extractLevel(candidates, childStart, childEnd, level + 1, usedTemplates);
+                    Bookmark bm = createBookmark(c);
+                    bm.getChildren().addAll(children);
+                    fallback.add(bm);
+                }
+                return fallback;
+            }
             return Collections.emptyList();
         }
 
@@ -652,6 +726,22 @@ public class PageBookmarkProcessor {
         cleanedIndices.sort(Comparator
             .comparingInt((Integer i) -> candidates.get(i).pageIndex)
             .thenComparing((Integer i) -> -candidates.get(i).topY));
+
+        // At L1, fold attachment candidates into the same anchor list so they
+        // get emitted as L1 bookmarks and properly bound the child ranges of
+        // neighbouring L1 anchors. Deeper levels never see attachments
+        // (selectTemplateForLevel skips them), so only L1 needs this merge.
+        if (level == 1) {
+            for (int i = start; i <= end; i++) {
+                Candidate c = candidates.get(i);
+                if (c.isAttachment) {
+                    cleanedIndices.add(i);
+                }
+            }
+            cleanedIndices.sort(Comparator
+                .comparingInt((Integer i) -> candidates.get(i).pageIndex)
+                .thenComparing((Integer i) -> -candidates.get(i).topY));
+        }
 
         List<Bookmark> bookmarks = new ArrayList<>();
         // Only level-1's selected template is propagated to deeper levels. L1
@@ -697,6 +787,11 @@ public class PageBookmarkProcessor {
         Map<TemplateKey, Group> groups = new HashMap<>();
         for (int i = start; i <= end; i++) {
             Candidate c = candidates.get(i);
+            // Attachment candidates never participate in template selection;
+            // they are anchored exclusively at L1 by the isAttachment flag.
+            if (c.isAttachment) {
+                continue;
+            }
             if (usedTemplates.contains(c.templateKey)) {
                 continue;
             }
@@ -903,6 +998,24 @@ public class PageBookmarkProcessor {
         }
         double periodRatio = (double) endsWithPeriod / total;
 
+        // Conservative guard: when the side that would be dropped contains
+        // value=1 (the structural anchor of a real heading chain), skip the
+        // filter rather than break the chain. The dropped minority is most
+        // often the value=1 entry that happens to end with an alternate
+        // terminator ("；", ":", etc.); losing it strands the rest of the
+        // chain and creates a misleading val=2 singleton downstream. The
+        // body-text-mimic case (the original motivation for this filter)
+        // typically drops middle/late entries whose values are not 1, so it
+        // still trips the filter normally.
+        if (periodRatio > PERIOD_FILTER_RATIO
+                && minorityContainsValueOne(candidates, true)) {
+            return candidates;
+        }
+        if ((total - endsWithPeriod) > total * PERIOD_FILTER_RATIO
+                && minorityContainsValueOne(candidates, false)) {
+            return candidates;
+        }
+
         List<Candidate> filtered;
         if (periodRatio > PERIOD_FILTER_RATIO) {
             // >80% end with period -> drop the minority that do NOT.
@@ -928,6 +1041,42 @@ public class PageBookmarkProcessor {
             return candidates; // no clear majority -> keep original
         }
         return filtered.isEmpty() ? candidates : filtered;
+    }
+
+    /**
+     * Returns {@code true} if the minority side of the period filter (the
+     * candidates that would be dropped) includes a candidate whose
+     * {@link Candidate#value} equals 1.
+     *
+     * <p>Used by the conservative guard in {@link #applyPeriodEndFilter} to
+     * detect the case where the structural anchor of a real heading chain is
+     * about to be filtered out. When that happens, the filter is skipped to
+     * preserve chain integrity; the value=1 anchor stays in the candidate set
+     * and downstream code (including the val≠1 orphan cleanup in
+     * {@code cleanCandidatesLocal}) handles any residue safely.</p>
+     *
+     * @param candidates        the full candidate list under consideration
+     * @param droppingNonPeriod when {@code true}, the minority side is the set
+     *                          of candidates whose {@code fullText} does NOT
+     *                          end with the Chinese period; when {@code false},
+     *                          it is the set whose {@code fullText} DOES end
+     *                          with the period
+     */
+    private static boolean minorityContainsValueOne(List<Candidate> candidates,
+                                                    boolean droppingNonPeriod) {
+        for (Candidate c : candidates) {
+            if (c.value != 1) {
+                continue;
+            }
+            String fullText = c.fullText;
+            boolean endsWithPeriod = fullText != null && !fullText.isEmpty()
+                && fullText.charAt(fullText.length() - 1) == CHINESE_PERIOD;
+            boolean inMinority = droppingNonPeriod ? !endsWithPeriod : endsWithPeriod;
+            if (inMinority) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -964,8 +1113,13 @@ public class PageBookmarkProcessor {
         // pattern. Filter the minority when one side strictly exceeds the
         // 80% threshold, and only when the candidate count is large enough
         // to make the ratio meaningful.
+        boolean periodFilterApplied = false;
         if (level >= 2 && sorted.size() >= MIN_CANDIDATES_FOR_PERIOD_FILTER) {
-            sorted = applyPeriodEndFilter(sorted);
+            List<Candidate> filtered = applyPeriodEndFilter(sorted);
+            if (filtered != sorted) {
+                periodFilterApplied = true;
+                sorted = filtered;
+            }
         }
 
         // Step 2: Group into consecutive runs. Each run is a maximal sequence
@@ -1032,6 +1186,28 @@ public class PageBookmarkProcessor {
         // items whose JSON ids are consecutive) and must not surface as page
         // bookmarks.
         chains.removeIf(chain -> isTocLikeGroup(flattenChain(chain)));
+
+        // Step 4.6: Drop singleton orphan chains whose sole candidate's value
+        // is not 1. The period-end filter at Step 1.5 may have eliminated the
+        // structural anchor (typically value=1) of an otherwise-valid heading
+        // chain, leaving a stranded value=2/3/... candidate. Such a candidate
+        // cannot stand alone as a real heading — its value chain is broken
+        // and the downstream TOC rules already removed any complete peers.
+        // Singletons with value=1 are kept because a standalone "1." heading
+        // is a legitimate pattern (e.g., a one-off bullet that opens a
+        // section) and is later absorbed by prependValueOneOrphansOntoValueTwoChains.
+        //
+        // This rule is gated on the period filter actually having changed the
+        // candidate list: legitimate single-children (e.g., a section with
+        // only one article, where the input never reached the
+        // MIN_CANDIDATES_FOR_PERIOD_FILTER threshold) must not be lost. Only
+        // orphans traceable to a destructive period filter pass are dropped.
+        if (level >= 2 && periodFilterApplied) {
+            chains.removeIf(chain ->
+                chain.size() == 1
+                && chain.get(0).size() == 1
+                && chain.get(0).get(0).value != 1);
+        }
 
         // Step 4.7: Recover orphaned "value=1" singletons by prepending them
         // onto chains that start at value=2. When the same template carries
@@ -1433,8 +1609,182 @@ public class PageBookmarkProcessor {
                 ));
             }
         }
+        return candidates;
+    }
+
+    /**
+     * Returns true when the trimmed {@code text} starts with the
+     * attachment prefix and is short enough to be a real attachment title.
+     */
+    private static boolean isAttachmentText(String text) {
+        if (text == null) {
+            return false;
+        }
+        String trimmed = text.trim();
+        return trimmed.startsWith(ATTACHMENT_PREFIX)
+            && trimmed.length() <= MAX_ATTACHMENT_TEXT_LENGTH;
+    }
+
+    /**
+     * Returns the first paragraph or heading in {@code pageContents}, or
+     * {@code null} when no such element exists. Iteration order matches
+     * document order, so the returned one is the visually first text
+     * element on the page.
+     */
+    private static IObject firstParagraphOrHeading(List<IObject> pageContents) {
+        for (IObject content : pageContents) {
+            if (content instanceof CustomSemanticParagraph
+                    || content instanceof SemanticHeading) {
+                return content;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Collects attachment candidates from the IObject pipeline. Skips
+     * catalog pages. For each remaining page, finds the first
+     * paragraph/heading (same source-type rule as
+     * {@link #collectCandidates}) and emits an attachment candidate when
+     * its first line satisfies {@link #isAttachmentText}.
+     */
+    private static List<Candidate> collectAttachmentCandidates(
+            List<List<IObject>> contents,
+            int catalogStartPage, int catalogEndPage) {
+        List<Candidate> candidates = new ArrayList<>();
+        boolean skipCatalogPages = catalogStartPage >= 0 && catalogEndPage >= catalogStartPage;
+        for (int pageIndex = 0; pageIndex < contents.size(); pageIndex++) {
+            if (skipCatalogPages && pageIndex >= catalogStartPage && pageIndex <= catalogEndPage) {
+                continue;
+            }
+            List<IObject> pageContents = contents.get(pageIndex);
+            if (pageContents == null) {
+                continue;
+            }
+            IObject firstText = firstParagraphOrHeading(pageContents);
+            if (firstText == null) {
+                continue;
+            }
+            String firstLine = extractFirstText(firstText);
+            if (firstLine == null) {
+                continue;
+            }
+            if (!isAttachmentText(firstLine)) {
+                continue;
+            }
+            List<String> allLines = extractAllLines(firstText);
+            String trimmed = allLines.isEmpty() ? firstLine.trim() : allLines.get(0).trim();
+            String fullText = allLines.isEmpty()
+                ? trimmed
+                : SmartTextJoiner.joinPieces(allLines).trim();
+            double fontSize = firstText instanceof org.verapdf.wcag.algorithms.entities.SemanticTextNode
+                ? ((org.verapdf.wcag.algorithms.entities.SemanticTextNode) firstText).getFontSize()
+                : 0.0;
+            candidates.add(new Candidate(
+                pageIndex,
+                trimmed,
+                fullText,
+                allLines.size() <= 1,
+                ATTACHMENT_TEMPLATE_KEY,
+                0,
+                fontSize,
+                firstText.getLeftX(),
+                firstText.getTopY(),
+                0, 0, false,
+                true
+            ));
+        }
         LOGGER.log(java.util.logging.Level.INFO,
-            "[PageBookmark] collected {0} JSON candidates (catalog pages skipped: {1}-{2})",
+            "[PageBookmark] collected {0} attachment candidates (catalog pages skipped: {1}-{2})",
+            new Object[]{candidates.size(),
+                skipCatalogPages ? catalogStartPage : -1,
+                skipCatalogPages ? catalogEndPage : -1});
+        return candidates;
+    }
+
+    /**
+     * Returns true when the JSON item is eligible for attachment scanning:
+     * its {@code source_type} is paragraph or heading, OR (backward-compat
+     * with older JSON that did not populate {@code source_type}) its
+     * {@code source_type} is missing and its {@code item_type} is "text".
+     */
+    private static boolean isJsonTextLikeItem(Map<String, Object> item) {
+        String sourceType = (String) item.get(JsonName.SOURCE_TYPE);
+        if (JsonName.SOURCE_TYPE_PARAGRAPH.equals(sourceType)
+                || JsonName.SOURCE_TYPE_HEADING.equals(sourceType)) {
+            return true;
+        }
+        if (sourceType == null) {
+            String itemType = (String) item.get(JsonName.ITEM_TYPE);
+            return "text".equals(itemType);
+        }
+        return false;
+    }
+
+    /**
+     * Collects attachment candidates from the JSON pipeline. Skips catalog
+     * pages. For each remaining page, finds the first item whose
+     * source_type is paragraph/heading (or backward-compat: item_type
+     * is "text"), and emits an attachment candidate when its first line
+     * satisfies {@link #isAttachmentText}.
+     */
+    private static List<Candidate> collectAttachmentCandidatesFromJson(
+            List<Map<String, Object>> data,
+            int catalogStartPage, int catalogEndPage) {
+        List<Candidate> candidates = new ArrayList<>();
+        boolean skipCatalogPages = catalogStartPage >= 0 && catalogEndPage >= catalogStartPage;
+        for (int pageIndex = 0; pageIndex < data.size(); pageIndex++) {
+            if (skipCatalogPages && pageIndex >= catalogStartPage && pageIndex <= catalogEndPage) {
+                continue;
+            }
+            Map<String, Object> page = data.get(pageIndex);
+            List<Map<String, Object>> items = (List<Map<String, Object>>) page.get(JsonName.ITEMS);
+            if (items == null) {
+                continue;
+            }
+            Map<String, Object> firstItem = null;
+            for (Map<String, Object> item : items) {
+                if (isJsonTextLikeItem(item)) {
+                    firstItem = item;
+                    break;
+                }
+            }
+            if (firstItem == null) {
+                continue;
+            }
+            List<String> allLines = collectJsonItemAllLines(firstItem);
+            if (allLines.isEmpty()) {
+                continue;
+            }
+            String trimmed = allLines.get(0).trim();
+            if (!isAttachmentText(trimmed)) {
+                continue;
+            }
+            String fullText = SmartTextJoiner.joinPieces(allLines).trim();
+            Object idObj = firstItem.get(JsonName.ID);
+            int relatedId = idObj instanceof Number ? ((Number) idObj).intValue() : 0;
+            double fontSize = getJsonItemFontSize(firstItem);
+            double leftX = getJsonItemDouble(firstItem, JsonName.X0);
+            // JSON y0 increases downward; negate so the existing
+            // descending-topY sort produces top-to-bottom reading order.
+            double topY = -getJsonItemDouble(firstItem, JsonName.Y0);
+            candidates.add(new Candidate(
+                pageIndex,
+                trimmed,
+                fullText,
+                allLines.size() == 1,
+                ATTACHMENT_TEMPLATE_KEY,
+                0,
+                fontSize,
+                leftX,
+                topY,
+                relatedId,
+                0, false,
+                true
+            ));
+        }
+        LOGGER.log(java.util.logging.Level.INFO,
+            "[PageBookmark] collected {0} JSON attachment candidates (catalog pages skipped: {1}-{2})",
             new Object[]{candidates.size(),
                 skipCatalogPages ? catalogStartPage : -1,
                 skipCatalogPages ? catalogEndPage : -1});
