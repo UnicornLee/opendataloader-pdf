@@ -1377,16 +1377,59 @@ public class DocumentProcessor {
             return false;
         }
         double pageArea = pageWidth * pageHeight;
-        double imageArea = 0.0;
+        double bigImageThreshold = 0.8 * pageArea;
+        double removeThreshold = 0.95 * pageArea;
+
+        // Step 1: collect ImageChunks whose area exceeds 80% of the page separately.
+        List<ImageChunk> bigImages = new ArrayList<>();
+        double maxTopY = Double.NEGATIVE_INFINITY;
+        double minBottomY = Double.POSITIVE_INFINITY;
+        double remainingImagesArea = 0.0;
         for (IObject content : pageContents) {
-            if (content instanceof ImageChunk) {
-                BoundingBox bbox = content.getBoundingBox();
-                if (bbox != null && !bbox.isEmpty()) {
-                    imageArea += bbox.getWidth() * bbox.getHeight();
-                }
+            BoundingBox bbox = content.getBoundingBox();
+            if (bbox == null || bbox.isEmpty()) {
+                continue;
             }
+            double area = bbox.getWidth() * bbox.getHeight();
+            if (content instanceof ImageChunk) {
+                if (area > bigImageThreshold) {
+                    bigImages.add((ImageChunk) content);
+                    continue;
+                }
+                remainingImagesArea += area;
+            }
+            maxTopY = Math.max(maxTopY, bbox.getTopY());
+            minBottomY = Math.min(minBottomY, bbox.getBottomY());
         }
-        return imageArea / pageArea > 0.8;
+
+        // Step 2: ratio of remaining elements (by vertical span: max topY - min bottomY) and
+        // remaining images (by area) relative to the page.
+        double remainingElementsHeight = (maxTopY == Double.NEGATIVE_INFINITY || minBottomY == Double.POSITIVE_INFINITY)
+                ? 0.0 : Math.max(0.0, maxTopY - minBottomY);
+        double remainingElementsRatio = remainingElementsHeight / pageHeight;
+        double remainingImagesRatio = remainingImagesArea / pageArea;
+
+        // Step 3: a page is image-dominant when, excluding a full-page scan image,
+        // almost nothing else covers the page (<= 40%), or when the remaining images
+        // alone cover more than 80% of the page.
+        boolean imageDominant = (remainingElementsRatio < 0.4 && !bigImages.isEmpty())
+                || remainingImagesRatio > 0.8;
+
+        // Step 4: when not image-dominant, drop ImageChunks covering more than 95%
+        // of the page so they are not treated as extractable content downstream.
+        if (!imageDominant) {
+            pageContents.removeIf(content ->
+                    content instanceof ImageChunk && getContentArea(content) > removeThreshold);
+        }
+        return imageDominant;
+    }
+
+    private static double getContentArea(IObject content) {
+        BoundingBox bbox = content.getBoundingBox();
+        if (bbox == null || bbox.isEmpty()) {
+            return 0.0;
+        }
+        return bbox.getWidth() * bbox.getHeight();
     }
 
     private static int[] countTextAndGarbage(IObject content) {
