@@ -32,5 +32,6 @@ public record PulsarProperties(
         @DefaultValue("") String ocrSendTopicName,
         @DefaultValue("") String ocrReceiveTopicName,
         @DefaultValue("1") int count,
-        @DefaultValue("1") int ocrCount) {
+        @DefaultValue("1") int ocrCount,
+        @DefaultValue("60") int ackTimeoutSeconds) {
 }

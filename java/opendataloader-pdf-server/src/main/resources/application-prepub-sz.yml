@@ -34,6 +34,7 @@ pulsar:
     ocr_send_topic_name: capital/pdf_parse/announcement_ocr_image_analysis_increment
     ocr_receive_topic_name: capital/pdf_parse/announcement_ocr_image_analysis_increment_result
     ocrCount: 2
+    ack_timeout_seconds: 60
 
 oss:
     temp_bucket_name: stock-temp-bucket
