@@ -341,6 +341,8 @@ public class PageBookmarkProcessor {
             return Collections.emptyList();
         }
 
+        Candidate anchorC = all.get(anchorIndex);
+
         // Recompute the ancestor templates exactly as the full-document path
         // does so deeper-level template selection matches it.
         TemplateKey levelOneTemplate = selectTemplateForLevel(
@@ -384,6 +386,136 @@ public class PageBookmarkProcessor {
         }
 
         return extractLevel(all, anchorIndex + 1, childEnd, level, usedTemplates);
+    }
+
+    /**
+     * Builds the immediate children of an anchor bookmark emitted at the given
+     * depth, but slices the candidate pool by an explicit {@code (page,
+     * relatedId)} range rather than by the next cleaned L1 sibling.
+     *
+     * <p>This is the building block used by the catalog L2/L3 completion path:
+     * the catalog knows exactly which sibling is the next one in its own tree
+     * (e.g. {@code 第四章 股東和股東會} → {@code 第一節 股東}, both on page 20 with
+     * {@code relatedId=1}/{@code relatedId=2}), so the slice between them must
+     * be derived from those two anchors, not from the next L1 page-candidate
+     * (which can be hundreds of pages away and would silently pull unrelated
+     * candidates into the catalog subtree).</p>
+     *
+     * <p>Slice rule (per the documented {@code [T, S)} adjacent-sibling contract):</p>
+     * <ul>
+     *   <li>T = anchor: {@code (anchorPage, anchorRelatedId)}</li>
+     *   <li>S = next sibling: {@code (nextPage, nextRelatedId)}; a value of
+     *       {@code null}/-1 means "open ended" (anchor is the last sibling)</li>
+     *   <li>A candidate C is in range iff:
+     *     <ul>
+     *       <li>{@code C.pageIndex+1 == T.page && C.relatedId > T.relatedId} (same page, after anchor), OR</li>
+     *       <li>{@code T.page < C.pageIndex+1 < S.page}, OR</li>
+     *       <li>{@code C.pageIndex+1 == S.page && C.relatedId < S.relatedId} (same page, before sibling)</li>
+     *     </ul>
+     *   </li>
+     *   <li>Within the range, only candidates whose template matches the
+     *       expected level set are kept: L2 accepts {@code {第#节, 第#条}}, L3
+     *       accepts {@code {第#条}}. This is what filters out the
+     *       body-paragraph {@code （#）} residue that previously leaked into
+     *       the catalog tree.</li>
+     * </ul>
+     *
+     * <p>The slice is taken from the raw (pre-cleaned) candidate set so it is
+     * deterministic and independent of {@link #extractChildrenForAnchor}'s
+     * template-selection heuristics; each accepted candidate becomes a fresh
+     * {@link Bookmark} via {@link #createBookmark(Candidate)} and is returned
+     * in reading order.</p>
+     *
+     * @param data per-page JSON data array
+     * @param catalogStartPage 0-based inclusive start of catalog page range, or -1
+     * @param catalogEndPage 0-based inclusive end of catalog page range, or -1
+     * @param anchorPage 1-based page_num of the catalog anchor (T)
+     * @param anchorRelatedId related_id of the catalog anchor (T)
+     * @param nextPage 1-based page_num of the next catalog sibling (S); -1 if no sibling
+     * @param nextRelatedId related_id of the next catalog sibling (S); ignored if {@code nextPage < 0}
+     * @param level depth at which the children are emitted (2 or 3)
+     * @return freshly built child bookmarks of the anchor, possibly empty
+     */
+    public static List<Bookmark> extractChildrenByRange(
+            List<Map<String, Object>> data,
+            int catalogStartPage, int catalogEndPage,
+            int anchorPage, int anchorRelatedId,
+            int nextPage, int nextRelatedId,
+            int level) {
+        if (data == null || data.isEmpty() || level < 2 || level > 3) {
+            return Collections.emptyList();
+        }
+        List<Candidate> all = collectJsonCandidates(data, catalogStartPage, catalogEndPage);
+        if (all.isEmpty()) {
+            return Collections.emptyList();
+        }
+        all.sort(Comparator
+            .comparingInt((Candidate c) -> c.pageIndex)
+            .thenComparing((Candidate c) -> -c.topY));
+
+        // Level-2 accepts both 第#节 and 第#条 (some catalogs promote one or the
+        // other depending on the document), level-3 narrows to 第#条 only.
+        Set<String> acceptedTemplates = new HashSet<>();
+        if (level == 2) {
+            acceptedTemplates.add(TEMPLATE_SECTION);
+            acceptedTemplates.add(TEMPLATE_ARTICLE);
+        } else {
+            acceptedTemplates.add(TEMPLATE_ARTICLE);
+        }
+
+        List<Candidate> inRange = new ArrayList<>();
+        for (Candidate c : all) {
+            int cPage = c.pageIndex + 1;
+            if (!isWithinSiblingRange(cPage, c.relatedId,
+                    anchorPage, anchorRelatedId, nextPage, nextRelatedId)) {
+                continue;
+            }
+            if (c.templateKey == null || !acceptedTemplates.contains(c.templateKey.template)) {
+                continue;
+            }
+            // Drop the anchor candidate itself; it sits at the lower bound
+            // exclusive by the half-open rule, but be defensive in case the
+            // catalog picked a (page, relatedId) pair that the JSON candidate
+            // did not produce (catalog stores its own relatedId).
+            if (cPage == anchorPage && c.relatedId == anchorRelatedId) {
+                continue;
+            }
+            inRange.add(c);
+        }
+
+        List<Bookmark> result = new ArrayList<>(inRange.size());
+        for (Candidate c : inRange) {
+            result.add(createBookmark(c));
+        }
+        return result;
+    }
+
+    /**
+     * Half-open range test for the {@code [T, S)} adjacent-sibling contract
+     * used by {@link #extractChildrenByRange}. Returns true when {@code (page,
+     * relatedId)} sits strictly after {@code T} and strictly before {@code S}
+     * in document order; when {@code S} is absent (nextPage < 0) every
+     * position after {@code T} is accepted.
+     */
+    private static boolean isWithinSiblingRange(int page, int relatedId,
+                                                  int anchorPage, int anchorRelatedId,
+                                                  int nextPage, int nextRelatedId) {
+        boolean afterAnchor;
+        if (page != anchorPage) {
+            afterAnchor = page > anchorPage;
+        } else {
+            afterAnchor = relatedId > anchorRelatedId;
+        }
+        if (!afterAnchor) {
+            return false;
+        }
+        if (nextPage < 0) {
+            return true;
+        }
+        if (page != nextPage) {
+            return page < nextPage;
+        }
+        return relatedId < nextRelatedId;
     }
 
     /**
