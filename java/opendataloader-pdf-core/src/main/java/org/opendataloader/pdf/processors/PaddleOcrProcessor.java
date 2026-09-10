@@ -14,6 +14,7 @@ import org.opendataloader.pdf.custom.dto.TextInOcrAnalysisResultDto;
 import org.opendataloader.pdf.custom.dto.TextInOcrDetailDto;
 import org.opendataloader.pdf.custom.utils.PaddleOcrResultUtils;
 import org.opendataloader.pdf.json.ObjectMapperHolder;
+import org.opendataloader.pdf.processors.StreamTableProcessor;
 
 import java.io.File;
 import java.io.IOException;
@@ -115,12 +116,13 @@ public class PaddleOcrProcessor {
     }
 
     public static void main(String[] args) {
-        File file = new File("D:\\Downloads\\opendataloader-pdf-cli-2.4.6\\file-5(无线表格).pdf");
-        String paddleUrl = "http://192.168.1.97:8088/layout-parsing";
+        String pdfPath = "D:\\Code\\JavaCode\\opendataloader-pdf\\docs\\pdf\\202609081788825839483050125.pdf";
+        String paddleUrl = "http://192.168.1.193:8088/layout-parsing";
         try {
-            TextInOcrAnalysisResultDto resultDto = getPaddleResponse(file, 0, paddleUrl);
+            File singlePageImageFile = StreamTableProcessor.extractSinglePageImage(pdfPath, 15);
+            TextInOcrAnalysisResultDto resultDto = getPaddleResponse(singlePageImageFile, 1, paddleUrl);
             PageItemResultDto pageItemResultDto = PaddleOcrResultUtils.generateJsonResultByTextInOcrAnalysisResultDto(
-                file, resultDto, 1000.0, 1000.0, 0);
+                singlePageImageFile, resultDto, 1000.0, 1000.0, 0);
             System.out.println(pageItemResultDto);
         } catch (IOException e) {
             e.printStackTrace();
