@@ -218,67 +218,97 @@ public class CatalogBookmarkProcessor {
      * Complements missing sub-bookmarks in the catalog tree by re-running the
      * page bookmark candidate pipeline below each catalog anchor.
      *
-     * <p>Only catalog nodes whose {@code page_num}/{@code related_id} anchor
-     * exists in the page bookmark tree are considered; front-matter entries with
-     * no page anchor (e.g. 本次发行概况 / 重要声明 / 目 录) are left untouched.
-     * A catalog L1 without children gets its L2 children re-derived at level 2;
-     * a catalog L2 without children gets its L3 children re-derived at level 3.
-     * Existing catalog children are preserved, so the catalog keeps its own
+     * <p>Sibling ranges are resolved from the catalog's own top-level list: a
+     * catalog L1 without children gets its L2 children re-derived from the
+     * half-open range {@code (this L1, next top-level catalog entry)}; a
+     * catalog L2 without children gets its L3 children re-derived from
+     * {@code (this L2, next sibling L2 of the same parent)}. Front-matter
+     * entries with no anchor (e.g. 本次发行概况 / 重要声明 / 目 录) are left
+     * untouched. When the catalog anchor is the last sibling at its level the
+     * slice is open-ended (no upper bound), matching the
+     * {@link PageBookmarkProcessor#extractChildrenByRange} contract.</p>
+     *
+     * <p>Existing catalog children are preserved, so the catalog keeps its own
      * detected L1/L2 structure and the tree never grows beyond three levels.
      * The slice source is the raw candidate set (before cleaning), so the
-     * appended nodes are freshly built objects independent of the page bookmark
-     * tree, yet node-for-node consistent with it.</p>
+     * appended nodes are freshly built objects independent of the page
+     * bookmark tree, yet node-for-node consistent with it.</p>
+     *
+     * <p>This pass used to depend on the page bookmark tree via
+     * {@code pageIndex.get(catalogTop)} and reuse the page tree's children as
+     * the catalog's children. That sliced by the next page-candidate L1 (which
+     * can be hundreds of pages away) instead of by the next <em>catalog</em>
+     * sibling, leaking unrelated body paragraphs into catalogs whose own
+     * subtree was already present-but-empty.</p>
      *
      * @param data per-page JSON data array
      * @param catalogStartPage 0-based inclusive start of catalog page range, or -1
      * @param catalogEndPage 0-based inclusive end of catalog page range, or -1
      * @param catalogBookmarks catalog bookmark roots, mutated in place
-     * @param pageBookmarks page bookmark roots used for anchor resolution
      */
     public static void fillCatalogChildrenFromPageData(
             List<Map<String, Object>> data,
             int catalogStartPage, int catalogEndPage,
-            List<Bookmark> catalogBookmarks,
-            List<Bookmark> pageBookmarks) {
+            List<Bookmark> catalogBookmarks) {
         if (data == null || data.isEmpty()
-                || catalogBookmarks == null || catalogBookmarks.isEmpty()
-                || pageBookmarks == null || pageBookmarks.isEmpty()) {
+                || catalogBookmarks == null || catalogBookmarks.isEmpty()) {
             return;
         }
 
-        Map<BookmarkKey, Bookmark> pageIndex = indexBookmarks(pageBookmarks);
         int complemented = 0;
 
-        for (Bookmark catalogTop : catalogBookmarks) {
-            Bookmark pageTop = pageIndex.get(new BookmarkKey(catalogTop));
-            if (pageTop == null || pageTop.getChildren().isEmpty()) {
-                continue;
-            }
-
-            if (catalogTop.getChildren().isEmpty()) {
-                // The catalog lost the whole subtree below this anchor: rebuild
-                // the L2 children from the anchor range.
-                List<Bookmark> built = PageBookmarkProcessor.extractChildrenForAnchor(
+        // Top-level pass: each top-level catalog entry may need its L2 subtree
+        // rebuilt from the candidate pool. The slice is bounded by the next
+        // top-level catalog entry (or open-ended if this is the last one).
+        for (int i = 0; i < catalogBookmarks.size(); i++) {
+            Bookmark catalogTop = catalogBookmarks.get(i);
+            List<Bookmark> topChildren = catalogTop.getChildren();
+            if (topChildren == null || topChildren.isEmpty()) {
+                Bookmark nextSibling = (i + 1 < catalogBookmarks.size())
+                    ? catalogBookmarks.get(i + 1) : null;
+                List<Bookmark> built = PageBookmarkProcessor.extractChildrenByRange(
                     data, catalogStartPage, catalogEndPage,
-                    anchorPage(catalogTop), anchorRelatedId(catalogTop), 2);
+                    anchorPage(catalogTop), anchorRelatedId(catalogTop),
+                    anchorPage(nextSibling), anchorRelatedId(nextSibling),
+                    2);
                 if (!built.isEmpty()) {
-                    catalogTop.getChildren().addAll(built);
+                    if (topChildren == null) {
+                        topChildren = new ArrayList<>();
+                        catalogTop.setChildren(topChildren);
+                    }
+                    topChildren.addAll(built);
                     complemented++;
                 }
+            }
+        }
+
+        // L3 pass: for every catalog L2 (existing or just-complemented) that
+        // still has no children, derive L3 from the candidate pool bounded by
+        // the next sibling L2 within the same parent.
+        for (Bookmark catalogTop : catalogBookmarks) {
+            List<Bookmark> catalogChildren = catalogTop.getChildren();
+            if (catalogChildren == null || catalogChildren.isEmpty()) {
                 continue;
             }
-
-            for (Bookmark catalogChild : catalogTop.getChildren()) {
-                Bookmark pageChild = pageIndex.get(new BookmarkKey(catalogChild));
-                if (pageChild == null || pageChild.getChildren().isEmpty()
-                        || !catalogChild.getChildren().isEmpty()) {
+            for (int j = 0; j < catalogChildren.size(); j++) {
+                Bookmark catalogChild = catalogChildren.get(j);
+                List<Bookmark> grandChildren = catalogChild.getChildren();
+                if (grandChildren != null && !grandChildren.isEmpty()) {
                     continue;
                 }
-                List<Bookmark> built = PageBookmarkProcessor.extractChildrenForAnchor(
+                Bookmark nextSibling = (j + 1 < catalogChildren.size())
+                    ? catalogChildren.get(j + 1) : null;
+                List<Bookmark> built = PageBookmarkProcessor.extractChildrenByRange(
                     data, catalogStartPage, catalogEndPage,
-                    anchorPage(catalogChild), anchorRelatedId(catalogChild), 3);
+                    anchorPage(catalogChild), anchorRelatedId(catalogChild),
+                    anchorPage(nextSibling), anchorRelatedId(nextSibling),
+                    3);
                 if (!built.isEmpty()) {
-                    catalogChild.getChildren().addAll(built);
+                    if (grandChildren == null) {
+                        grandChildren = new ArrayList<>();
+                        catalogChild.setChildren(grandChildren);
+                    }
+                    grandChildren.addAll(built);
                     complemented++;
                 }
             }
