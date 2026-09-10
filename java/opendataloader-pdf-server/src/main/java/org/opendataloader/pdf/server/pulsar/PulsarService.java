@@ -54,6 +54,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 /**
@@ -72,6 +73,16 @@ import java.util.stream.Stream;
  * the handler still sends the result message with {@code jsonUrl=""} and
  * acknowledges the inbound message. There is no negative-acknowledge path -
  * downstream observes the empty {@code jsonUrl} and reacts accordingly.</p>
+ *
+ * <p>Hung-consumer safeguard: every consumer is built with
+ * {@code receiverQueueSize=1} plus {@code ackTimeout} (tunable via
+ * {@code pulsar.ack_timeout_seconds}, default 60s). If a consumer receives a
+ * message but neither acknowledges nor negatively acknowledges it within
+ * the timeout - e.g. due to a deadlock, blocking IO, or the JVM being stuck
+ * without the connection dropping - the broker automatically redelivers
+ * the message. This does NOT change the failure semantics above: the
+ * auto-redelivery only fires when the consumer is genuinely hung; normal
+ * processing still completes via {@code consumer.acknowledge(msg)}.</p>
  */
 @Slf4j
 @Component
@@ -142,6 +153,7 @@ public class PulsarService {
                             .subscriptionName(subscriptionName(pulsarProperties.receiveTopicName()))
                             .subscriptionType(SubscriptionType.Shared)
                             .receiverQueueSize(1)
+                            .ackTimeout(pulsarProperties.ackTimeoutSeconds(), TimeUnit.SECONDS)
                             .subscribe();
                     receiveConsumers.add(consumer);
                     receiveThreads.add(startThread("pulsar-receive-" + i,
@@ -163,6 +175,7 @@ public class PulsarService {
                             .subscriptionName(subscriptionName(pulsarProperties.ocrReceiveTopicName()))
                             .subscriptionType(SubscriptionType.Shared)
                             .receiverQueueSize(1)
+                            .ackTimeout(pulsarProperties.ackTimeoutSeconds(), TimeUnit.SECONDS)
                             .subscribe();
                     ocrReceiveConsumers.add(consumer);
                     ocrReceiveThreads.add(startThread("pulsar-ocr-receive-" + i,
