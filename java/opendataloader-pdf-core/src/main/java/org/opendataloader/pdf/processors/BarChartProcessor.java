@@ -47,7 +47,7 @@ import java.util.regex.Pattern;
  * {@link #COLLECTION_MARGIN} growth would crop them away.
  *
  * <p>After the growth loop the region is therefore expanded by
- * {@link #expandToChartRegion}:
+ * {@link #expandToChartRegion}:</p>
  * <ul>
  *   <li><b>axes</b> — thin, long shapes attached to the left / bottom edge of
  *       the plot area;</li>
@@ -58,7 +58,7 @@ import java.util.regex.Pattern;
  *   <li><b>legend</b> — a run of small equally-sized colour swatches next to
  *       the plot area plus the labels drawn on their row / column.</li>
  * </ul>
- * Everything that is pulled into the screenshot is removed from the page
+ * <p>Everything that is pulled into the screenshot is removed from the page
  * contents, so the image covers plot + axes + tick / category labels + legend —
  * and nothing else: chart titles, unit captions ("单位：万元") and source notes
  * ("数据来源：…") stay in the text flow.</p>
