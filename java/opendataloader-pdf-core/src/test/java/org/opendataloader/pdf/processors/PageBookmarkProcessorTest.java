@@ -142,16 +142,18 @@ public class PageBookmarkProcessorTest {
         // Level 1: chapter, larger font, smaller leftX
         // Level 2: section, medium font, indented
         // Level 3: article, smaller font, more indented
+        // Each parent restarts its numbering at 1: a parent's children must
+        // number from 1 and be strictly consecutive.
         List<List<IObject>> contents = singlePage(
                 createParagraph("第1章 总则", 0, 50, 700, 680, 20),
                 createParagraph("第1节 一般规定", 0, 60, 650, 630, 16),
                 createParagraph("第1条 条款一", 0, 70, 620, 600, 14),
                 createParagraph("第2条 条款二", 0, 70, 590, 570, 14),
                 createParagraph("第2节 特别规定", 0, 60, 560, 540, 16),
-                createParagraph("第3条 条款三", 0, 70, 530, 510, 14),
+                createParagraph("第1条 条款三", 0, 70, 530, 510, 14),
                 createParagraph("第2章 分则", 0, 50, 480, 460, 20),
-                createParagraph("第3节 分则一般", 0, 60, 450, 430, 16),
-                createParagraph("第4条 条款四", 0, 70, 420, 400, 14));
+                createParagraph("第1节 分则一般", 0, 60, 450, 430, 16),
+                createParagraph("第1条 条款四", 0, 70, 420, 400, 14));
 
         List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
         Assertions.assertEquals(2, bookmarks.size(), "Expected two top-level chapters");
@@ -169,15 +171,15 @@ public class PageBookmarkProcessorTest {
         Bookmark section2 = chapter1.getChildren().get(1);
         Assertions.assertEquals("第2节 特别规定", section2.getText());
         Assertions.assertEquals(1, section2.getChildren().size());
-        Assertions.assertEquals("第3条 条款三", section2.getChildren().get(0).getText());
+        Assertions.assertEquals("第1条 条款三", section2.getChildren().get(0).getText());
 
         Bookmark chapter2 = bookmarks.get(1);
         Assertions.assertEquals("第2章 分则", chapter2.getText());
         Assertions.assertEquals(1, chapter2.getChildren().size());
         Bookmark section3 = chapter2.getChildren().get(0);
-        Assertions.assertEquals("第3节 分则一般", section3.getText());
+        Assertions.assertEquals("第1节 分则一般", section3.getText());
         Assertions.assertEquals(1, section3.getChildren().size());
-        Assertions.assertEquals("第4条 条款四", section3.getChildren().get(0).getText());
+        Assertions.assertEquals("第1条 条款四", section3.getChildren().get(0).getText());
     }
 
     @Test
@@ -197,6 +199,35 @@ public class PageBookmarkProcessorTest {
 
         List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
         Assertions.assertTrue(bookmarks.isEmpty(), "Single bookmark not starting at 1 should be dropped");
+    }
+
+    @Test
+    public void testChildNumberingMustRestartAtOneUnderEachParent() {
+        // A parent's children must number from 1 and be strictly consecutive.
+        // "第3节" continues the numbering of the previous chapter's sections,
+        // so inside "第2章" there is no 1-starting chain and it must not be
+        // emitted as a child, while "第1章" keeps its 1..2 section chain.
+        List<List<IObject>> contents = singlePage(
+                createParagraph("第1章 总则", 0, 50, 700, 680, 20),
+                createParagraph("第1节 一般规定", 0, 60, 650, 630, 16),
+                createParagraph("第2节 特别规定", 0, 60, 560, 540, 16),
+                createParagraph("第2章 分则", 0, 50, 480, 460, 20),
+                createParagraph("第3节 分则一般", 0, 60, 450, 430, 16));
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
+        Assertions.assertEquals(2, bookmarks.size(), "Expected two top-level chapters");
+
+        Bookmark chapter1 = bookmarks.get(0);
+        Assertions.assertEquals("第1章 总则", chapter1.getText());
+        Assertions.assertEquals(2, chapter1.getChildren().size(),
+                "Chapter 1 restarts at 第1节 and keeps both sections");
+        Assertions.assertEquals("第1节 一般规定", chapter1.getChildren().get(0).getText());
+        Assertions.assertEquals("第2节 特别规定", chapter1.getChildren().get(1).getText());
+
+        Bookmark chapter2 = bookmarks.get(1);
+        Assertions.assertEquals("第2章 分则", chapter2.getText());
+        Assertions.assertTrue(chapter2.getChildren().isEmpty(),
+                "第3节 continues a previous chapter's numbering and must be dropped");
     }
 
     @Test
@@ -447,7 +478,7 @@ public class PageBookmarkProcessorTest {
                 createParagraph("第1章 A", 0, 50, 700, 690, 20),
                 createParagraph("一、B", 0, 60, 680, 670, 18),
                 createParagraph("第2章 C", 0, 50, 660, 650, 20),
-                createParagraph("二、D", 0, 60, 640, 630, 18),
+                createParagraph("一、D", 0, 60, 640, 630, 18),
                 createParagraph("第3章 E", 0, 50, 620, 610, 20));
 
         List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarks(contents);
@@ -459,7 +490,7 @@ public class PageBookmarkProcessorTest {
         Assertions.assertEquals(1, bookmarks.get(0).getChildren().size());
         Assertions.assertEquals("一、B", bookmarks.get(0).getChildren().get(0).getText());
         Assertions.assertEquals(1, bookmarks.get(1).getChildren().size());
-        Assertions.assertEquals("二、D", bookmarks.get(1).getChildren().get(0).getText());
+        Assertions.assertEquals("一、D", bookmarks.get(1).getChildren().get(0).getText());
         Assertions.assertTrue(bookmarks.get(2).getChildren().isEmpty());
     }
 
