@@ -457,7 +457,7 @@ public class TriageProcessor {
 
         /**
          * Checks if a large image is present (potential table/chart image).
-         * Requires both size (>= 11% of page) and aspect ratio (>= 1.7, wider than tall).
+         * Requires both size (&gt;= 11% of page) and aspect ratio (&gt;= 1.7, wider than tall).
          *
          * @return true if largest image meets size and aspect ratio criteria.
          */
@@ -618,7 +618,7 @@ public class TriageProcessor {
      * <p>Uses a conservative strategy that biases toward BACKEND when uncertain.
      * Signals are evaluated in priority order:
      * <ol>
-     *   <li>CID font extraction failure (replacement char ratio >= 30%)</li>
+     *   <li>CID font extraction failure (replacement char ratio &gt;= 30%)</li>
      *   <li>TableBorder presence (most reliable)</li>
      *   <li>Suspicious text patterns</li>
      *   <li>High LineChunk ratio</li>

@@ -902,7 +902,7 @@ public class Config {
     /**
      * Sets the minimum number of TOC-like lines required per page.
      *
-     * @param catalogBookmarkMinTocLines minimum TOC lines, must be >= 1
+     * @param catalogBookmarkMinTocLines minimum TOC lines, must be &gt;= 1
      * @throws IllegalArgumentException if the value is less than 1
      */
     public void setCatalogBookmarkMinTocLines(int catalogBookmarkMinTocLines) {
