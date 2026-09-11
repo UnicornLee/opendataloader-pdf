@@ -88,7 +88,8 @@ public class FlowchartProcessor {
         for (int i = 0; i < groupedShapeChunks.size(); i++) {
             List<IObject> group = groupedShapeChunks.get(i);
             if (skipped[i] || group == null || group.isEmpty()
-                    || BoundingBoxGroupUtils.containsBarChart(group)) {
+                    || BoundingBoxGroupUtils.containsBarChart(group)
+                    || !isStillOnPage(pageContents, group)) {
                 continue;
             }
             Cluster cluster = collectCluster(pageContents, group, pageNumber);
@@ -144,6 +145,25 @@ public class FlowchartProcessor {
                 pageContents.add(imageChunk);
             }
         }
+    }
+
+    /**
+     * Returns true when at least one shape of {@code shapeGroup} is still part
+     * of {@code pageContents}. {@link BarChartProcessor} runs first and replaces
+     * a chart by a single screenshot, which removes the chart's shapes (bars,
+     * axes, legend swatches) from the page. Such an already consumed group must
+     * not be evaluated again here — otherwise the freshly created bar-chart
+     * screenshot would be re-cropped (and duplicated) as a "flowchart".
+     */
+    private static boolean isStillOnPage(List<IObject> pageContents, List<IObject> shapeGroup) {
+        for (IObject shape : shapeGroup) {
+            for (IObject content : pageContents) {
+                if (content == shape) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static Cluster collectCluster(List<IObject> pageContents, List<IObject> shapeGroup, int pageNumber) {
