@@ -36,7 +36,7 @@ import java.util.List;
  * <p>
  * Algorithm overview:
  * <ol>
- *   <li>Pre-mask: Identify cross-layout elements (width > beta * maxWidth, overlaps >= 2)</li>
+ *   <li>Pre-mask: Identify cross-layout elements (width &gt; beta * maxWidth, overlaps &gt;= 2)</li>
  *   <li>Compute density ratio to determine split direction preference</li>
  *   <li>Recursive segmentation with adaptive XY/YX-Cut</li>
  *   <li>Merge cross-layout elements at appropriate positions</li>
