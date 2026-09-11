@@ -892,7 +892,12 @@ public class CatalogBookmarkProcessor {
             return;
         }
 
-        // 1. Prefix-less entries at the beginning and end are L1.
+        // 1. Prefix-less entries at the beginning and end are L1, but only when
+        //    they sit at the top level (no indentation). Indented trailing/leading
+        //    entries keep their indentation-derived level, otherwise genuinely
+        //    indented sub-items (e.g. "问题N.", which is not a recognized prefix)
+        //    that happen to follow the last prefixed L1 would be wrongly promoted
+        //    to L1. The L1 leftX is the smallest leftX across all candidates.
         int firstPrefixIndex = -1;
         int lastPrefixIndex = -1;
         for (int i = 0; i < n; i++) {
@@ -904,11 +909,16 @@ public class CatalogBookmarkProcessor {
             }
         }
         if (firstPrefixIndex >= 0) {
+            double l1LeftX = candidates.stream().mapToDouble(c -> c.leftX).min().orElse(0.0);
             for (int i = 0; i < firstPrefixIndex; i++) {
-                levels[i] = 1;
+                if (Math.abs(candidates.get(i).leftX - l1LeftX) < 2.0) {
+                    levels[i] = 1;
+                }
             }
             for (int i = lastPrefixIndex + 1; i < n; i++) {
-                levels[i] = 1;
+                if (Math.abs(candidates.get(i).leftX - l1LeftX) < 2.0) {
+                    levels[i] = 1;
+                }
             }
         }
 

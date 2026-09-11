@@ -56,9 +56,15 @@ import java.util.logging.Logger;
  *
  * <p>Within each parent range, the next level is selected by visual hierarchy
  * (larger font / smaller left indentation = higher level) and consecutive-number
- * validation. For the first level only, a right-aligned chapter-like group
- * (第*章/第*节/第*条) may be promoted to top level when several such groups
- * coexist.</p>
+ * validation. A parent's children must number from 1 and be strictly
+ * consecutive (no skipped numbers), at every level. For the first level only, a
+ * right-aligned chapter-like group (第*章/第*节/第*条) may be promoted to top
+ * level when several such groups coexist.</p>
+ *
+ * <p>Below the first level the period-end consistency filter is not applied
+ * destructively: the level is evaluated twice, once with the filter and once
+ * without it, and the richer outcome is kept (see
+ * {@link #preferUnfilteredSelection}).</p>
  */
 public class PageBookmarkProcessor {
 
@@ -654,7 +660,65 @@ public class PageBookmarkProcessor {
             .comparingInt((Candidate c) -> c.pageIndex)
             .thenComparing((Candidate c) -> -c.topY));
 
+        // Drop templates whose numbering never reaches 1 anywhere in the
+        // document. Such a template is not a heading spine; this runs once,
+        // before any level selection, and applies to every template.
+        discardTemplatesNotStartingAtOne(candidates);
+        if (candidates.isEmpty()) {
+            return Collections.emptyList();
+        }
+
         return extractLevel(candidates, 0, candidates.size() - 1, 1, Collections.emptySet());
+    }
+
+    /**
+     * Removes every candidate whose template (prefix + number system) never
+     * reaches value 1 anywhere in the document.
+     *
+     * <p>A numbered sequence must start at 1: a template that only ever yields
+     * values 2, 3, ... is not a heading spine but body text that merely mimics
+     * a numbering prefix. Such templates are dropped entirely, before any level
+     * selection, for every template at every level. A template that does reach
+     * 1 but contains a gap (e.g. {@code 1, 2, 5}) is kept here — the gap is
+     * resolved downstream by the widest-strictly-consecutive-chain selection,
+     * which never emits a skipped number, because dropping such a template
+     * would also discard the valid {@code 1..2} prefix it contains.</p>
+     *
+     * <p>Example: a lone {@code 2、以上案件涉及金额…} body note whose
+     * {@code 1、…} sibling was never recognized as a candidate (it is prefixed
+     * by "注：") leaves the bare-number template with the single value 2. Even
+     * though such a template is already rejected as an L1 spine by
+     * {@link #isValidGroup}, the old per-range logic still let it be selected
+     * as an L2 child inside the parent range that contained it, producing a
+     * bogus sub-heading. Removing the template up front closes that path while
+     * leaving legitimate cross-parent continuations (e.g. {@code 第3节} under a
+     * later chapter, whose template does reach 1 somewhere) intact.</p>
+     *
+     * <p>Attachment candidates use a sentinel template and are never dropped
+     * here; they are anchored at L1 by {@link Candidate#isAttachment}.</p>
+     */
+    private static void discardTemplatesNotStartingAtOne(List<Candidate> candidates) {
+        Map<TemplateKey, Set<Integer>> valuesByTemplate = new HashMap<>();
+        for (Candidate candidate : candidates) {
+            if (candidate.isAttachment || candidate.templateKey == null) {
+                continue;
+            }
+            valuesByTemplate
+                .computeIfAbsent(candidate.templateKey, key -> new HashSet<>())
+                .add(candidate.value);
+        }
+
+        Set<TemplateKey> invalidTemplates = new HashSet<>();
+        for (Map.Entry<TemplateKey, Set<Integer>> entry : valuesByTemplate.entrySet()) {
+            if (!entry.getValue().contains(1)) {
+                invalidTemplates.add(entry.getKey());
+            }
+        }
+
+        if (!invalidTemplates.isEmpty()) {
+            candidates.removeIf(candidate -> !candidate.isAttachment
+                && invalidTemplates.contains(candidate.templateKey));
+        }
     }
 
     /**
@@ -701,31 +765,28 @@ public class PageBookmarkProcessor {
             return Collections.emptyList();
         }
 
-        List<Candidate> selectedCandidates = new ArrayList<>();
-        for (int i = start; i <= end; i++) {
-            Candidate c = candidates.get(i);
-            if (selectedTemplate.equals(c.templateKey)) {
-                selectedCandidates.add(c);
+        // Collect the anchors for the selected template. The period-end filter is
+        // destructive — it drops the period-end minority before the value chains
+        // are built, which can split a sequence and leave a degenerate one-entry
+        // child list — so at L2+ the same level is evaluated once more with the
+        // filter disabled and the better of the two outcomes is kept.
+        List<Integer> cleanedIndices =
+            childAnchorIndices(candidates, start, end, level, selectedTemplate, true);
+        if (level >= 2) {
+            TemplateKey unfilteredTemplate =
+                selectTemplateForLevel(candidates, start, end, level, usedTemplates, false);
+            if (unfilteredTemplate != null) {
+                List<Integer> unfilteredIndices =
+                    childAnchorIndices(candidates, start, end, level, unfilteredTemplate, false);
+                if (preferUnfilteredSelection(unfilteredIndices, cleanedIndices)) {
+                    selectedTemplate = unfilteredTemplate;
+                    cleanedIndices = unfilteredIndices;
+                }
             }
         }
-
-        List<Candidate> cleaned = (level == 1)
-            ? cleanCandidates(selectedCandidates)
-            : cleanCandidatesLocal(selectedCandidates, level);
-        if (cleaned.isEmpty()) {
+        if (cleanedIndices.isEmpty()) {
             return Collections.emptyList();
         }
-
-        // Map cleaned candidates back to their original indices and order them by
-        // reading order so that child ranges are sliced correctly.
-        List<Integer> cleanedIndices = new ArrayList<>();
-        for (Candidate c : cleaned) {
-            int idx = candidates.indexOf(c);
-            cleanedIndices.add(idx);
-        }
-        cleanedIndices.sort(Comparator
-            .comparingInt((Integer i) -> candidates.get(i).pageIndex)
-            .thenComparing((Integer i) -> -candidates.get(i).topY));
 
         // At L1, fold attachment candidates into the same anchor list so they
         // get emitted as L1 bookmarks and properly bound the child ranges of
@@ -772,18 +833,81 @@ public class PageBookmarkProcessor {
     }
 
     /**
+     * Returns the original indices, in reading order, of the anchors obtained by
+     * cleaning the candidates that match {@code template} inside [start, end].
+     * At L1 the whole-document cleaner is used; at L2+ the local cleaner runs
+     * with the period-end consistency filter either enabled or disabled, so the
+     * same level can be materialised both ways.
+     */
+    private static List<Integer> childAnchorIndices(List<Candidate> candidates, int start, int end,
+                                                    int level, TemplateKey template,
+                                                    boolean applyPeriodFilter) {
+        if (template == null) {
+            return Collections.emptyList();
+        }
+        List<Candidate> selected = new ArrayList<>();
+        for (int i = start; i <= end; i++) {
+            Candidate c = candidates.get(i);
+            if (template.equals(c.templateKey)) {
+                selected.add(c);
+            }
+        }
+        List<Candidate> cleaned = (level == 1)
+            ? cleanCandidates(selected)
+            : cleanCandidatesLocal(selected, level, applyPeriodFilter);
+        List<Integer> indices = new ArrayList<>();
+        for (Candidate c : cleaned) {
+            indices.add(candidates.indexOf(c));
+        }
+        indices.sort(Comparator
+            .comparingInt((Integer i) -> candidates.get(i).pageIndex)
+            .thenComparing((Integer i) -> -candidates.get(i).topY));
+        return indices;
+    }
+
+    /**
+     * Decides whether the selection computed with the period-end filter
+     * <em>disabled</em> should replace the one computed with it enabled.
+     *
+     * <p>The filter exists to drop body paragraphs that merely mimic a numbering
+     * prefix, so the filtered selection is kept by default. It is replaced only
+     * when it collapsed to at most one child while the unfiltered selection
+     * yields a strictly richer sequence. That collapse is the signature of the
+     * filter breaking a legitimate chain: e.g. a cross-page continuation line
+     * carries no trailing "。" and is dropped as the minority, splitting
+     * "1,2,3" into "1" and "3"; the surviving lone "1" (or an empty result) then
+     * wins the level selection and surfaces as the parent's only child.</p>
+     */
+    private static boolean preferUnfilteredSelection(List<Integer> unfiltered, List<Integer> filtered) {
+        return unfiltered.size() > filtered.size() && filtered.size() <= 1;
+    }
+
+    /**
      * Selects the best template for the given level within the range
      * [start, end]. The best template is the one with the highest visual
      * hierarchy among templates that form a valid sequence.
      *
-     * <p>For level 1, the template must form a contiguous sequence starting at
-     * 1 across the whole document. For deeper levels, only a contiguous run
-     * within the current parent range is required; it may start at any value,
-     * which allows headings to continue their numbering across parent
-     * sections.</p>
+     * <p>At every level the selected template must form a contiguous sequence
+     * starting at 1. At level 1 the sequence spans the whole document; at
+     * deeper levels it must restart at 1 inside the current parent range, so a
+     * heading never continues an ancestor's or a sibling parent's numbering.
+     * Templates whose document-wide numbering never reaches 1 are discarded
+     * before any selection by {@link #discardTemplatesNotStartingAtOne}.</p>
      */
     private static TemplateKey selectTemplateForLevel(List<Candidate> candidates, int start, int end,
-                                                       int level, Set<TemplateKey> usedTemplates) {
+                                                      int level, Set<TemplateKey> usedTemplates) {
+        return selectTemplateForLevel(candidates, start, end, level, usedTemplates, true);
+    }
+
+    /**
+     * Overload of {@link #selectTemplateForLevel(List, int, int, int, Set)} that
+     * lets the caller disable the period-end consistency filter, so one level can
+     * be evaluated both with and without it (see
+     * {@link #preferUnfilteredSelection}).
+     */
+    private static TemplateKey selectTemplateForLevel(List<Candidate> candidates, int start, int end,
+                                                      int level, Set<TemplateKey> usedTemplates,
+                                                      boolean applyPeriodFilter) {
         Map<TemplateKey, Group> groups = new HashMap<>();
         for (int i = start; i <= end; i++) {
             Candidate c = candidates.get(i);
@@ -809,8 +933,8 @@ public class PageBookmarkProcessor {
                 }
                 cleaned = cleanCandidates(group.candidates);
             } else {
-                // Deeper levels: allow a local consecutive run starting anywhere.
-                cleaned = cleanCandidatesLocal(group.candidates, level);
+                // Deeper levels: require a local run that starts at 1 (Step 4.8).
+                cleaned = cleanCandidatesLocal(group.candidates, level, applyPeriodFilter);
                 if (cleaned.isEmpty()) {
                     continue;
                 }
@@ -864,6 +988,17 @@ public class PageBookmarkProcessor {
             if (countCmp != 0) {
                 return countCmp;
             }
+            // Numbering-style depth: a parenthesised style (（#）, (#), #）, #))
+            // is conventionally nested inside a bare or chapter style, so when
+            // everything else ties the shallower style wins. Without this, two
+            // same-sized groups in one range are separated only by indentation,
+            // which is noisy for wrapped body lines: e.g. under an attachment
+            // anchor the "（1）/（2）/（3）" sub-items of a body paragraph
+            // out-indented the "一．/二./三." sub-headings and won.
+            int styleCmp = Integer.compare(styleDepth(a.templateKey), styleDepth(b.templateKey));
+            if (styleCmp != 0) {
+                return styleCmp;
+            }
             int indentCmp = Double.compare(a.averageLeftX, b.averageLeftX);
             if (indentCmp != 0) {
                 return indentCmp;
@@ -876,6 +1011,38 @@ public class PageBookmarkProcessor {
         });
 
         return validGroups.get(0).templateKey;
+    }
+
+    /**
+     * A rough hierarchy prior for numbering styles, used only as a late
+     * tie-break (after font size, sparsity and candidate count) so that visual
+     * signals keep deciding first.
+     *
+     * <p>Chapter/article styles and bare styles ({@code 第#章/第#节/第#条},
+     * {@code #}, {@code #、}) are the shallow conventions; parenthesised styles
+     * ({@code （#）}, {@code (#)}) are almost always nested inside them, and
+     * closing-paren styles ({@code #）}, {@code #)}) are nested one step deeper
+     * again. Preference is therefore given to the smaller depth value.</p>
+     */
+    private static int styleDepth(TemplateKey key) {
+        if (key == null) {
+            return 0;
+        }
+        switch (key.template) {
+            case TEMPLATE_PAREN:
+            case TEMPLATE_ASCII_PAREN:
+                return 1;
+            case TEMPLATE_CLOSE_PAREN:
+            case TEMPLATE_CLOSE_ASCII_PAREN:
+                return 2;
+            case TEMPLATE_CHAPTER:
+            case TEMPLATE_SECTION:
+            case TEMPLATE_ARTICLE:
+            case TEMPLATE_NUMBER:
+            case TEMPLATE_CHINESE_COMMA_CANONICAL:
+            default:
+                return 0;
+        }
     }
 
     /**
@@ -1086,13 +1253,26 @@ public class PageBookmarkProcessor {
      * the chain whose value range is the widest. On ties, the chain whose
      * first candidate is on the earliest page wins (closest to the parent).
      *
-     * <p>Unlike {@link #cleanCandidates}, the run may start at any value,
-     * allowing headings to continue their numbering across parent sections.</p>
+     * <p>Unlike {@link #cleanCandidates}, which spans the whole document, the
+     * sequence is validated locally to the parent range; the start-at-1 and
+     * strictly-consecutive requirement is identical at every level (see Step
+     * 4.8), so a parent's children never continue another parent's numbering.</p>
      *
      * @param level depth at which the cleaning runs (1=L1, 2=L2, 3=L3);
      *              only L2+ applies the period-end consistency filter.
      */
     private static List<Candidate> cleanCandidatesLocal(List<Candidate> candidates, int level) {
+        return cleanCandidatesLocal(candidates, level, true);
+    }
+
+    /**
+     * Overload of {@link #cleanCandidatesLocal(List, int)} with an explicit
+     * period-end consistency filter switch, so callers can materialise the same
+     * level both with and without the filter (see
+     * {@link #preferUnfilteredSelection}).
+     */
+    private static List<Candidate> cleanCandidatesLocal(List<Candidate> candidates, int level,
+                                                        boolean applyPeriodFilter) {
         if (candidates.isEmpty()) {
             return Collections.emptyList();
         }
@@ -1113,13 +1293,8 @@ public class PageBookmarkProcessor {
         // pattern. Filter the minority when one side strictly exceeds the
         // 80% threshold, and only when the candidate count is large enough
         // to make the ratio meaningful.
-        boolean periodFilterApplied = false;
-        if (level >= 2 && sorted.size() >= MIN_CANDIDATES_FOR_PERIOD_FILTER) {
-            List<Candidate> filtered = applyPeriodEndFilter(sorted);
-            if (filtered != sorted) {
-                periodFilterApplied = true;
-                sorted = filtered;
-            }
+        if (applyPeriodFilter && level >= 2 && sorted.size() >= MIN_CANDIDATES_FOR_PERIOD_FILTER) {
+            sorted = applyPeriodEndFilter(sorted);
         }
 
         // Step 2: Group into consecutive runs. Each run is a maximal sequence
@@ -1187,28 +1362,6 @@ public class PageBookmarkProcessor {
         // bookmarks.
         chains.removeIf(chain -> isTocLikeGroup(flattenChain(chain)));
 
-        // Step 4.6: Drop singleton orphan chains whose sole candidate's value
-        // is not 1. The period-end filter at Step 1.5 may have eliminated the
-        // structural anchor (typically value=1) of an otherwise-valid heading
-        // chain, leaving a stranded value=2/3/... candidate. Such a candidate
-        // cannot stand alone as a real heading — its value chain is broken
-        // and the downstream TOC rules already removed any complete peers.
-        // Singletons with value=1 are kept because a standalone "1." heading
-        // is a legitimate pattern (e.g., a one-off bullet that opens a
-        // section) and is later absorbed by prependValueOneOrphansOntoValueTwoChains.
-        //
-        // This rule is gated on the period filter actually having changed the
-        // candidate list: legitimate single-children (e.g., a section with
-        // only one article, where the input never reached the
-        // MIN_CANDIDATES_FOR_PERIOD_FILTER threshold) must not be lost. Only
-        // orphans traceable to a destructive period filter pass are dropped.
-        if (level >= 2 && periodFilterApplied) {
-            chains.removeIf(chain ->
-                chain.size() == 1
-                && chain.get(0).size() == 1
-                && chain.get(0).get(0).value != 1);
-        }
-
         // Step 4.7: Recover orphaned "value=1" singletons by prepending them
         // onto chains that start at value=2. When the same template carries
         // both a leading "一、" entry (e.g. "一、审计报告") AND a sibling "一、"
@@ -1225,6 +1378,22 @@ public class PageBookmarkProcessor {
         // more competitive against the sibling value=1 sub-chain and recovering
         // the leading "一、" as the first L2 child of the parent section.
         prependValueOneOrphansOntoValueTwoChains(chains);
+
+        // Step 4.8: A parent's children must number from 1 and be strictly
+        // consecutive. Chains are already strictly consecutive by construction
+        // (Step 2 builds maximal +1 runs, Step 4 only abuts a group when
+        // previous.max + 1 == group.min), so requiring the first value to be 1
+        // makes every emitted sequence start at 1 and never skip a number, for
+        // every template at every level below L1. A range whose only candidates
+        // continue an ancestor's numbering therefore yields nothing: e.g. a
+        // lone "2、…" left over after its "1、…" sibling was never recognized as
+        // a candidate (it was prefixed by "注："), or a "第3节" whose "第1节"
+        // lived in a previous chapter. Running after Step 4.7 matters: a
+        // recovered value=1 orphan may legitimately complete a [2..N] chain
+        // into a valid [1..N] one, and only then is that chain kept.
+        chains.removeIf(chain -> chain.isEmpty()
+            || chain.get(0).isEmpty()
+            || chain.get(0).get(0).value != 1);
 
         // Step 5: Pick the chain with the widest value range. Tie-break by the
         // earliest start page of the chain's first candidate (closest to the
