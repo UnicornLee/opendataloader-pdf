@@ -37,7 +37,7 @@
         </appender>
     </springProfile>
 
-    <springProfile name="prod,prod-inc,prod-hk">
+    <springProfile name="prod-hjs,prod-hjsinc">
         <appender name="stash" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
             <destination>${log.stash.addresses}</destination>
             <keepAliveDuration>5 minutes</keepAliveDuration>
@@ -45,7 +45,20 @@
             <writeBufferSize>16384</writeBufferSize>
             <encoder class="net.logstash.logback.encoder.LogstashEncoder">
                 <includeCallerData>true</includeCallerData>
-                <customFields>{"type":"jetty_log","program":"opendataloader-pdf-server"}
+                <customFields>{"type":"jetty_log","program":"opendataloader-pdf-server-hjs"}
+                </customFields>
+            </encoder>
+        </appender>
+    </springProfile>
+    <springProfile name="prod,prod-inc">
+        <appender name="stash" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
+            <destination>${log.stash.addresses}</destination>
+            <keepAliveDuration>5 minutes</keepAliveDuration>
+            <reconnectionDelay>1 second</reconnectionDelay>
+            <writeBufferSize>16384</writeBufferSize>
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <includeCallerData>true</includeCallerData>
+                <customFields>{"type":"jetty_log","program":"opendataloader-pdf-server-hk"}
                 </customFields>
             </encoder>
         </appender>
