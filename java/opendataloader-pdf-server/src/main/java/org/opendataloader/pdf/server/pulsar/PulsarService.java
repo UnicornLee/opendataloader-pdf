@@ -83,6 +83,21 @@ import java.util.stream.Stream;
  * the message. This does NOT change the failure semantics above: the
  * auto-redelivery only fires when the consumer is genuinely hung; normal
  * processing still completes via {@code consumer.acknowledge(msg)}.</p>
+ *
+ * <p>Thread-survival safeguard: both consumer loops and both message handlers
+ * catch {@link Throwable} rather than {@code Exception}. {@code Error}s (e.g.
+ * {@link OutOfMemoryError}, {@link StackOverflowError}) are <em>not</em>
+ * {@code Exception} subclasses, so catching {@code Exception} alone let an
+ * {@code Error} escape the loop and silently terminate the daemon thread. That
+ * is unrecoverable on a Shared subscription: the dead thread's
+ * {@code Consumer} stays registered with the broker (so {@code consumers_count}
+ * still looks healthy) but nothing ever calls {@code receive()} or
+ * {@code acknowledge()} on it again - its in-flight message stays
+ * unacknowledged forever and one consumer slot is permanently lost (observed in
+ * production as "{@code N} messages never consumed" where {@code N} grows over
+ * time, one per killed thread; {@code ackTimeout} cannot recover it because no
+ * code path ever returns to that consumer). Catching {@code Throwable} keeps
+ * the thread alive and still lets the handler acknowledge the message.</p>
  */
 @Slf4j
 @Component
@@ -188,7 +203,7 @@ public class PulsarService {
             } else if (basicProperties.isOcr()) {
                 log.warn("pulsar.ocr_receive_topic_name is empty, ocr consumer not started");
             }
-        } catch (Exception e) {
+        } catch (Throwable e) {
             log.error("PulsarService failed to start, consumers/producers are disabled: {}",
                     e.getMessage(), e);
         }
@@ -224,7 +239,7 @@ public class PulsarService {
             try {
                 Message<byte[]> msg = consumer.receive();
                 handleReceiveMessage(consumer, msg);
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 if (!running) {
                     break;
                 }
@@ -282,7 +297,7 @@ public class PulsarService {
                     }
                 }
             }
-        } catch (Exception e) {
+        } catch (Throwable e) {
             log.error("handleReceiveMessage failed, businessId={}: {}", businessId, e.getMessage(), e);
         }
 
@@ -329,7 +344,7 @@ public class PulsarService {
             try {
                 Message<byte[]> msg = consumer.receive();
                 handleOcrReceiveMessage(consumer, msg);
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 if (!running) {
                     break;
                 }
@@ -369,7 +384,7 @@ public class PulsarService {
                 jsonUrl = rebuiltUrl == null ? "" : rebuiltUrl;
                 log.info("rebuild bookmarks success, businessId={}, jsonUrl={}", businessId, jsonUrl);
             }
-        } catch (Exception e) {
+        } catch (Throwable e) {
             log.error("handleOcrReceiveMessage failed, businessId={}: {}", businessId, e.getMessage(), e);
         }
 
@@ -435,7 +450,7 @@ public class PulsarService {
             log.info("send result message payload: {}", payload);
             sendProducer.send(payload.getBytes(StandardCharsets.UTF_8));
             log.info("send result message success, businessId={}, jsonUrl={}", businessId, jsonUrl);
-        } catch (Exception e) {
+        } catch (Throwable e) {
             log.error("send result message failed, businessId={}: {}", businessId, e.getMessage(), e);
         }
     }
@@ -457,7 +472,7 @@ public class PulsarService {
             log.info("send ocr message payload: {}", payload);
             ocrProducer.send(payload.getBytes(StandardCharsets.UTF_8));
             log.info("send ocr message success, jsonUrl={}", jsonUrl);
-        } catch (Exception e) {
+        } catch (Throwable e) {
             log.error("send ocr message failed, jsonUrl={}: {}", jsonUrl, e.getMessage(), e);
         }
     }
@@ -492,7 +507,7 @@ public class PulsarService {
             String bucketName = dot >= 0 ? host.substring(0, dot) : host;
             String objectKey = path.startsWith("/") ? path.substring(1) : path;
             return bucketName + "/" + objectKey;
-        } catch (Exception e) {
+        } catch (Throwable e) {
             return jsonUrl;
         }
     }
@@ -511,7 +526,7 @@ public class PulsarService {
             } else {
                 fullName = Path.of(path).getFileName().toString();
             }
-        } catch (Exception e) {
+        } catch (Throwable e) {
             fullName = Path.of(fileUrl).getFileName().toString();
         }
         String lower = fullName.toLowerCase(Locale.ROOT);
@@ -605,7 +620,7 @@ public class PulsarService {
         }
         try {
             consumer.acknowledge(msg);
-        } catch (Exception e) {
+        } catch (Throwable e) {
             log.error("acknowledge failed, businessId={}: {}", businessId, e.getMessage(), e);
         }
     }
@@ -616,7 +631,7 @@ public class PulsarService {
         }
         try {
             closeable.close();
-        } catch (Exception e) {
+        } catch (Throwable e) {
             log.warn("close {} failed: {}", name, e.getMessage());
         }
     }
