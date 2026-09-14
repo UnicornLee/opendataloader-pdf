@@ -691,6 +691,7 @@ public class DocumentProcessor {
                 List<List<IObject>> groupedShapeChunks = ShapeRecognizer.groupShapes(shapeChunks);
                 if (groupedShapeChunks != null && !groupedShapeChunks.isEmpty()) {
                     BarChartProcessor.processBarChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
+                    PieChartProcessor.processPieChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
                     FlowchartProcessor.processFlowchartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
                 }
                 if (paddleEnabled) {

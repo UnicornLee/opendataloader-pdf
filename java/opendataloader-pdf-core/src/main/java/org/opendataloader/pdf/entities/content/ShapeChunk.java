@@ -39,6 +39,8 @@ public class ShapeChunk extends InfoChunk {
     public static final String TYPE_RECTANGLE = "rectangle";
     /** A group of aligned filled rectangles forming a bar chart series. */
     public static final String TYPE_BAR_CHART = "bar_chart";
+    /** A pie chart: filled sectors sharing a common centre (the pie apex). */
+    public static final String TYPE_PIE_CHART = "pie_chart";
     /** Connected line segments forming a polyline / line chart. */
     public static final String TYPE_POLYLINE = "polyline";
     /** A single line segment that connects two shapes, typically an arrow. */
