@@ -1160,6 +1160,12 @@ public class JsonWriter {
                         block.getLines().forEach(line -> flat.addAll(line.getTextChunks()));
                     });
                 });
+            } else if (cellContent instanceof SemanticHeading) {
+                ((SemanticHeading) cellContent).getColumns().forEach(column -> {
+                    column.getBlocks().forEach(block -> {
+                        block.getLines().forEach(line -> flat.addAll(line.getTextChunks()));
+                    });
+                });
             } else {
                 flat.add(cellContent);
             }
