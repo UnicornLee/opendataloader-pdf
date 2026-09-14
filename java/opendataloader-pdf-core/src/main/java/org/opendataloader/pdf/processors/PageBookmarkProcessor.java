@@ -93,6 +93,15 @@ public class PageBookmarkProcessor {
     private static final int MAX_ENTRY_TEXT_LENGTH = 200;
 
     /**
+     * Minimum horizontal offset (in points) by which the first line of a page's
+     * opening multi-line paragraph must start further right than its second line
+     * for the paragraph to be considered first-line indented, i.e. body copy
+     * rather than a table-of-contents continuation (see
+     * {@link #isCrossPageAdjacent}).
+     */
+    private static final double FIRST_LINE_INDENT_THRESHOLD = 10.0;
+
+    /**
      * Filter threshold for the period-end consistency rule applied to L2/L3
      * candidates that share the same prefix template: keep the majority side
      * only when it holds strictly more than this fraction of candidates.
@@ -214,6 +223,16 @@ public class PageBookmarkProcessor {
         final int relatedId;
         final int pageLastId;
         final boolean pageIdOneIsText;
+        /**
+         * True when the first paragraph/heading of this candidate's page is a
+         * wrapped multi-line text whose first line is indented relative to its
+         * second line by at least {@value #FIRST_LINE_INDENT_THRESHOLD} points.
+         * Such an element is body copy that happens to start a page (the first
+         * line carries the paragraph's first-line indent), not a
+         * table-of-contents entry, so it must not bridge two pages into one
+         * "consecutive" run (see {@link #isCrossPageAdjacent}).
+         */
+        final boolean pageFirstTextIndentedWrap;
         /** True when this candidate represents a L1 "attachment" bookmark. */
         final boolean isAttachment;
 
@@ -221,29 +240,31 @@ public class PageBookmarkProcessor {
                   TemplateKey templateKey, int value,
                   double fontSize, double leftX, double topY) {
             this(pageIndex, text, fullText, singleLine, templateKey, value,
-                fontSize, leftX, topY, 0, 0, false, false);
+                fontSize, leftX, topY, 0, 0, false, false, false);
         }
 
         Candidate(int pageIndex, String text, String fullText, boolean singleLine,
                   TemplateKey templateKey, int value,
                   double fontSize, double leftX, double topY, int relatedId) {
             this(pageIndex, text, fullText, singleLine, templateKey, value,
-                fontSize, leftX, topY, relatedId, 0, false, false);
+                fontSize, leftX, topY, relatedId, 0, false, false, false);
         }
 
         Candidate(int pageIndex, String text, String fullText, boolean singleLine,
                   TemplateKey templateKey, int value,
                   double fontSize, double leftX, double topY, int relatedId,
-                  int pageLastId, boolean pageIdOneIsText) {
+                  int pageLastId, boolean pageIdOneIsText,
+                  boolean pageFirstTextIndentedWrap) {
             this(pageIndex, text, fullText, singleLine, templateKey, value,
                 fontSize, leftX, topY, relatedId, pageLastId, pageIdOneIsText,
-                false);
+                pageFirstTextIndentedWrap, false);
         }
 
         Candidate(int pageIndex, String text, String fullText, boolean singleLine,
                   TemplateKey templateKey, int value,
                   double fontSize, double leftX, double topY, int relatedId,
-                  int pageLastId, boolean pageIdOneIsText, boolean isAttachment) {
+                  int pageLastId, boolean pageIdOneIsText,
+                  boolean pageFirstTextIndentedWrap, boolean isAttachment) {
             this.pageIndex = pageIndex;
             this.text = text;
             this.fullText = fullText;
@@ -256,6 +277,7 @@ public class PageBookmarkProcessor {
             this.relatedId = relatedId;
             this.pageLastId = pageLastId;
             this.pageIdOneIsText = pageIdOneIsText;
+            this.pageFirstTextIndentedWrap = pageFirstTextIndentedWrap;
             this.isAttachment = isAttachment;
         }
     }
@@ -272,6 +294,11 @@ public class PageBookmarkProcessor {
         // section" L2 candidate set beats a dense "many per page" L3 set even
         // when the L3 set has a larger absolute count.
         int pageSpan;
+        // Document span of the (cleaned) candidates: lastPageIndex - firstPageIndex + 1.
+        // Drives the L1 selection, which prefers the template that stretches
+        // furthest across the document (the chapter spine) over the one that
+        // merely has the most entries (e.g. a body list crowding one page).
+        int pageExtent;
 
         Group(TemplateKey templateKey) {
             this.templateKey = templateKey;
@@ -294,6 +321,9 @@ public class PageBookmarkProcessor {
                 uniquePages.add(c.pageIndex);
             }
             pageSpan = uniquePages.size();
+            int minPage = candidates.stream().mapToInt(c -> c.pageIndex).min().orElse(0);
+            int maxPage = candidates.stream().mapToInt(c -> c.pageIndex).max().orElse(0);
+            pageExtent = candidates.isEmpty() ? 0 : maxPage - minPage + 1;
         }
     }
 
@@ -893,6 +923,15 @@ public class PageBookmarkProcessor {
      * heading never continues an ancestor's or a sibling parent's numbering.
      * Templates whose document-wide numbering never reaches 1 are discarded
      * before any selection by {@link #discardTemplatesNotStartingAtOne}.</p>
+     *
+     * <p>Ranking order: font size, then — at L2 — sparsity, then the page span
+     * and the entry count of the cleaned candidates, then numbering style,
+     * indentation and reading order. At L1/L2 the span is compared first and
+     * the count breaks its ties; at L3 the ranking is run once with each of the
+     * two signals in front and the two winners are compared
+     * ({@link #runOffLevel3}). Both metrics are measured after the
+     * "consecutive table-of-contents" residues have been removed by the
+     * cleaning step.</p>
      */
     private static TemplateKey selectTemplateForLevel(List<Candidate> candidates, int start, int end,
                                                       int level, Set<TemplateKey> usedTemplates) {
@@ -952,21 +991,88 @@ public class PageBookmarkProcessor {
             return null;
         }
 
-        validGroups.sort((a, b) -> {
+        // L1/L2 rank on a single ordering (span ahead of count). L3 runs the
+        // ranking twice — once as "most entries", once as "widest coverage" —
+        // and then compares the two winners (see runOffLevel3).
+        if (level >= 3 && validGroups.size() > 1) {
+            return runOffLevel3(validGroups, level);
+        }
+        validGroups.sort(groupComparator(level, true));
+        return validGroups.get(0).templateKey;
+    }
+
+    /**
+     * Level-3 tie-break between the two level-3 orderings: the entry count and
+     * the page span are each used, on their own, to rank the candidate groups
+     * (both runs share the late tie-breaks: numbering style, indentation,
+     * reading order), and their two winners are then compared — the winner with
+     * more entries wins, and on an equal count the winner with the larger span.
+     *
+     * <p>This lets the two signals overrule each other only when they actually
+     * disagree about the winner, which covers both corpus cases that a fixed
+     * order got wrong:</p>
+     * <ul>
+     *   <li>a real sub-heading set whose entries are spread over pages but
+     *       whose body list has the same entry count — the count run then falls
+     *       through to the numbering-style prior and picks the body list, while
+     *       the span run picks the heading set, and the runoff prefers the
+     *       latter (larger span on an equal count);</li>
+     *   <li>a heading set that leads on entries but sits on one page while a
+     *       nested body list spills onto the next page — the count run picks
+     *       the heading set and the runoff keeps it (more entries).</li>
+     * </ul>
+     *
+     * <p>When the two metrics tie as well, the count run's winner is kept so the
+     * result stays deterministic.</p>
+     */
+    private static TemplateKey runOffLevel3(List<Group> validGroups, int level) {
+        List<Group> spanOrdered = new ArrayList<>(validGroups);
+        spanOrdered.sort(groupComparator(level, true));
+        Group spanWinner = spanOrdered.get(0);
+
+        validGroups.sort(groupComparator(level, false));
+        Group countWinner = validGroups.get(0);
+
+        if (spanWinner != countWinner) {
+            int countCmp = Integer.compare(countWinner.candidates.size(), spanWinner.candidates.size());
+            if (countCmp > 0) {
+                return countWinner.templateKey;
+            }
+            if (countCmp < 0) {
+                return spanWinner.templateKey;
+            }
+            int spanCmp = Integer.compare(countWinner.pageExtent, spanWinner.pageExtent);
+            if (spanCmp < 0) {
+                return spanWinner.templateKey;
+            }
+        }
+        return countWinner.templateKey;
+    }
+
+    /**
+     * Ranking used by one selection run. {@code spanFirst} selects the primary
+     * signal: with {@code true} the page span is compared before the entry
+     * count, with {@code false} the entry count comes first. At L1/L2 only the
+     * span-first ordering is used; L3 ranks once with each setting and then
+     * compares the two winners ({@link #runOffLevel3}).
+     *
+     * <p>Both metrics are measured on the cleaned candidates, i.e. after the
+     * "consecutive table-of-contents" residues (same-page consecutive ids and
+     * cross-page bridges) have been removed by the cleaning step.</p>
+     */
+    private static Comparator<Group> groupComparator(int level, boolean spanFirst) {
+        return (a, b) -> {
+            // Visual hierarchy decides first.
             int fontCmp = Double.compare(b.averageFontSize, a.averageFontSize);
             if (fontCmp != 0) {
                 return fontCmp;
             }
-            // Density-before-count is applied only at L2: a template whose
+            // Density-before-span is applied only at L2: a template whose
             // cleaned candidates are spread across many pages (one entry per
             // section, ~1 per page) is a more plausible L2 chapter sub-heading
             // than a template that packs many entries on each page (a dense
             // L3+ body pattern such as "(一)、(二)、(三)、..." appearing 3-5
-            // times per page). Skipping this at L3+ preserves the existing
-            // "prefer the wider run" behavior, because at L3 the sparser
-            // template may simply be a short local run that should yield to a
-            // longer one on the same page (see
-            // testLevel3ReusesLevel2TemplateWhenSameTemplateLivesInRange).
+            // times per page).
             if (level == 2) {
                 double densityA = a.pageSpan > 0
                     ? (double) a.candidates.size() / a.pageSpan
@@ -979,14 +1085,37 @@ public class PageBookmarkProcessor {
                     return densityCmp;
                 }
             }
-            // Count-before-indent: a template that survives cleaning with more
-            // entries is more likely to be the real chapter spine than a
-            // template with fewer entries that happens to be slightly less
-            // indented (e.g. body-text paragraphs starting with "1、" that
-            // share the body text margin).
-            int countCmp = Integer.compare(b.candidates.size(), a.candidates.size());
-            if (countCmp != 0) {
-                return countCmp;
+            if (level <= 2) {
+                // A chapter spine / section heading set stretches across the
+                // range, while a numbered body list that crams many items onto
+                // a couple of pages does not — so the span outranks the count,
+                // which is then left as the tie-break for equal spans.
+                int spanCmp = Integer.compare(b.pageExtent, a.pageExtent);
+                if (spanCmp != 0) {
+                    return spanCmp;
+                }
+            } else if (spanFirst) {
+                // L3 "widest coverage" run: span only, the count is reserved
+                // for the runoff.
+                int spanCmp = Integer.compare(b.pageExtent, a.pageExtent);
+                if (spanCmp != 0) {
+                    return spanCmp;
+                }
+            } else {
+                // L3 "most entries" run: count only, the span is reserved for
+                // the runoff.
+                int countCmp = Integer.compare(b.candidates.size(), a.candidates.size());
+                if (countCmp != 0) {
+                    return countCmp;
+                }
+            }
+            // Entry count: at L1/L2 it breaks a span tie, in the L3 span run it
+            // breaks a span tie as well; the L3 count run consumed it above.
+            if (level <= 2 || spanFirst) {
+                int countCmp = Integer.compare(b.candidates.size(), a.candidates.size());
+                if (countCmp != 0) {
+                    return countCmp;
+                }
             }
             // Numbering-style depth: a parenthesised style (（#）, (#), #）, #))
             // is conventionally nested inside a bare or chapter style, so when
@@ -1008,15 +1137,13 @@ public class PageBookmarkProcessor {
                 return pageCmp;
             }
             return Double.compare(b.firstTopY, a.firstTopY);
-        });
-
-        return validGroups.get(0).templateKey;
+        };
     }
 
     /**
      * A rough hierarchy prior for numbering styles, used only as a late
-     * tie-break (after font size, sparsity and candidate count) so that visual
-     * signals keep deciding first.
+     * tie-break (after font size, sparsity, page span and candidate count) so
+     * that visual signals keep deciding first.
      *
      * <p>Chapter/article styles and bare styles ({@code 第#章/第#节/第#条},
      * {@code #}, {@code #、}) are the shallow conventions; parenthesised styles
@@ -1493,11 +1620,81 @@ public class PageBookmarkProcessor {
      * (id 1), or id 2 provided the id-1 element on that page is text. Only
      * paragraph/heading candidates are collected, so {@code a.relatedId == 0}
      * (IObject path) never satisfies this and the rule stays JSON-only.
+     *
+     * <p>For the "second paragraph" variant ({@code b.relatedId == 2}, i.e. the
+     * entry sits right after a text item that starts the page) the bridge is
+     * rejected when that page-opening text is a wrapped multi-line paragraph
+     * whose first line is indented relative to its second line
+     * ({@link Candidate#pageFirstTextIndentedWrap}): such an element is body
+     * copy carrying a first-line indent that merely happens to start the page,
+     * not a continuation of a table of contents, so the two pages are not one
+     * continuous numbering run. The {@code b.relatedId == 1} variant (the entry
+     * itself starts the page) keeps the original rule.</p>
      */
     private static boolean isCrossPageAdjacent(Candidate a, Candidate b) {
         return b.pageIndex == a.pageIndex + 1
             && a.relatedId == a.pageLastId
-            && (b.relatedId == 1 || (b.relatedId == 2 && b.pageIdOneIsText));
+            && (b.relatedId == 1
+                || (b.relatedId == 2 && b.pageIdOneIsText
+                    && !b.pageFirstTextIndentedWrap));
+    }
+
+    /**
+     * Returns true when {@code firstText} — the visually first paragraph/heading
+     * of a page — is a wrapped multi-line text whose first line is indented
+     * relative to its second line by at least {@value #FIRST_LINE_INDENT_THRESHOLD}
+     * points, i.e. it carries the paragraph's first-line indent. Such an element
+     * is body copy that merely happens to start a page, not a table-of-contents
+     * continuation.
+     *
+     * <p>{@link SemanticHeading} exposes only its first line, so a heading is
+     * never treated as wrapped here.</p>
+     */
+    private static boolean isFirstTextIndentedWrap(IObject firstText) {
+        if (firstText instanceof CustomSemanticParagraph) {
+            List<TextLine> textLines = ((CustomSemanticParagraph) firstText).getTextLines();
+            if (textLines != null && textLines.size() >= 2) {
+                TextLine first = textLines.get(0);
+                TextLine second = textLines.get(1);
+                if (first != null && second != null) {
+                    return first.getLeftX() - second.getLeftX() >= FIRST_LINE_INDENT_THRESHOLD;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * JSON counterpart of {@link #isFirstTextIndentedWrap(IObject)}: requires the
+     * {@code x0} of the first line entry of a paragraph/heading JSON item to be
+     * at least {@value #FIRST_LINE_INDENT_THRESHOLD} points larger than the
+     * second line's {@code x0}.
+     */
+    private static boolean isFirstTextIndentedWrapJson(Map<String, Object> firstItem) {
+        if (firstItem == null) {
+            return false;
+        }
+        Object contentObj = firstItem.get(JsonName.CONTENT);
+        if (!(contentObj instanceof List)) {
+            return false;
+        }
+        List<?> lines = (List<?>) contentObj;
+        if (lines.size() < 2) {
+            return false;
+        }
+        Object first = lines.get(0);
+        Object second = lines.get(1);
+        if (!(first instanceof Map) || !(second instanceof Map)) {
+            return false;
+        }
+        return getJsonItemDouble(uncheckedMap(first), JsonName.X0)
+            - getJsonItemDouble(uncheckedMap(second), JsonName.X0)
+            >= FIRST_LINE_INDENT_THRESHOLD;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> uncheckedMap(Object obj) {
+        return (Map<String, Object>) obj;
     }
 
     /**
@@ -1506,15 +1703,24 @@ public class PageBookmarkProcessor {
      * resets at the start of each page, and a page-boundary bridge (previous
      * page ends at its last element, next page starts at id 1 or 2 with the
      * id-1 element being text) joins the two pages' runs into a longer one.
+     *
+     * <p>For the "second paragraph" variant (the later page's first candidate is
+     * its id-2 element and the id-1 element is text) the bridge is rejected when
+     * that page-opening text is a wrapped multi-line paragraph whose first line
+     * is indented relative to its second line
+     * ({@link Candidate#pageFirstTextIndentedWrap}) — same rule as
+     * {@link #isCrossPageAdjacent}.</p>
      */
     private static int maxConsecutiveRelatedIdRun(List<Candidate> chain) {
         Map<Integer, List<Integer>> idsByPage = new TreeMap<>();
         Map<Integer, Integer> pageLastIdByPage = new HashMap<>();
         Map<Integer, Boolean> pageIdOneIsTextByPage = new HashMap<>();
+        Map<Integer, Boolean> pageFirstTextIndentedWrapByPage = new HashMap<>();
         for (Candidate c : chain) {
             idsByPage.computeIfAbsent(c.pageIndex, k -> new ArrayList<>()).add(c.relatedId);
             pageLastIdByPage.putIfAbsent(c.pageIndex, c.pageLastId);
             pageIdOneIsTextByPage.putIfAbsent(c.pageIndex, c.pageIdOneIsText);
+            pageFirstTextIndentedWrapByPage.putIfAbsent(c.pageIndex, c.pageFirstTextIndentedWrap);
         }
         int maxRun = 1;
         Integer previousPage = null;
@@ -1557,9 +1763,11 @@ public class PageBookmarkProcessor {
             if (previousPage != null && pageIndex == previousPage + 1) {
                 int pageLastId = pageLastIdByPage.getOrDefault(pageIndex, 0);
                 boolean idOneIsText = Boolean.TRUE.equals(pageIdOneIsTextByPage.get(pageIndex));
+                boolean firstTextIndentedWrap =
+                    Boolean.TRUE.equals(pageFirstTextIndentedWrapByPage.get(pageIndex));
                 int minId = distinct.get(0);
                 boolean bridge = previousPageMaxId == previousPageLastId
-                    && (minId == 1 || (minId == 2 && idOneIsText));
+                    && (minId == 1 || (minId == 2 && idOneIsText && !firstTextIndentedWrap));
                 if (bridge) {
                     maxRun = Math.max(maxRun, previousTrailingRun + leading);
                 }
@@ -1665,6 +1873,8 @@ public class PageBookmarkProcessor {
             if (pageContents == null) {
                 continue;
             }
+            boolean pageFirstTextIndentedWrap =
+                isFirstTextIndentedWrap(firstParagraphOrHeading(pageContents));
             for (IObject content : pageContents) {
                 List<String> allLines = extractAllLines(content);
                 if (allLines.isEmpty()) {
@@ -1692,7 +1902,8 @@ public class PageBookmarkProcessor {
                     match.value,
                     fontSize,
                     content.getLeftX(),
-                    content.getTopY()
+                    content.getTopY(),
+                    0, 0, false, pageFirstTextIndentedWrap
                 ));
             }
         }
@@ -1724,7 +1935,11 @@ public class PageBookmarkProcessor {
             }
             int pageLastId = 0;
             boolean pageIdOneIsText = false;
+            Map<String, Object> firstTextItem = null;
             for (Map<String, Object> item : items) {
+                if (firstTextItem == null && isJsonTextLikeItem(item)) {
+                    firstTextItem = item;
+                }
                 Object idObj = item.get(JsonName.ID);
                 if (!(idObj instanceof Number)) {
                     continue;
@@ -1739,6 +1954,7 @@ public class PageBookmarkProcessor {
                         || JsonName.SOURCE_TYPE_HEADING.equals(sourceType);
                 }
             }
+            boolean pageFirstTextIndentedWrap = isFirstTextIndentedWrapJson(firstTextItem);
             for (Map<String, Object> item : items) {
                 String sourceType = (String) item.get(JsonName.SOURCE_TYPE);
                 if (!JsonName.SOURCE_TYPE_PARAGRAPH.equals(sourceType)
@@ -1774,7 +1990,8 @@ public class PageBookmarkProcessor {
                     topY,
                     relatedId,
                     pageLastId,
-                    pageIdOneIsText
+                    pageIdOneIsText,
+                    pageFirstTextIndentedWrap
                 ));
             }
         }
@@ -1860,6 +2077,7 @@ public class PageBookmarkProcessor {
                 firstText.getLeftX(),
                 firstText.getTopY(),
                 0, 0, false,
+                isFirstTextIndentedWrap(firstText),
                 true
             ));
         }
@@ -1949,6 +2167,7 @@ public class PageBookmarkProcessor {
                 topY,
                 relatedId,
                 0, false,
+                isFirstTextIndentedWrapJson(firstItem),
                 true
             ));
         }
