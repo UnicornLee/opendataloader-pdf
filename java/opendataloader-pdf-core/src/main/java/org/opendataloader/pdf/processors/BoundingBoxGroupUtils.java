@@ -75,9 +75,25 @@ final class BoundingBoxGroupUtils {
      * {@link ShapeChunk} whose type is {@link ShapeChunk#TYPE_BAR_CHART}.
      */
     static boolean containsBarChart(List<IObject> group) {
+        return containsType(group, ShapeChunk.TYPE_BAR_CHART);
+    }
+
+    /**
+     * Returns true when at least one entry in {@code group} is a
+     * {@link ShapeChunk} whose type is {@link ShapeChunk#TYPE_PIE_CHART}.
+     */
+    static boolean containsPieChart(List<IObject> group) {
+        return containsType(group, ShapeChunk.TYPE_PIE_CHART);
+    }
+
+    /**
+     * Returns true when at least one entry in {@code group} is a
+     * {@link ShapeChunk} whose type equals {@code type}.
+     */
+    static boolean containsType(List<IObject> group, String type) {
         for (IObject obj : group) {
             if (obj instanceof ShapeChunk
-                    && ShapeChunk.TYPE_BAR_CHART.equals(((ShapeChunk) obj).getShapeType())) {
+                    && type.equals(((ShapeChunk) obj).getShapeType())) {
                 return true;
             }
         }

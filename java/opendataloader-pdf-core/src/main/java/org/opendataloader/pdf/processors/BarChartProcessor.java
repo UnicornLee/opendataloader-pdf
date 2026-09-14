@@ -145,10 +145,39 @@ public final class BarChartProcessor {
      * @param imagesUtils        image renderer / saver
      * @param pageNumber         0-based page number
      */
+    /**
+     * Processes every bar-chart shape group from {@code groupedShapeChunks},
+     * replacing any group that contains a bar chart with a single
+     * {@link ImageChunk} covering the iteratively grown bbox.
+     *
+     * @see #processChartGroups(List, List, ImagesUtils, int, String) for the
+     *      shared implementation reused by {@code PieChartProcessor}.
+     */
     public static void processBarChartGroups(List<IObject> pageContents,
                                               List<List<IObject>> groupedShapeChunks,
                                               ImagesUtils imagesUtils,
                                               int pageNumber) {
+        processChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber,
+                ShapeChunk.TYPE_BAR_CHART);
+    }
+
+    /**
+     * Shared chart-region processor for any chart type. A group is processed when
+     * it contains at least one {@link ShapeChunk} of {@code chartType}; the region
+     * is then grown by absorbing neighbouring shape groups and page contents, and
+     * finally expanded to cover the chart's axes, tick / category labels and
+     * legend. The merged region is rendered as a single {@link ImageChunk} and the
+     * original contents are removed from the page.
+     *
+     * @param chartType the {@link ShapeChunk} type that marks a group as this kind
+     *                  of chart (e.g. {@link ShapeChunk#TYPE_BAR_CHART} or
+     *                  {@link ShapeChunk#TYPE_PIE_CHART})
+     */
+    static void processChartGroups(List<IObject> pageContents,
+                                   List<List<IObject>> groupedShapeChunks,
+                                   ImagesUtils imagesUtils,
+                                   int pageNumber,
+                                   String chartType) {
         if (pageContents == null || imagesUtils == null || groupedShapeChunks == null) {
             return;
         }
@@ -156,7 +185,7 @@ public final class BarChartProcessor {
         for (int i = 0; i < groupedShapeChunks.size(); i++) {
             List<IObject> group = groupedShapeChunks.get(i);
             if (skipped[i] || group == null || group.isEmpty()
-                    || !BoundingBoxGroupUtils.containsBarChart(group)) {
+                    || !BoundingBoxGroupUtils.containsType(group, chartType)) {
                 continue;
             }
             BoundingBox groupBox = BoundingBoxGroupUtils.unionShapeBoundingBoxes(group, pageNumber);
@@ -165,7 +194,7 @@ public final class BarChartProcessor {
             }
 
             // Initial screenshot box already carries the horizontal / vertical margin so the
-            // first iteration can find neighbouring groups and content that touch the bar chart.
+            // first iteration can find neighbouring groups and content that touch the chart.
             BoundingBox screenshotBox = expandWithMargin(groupBox,
                     SCREENSHOT_HORIZONTAL_MARGIN, SCREENSHOT_VERTICAL_TOLERANCE);
 
@@ -219,7 +248,7 @@ public final class BarChartProcessor {
             // 3. Pull in the parts of the chart that never touch the bars' bbox:
             //    axes, tick / category labels and the legend.
             expandToChartRegion(pageContents, screenshotBox, absorbedShapes, absorbedContents,
-                    groupedShapeChunks, skipped);
+                    groupedShapeChunks, skipped, chartType);
 
             pageContents.removeAll(absorbedContents);
             pageContents.removeAll(absorbedShapes);
@@ -242,7 +271,8 @@ public final class BarChartProcessor {
      */
     private static void expandToChartRegion(List<IObject> pageContents, BoundingBox chartBox,
                                             List<IObject> absorbedShapes, List<IObject> absorbedContents,
-                                            List<List<IObject>> groupedShapeChunks, boolean[] skipped) {
+                                            List<List<IObject>> groupedShapeChunks, boolean[] skipped,
+                                            String chartType) {
         // The plot area as it stands after the growth loop. Label bands are measured
         // against it (not against the already expanded box) so that absorbing the legend
         // cannot push the category-label band below the category labels themselves.
@@ -257,7 +287,7 @@ public final class BarChartProcessor {
                 continue;
             }
             ShapeChunk shape = (ShapeChunk) content;
-            if (ShapeChunk.TYPE_BAR_CHART.equals(shape.getShapeType())) {
+            if (chartType.equals(shape.getShapeType())) {
                 continue;
             }
             BoundingBox box = shape.getBoundingBox();

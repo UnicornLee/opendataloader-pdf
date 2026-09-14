@@ -55,7 +55,17 @@ public class FlowchartProcessor {
     private static final int MAX_GROWTH_ITERATIONS = 30;
 
     private static final double MIN_WIDTH = 80.0;
-    private static final double MIN_HEIGHT = 40.0;
+    /**
+     * Minimum height (pt) of a flowchart region. Lowered from 40 to 20 so the
+     * decision no longer hinges on a sub-point margin: previously a region whose
+     * merged box happened to be 40.6 pt tall would flip between "flowchart" and
+     * "not" depending only on page-count-driven paragraph merging. Genuine
+     * flowcharts are still gated by the shape / connector / text composition
+     * checks below.
+     */
+    private static final double MIN_HEIGHT = 20.0;
+    /** Above this height (pt) a heading / paragraph is treated as body text, not a chart label. */
+    private static final double BODY_TEXT_MAX_HEIGHT = 24.0;
     private static final double MAX_ASPECT_RATIO = 6.0;
     private static final int MIN_SHAPE_COUNT = 2;
     private static final int MIN_TOTAL_COMPONENTS = 5;
@@ -89,6 +99,7 @@ public class FlowchartProcessor {
             List<IObject> group = groupedShapeChunks.get(i);
             if (skipped[i] || group == null || group.isEmpty()
                     || BoundingBoxGroupUtils.containsBarChart(group)
+                    || BoundingBoxGroupUtils.containsPieChart(group)
                     || !isStillOnPage(pageContents, group)) {
                 continue;
             }
@@ -217,6 +228,9 @@ public class FlowchartProcessor {
         if (cluster == null || cluster.boundingBox == null || cluster.boundingBox.isEmpty()) {
             return false;
         }
+        if (containsBodyText(cluster)) {
+            return false;
+        }
         double width = cluster.boundingBox.getWidth();
         double height = cluster.boundingBox.getHeight();
         if (width < MIN_WIDTH || height < MIN_HEIGHT) {
@@ -241,6 +255,25 @@ public class FlowchartProcessor {
         boolean boxesWithArrows = cluster.rectangleCount >= 2 && cluster.arrowCount >= 1;
 
         return mixedShapes || compositeContent || imageWithConnectors || labelsWithConnectors || boxesWithArrows;
+    }
+
+    /**
+     * Returns true when the cluster absorbed what looks like body text (a heading
+     * or paragraph taller than a chart label). Such captures are almost always
+     * over-eager growth swallowing surrounding prose rather than a real flowchart,
+     * e.g. when a near-threshold region also pulls in a section title and its
+     * following paragraph.
+     */
+    private static boolean containsBodyText(Cluster cluster) {
+        for (IObject content : cluster.collectedContents) {
+            if (content instanceof SemanticHeading || content instanceof CustomSemanticParagraph) {
+                BoundingBox box = content.getBoundingBox();
+                if (box != null && !box.isEmpty() && box.getHeight() > BODY_TEXT_MAX_HEIGHT) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static boolean isRegularTable(Cluster cluster) {
