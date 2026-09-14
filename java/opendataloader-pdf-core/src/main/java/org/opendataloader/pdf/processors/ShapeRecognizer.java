@@ -123,6 +123,40 @@ public class ShapeRecognizer {
     private static final double SHAPE_GROUP_Y_TOLERANCE = 2.0;
 
     /**
+     * Pie-chart recognition from the PDFBox fill-box fallback source.
+     *
+     * <p>A pie is rendered as a set of filled sectors that all share the pie
+     * centre as one of their corners (the apex of every wedge). We therefore
+     * group the candidate fills by shared corner points and treat the largest
+     * such cluster as the wedge set of a single pie. The union of the wedges is
+     * required to be roughly square (a disc), with the shared corner near its
+     * centre, which rejects bar charts (no common corner), tables, and lone
+     * full-disc fills (a single box would dominate the union area).</p>
+     */
+    /** Tolerance (pt) when deciding that two corners coincide (shared apex). */
+    private static final double PIE_CORNER_TOLERANCE = 2.0;
+    /** Minimum number of wedges that must share a corner to call it a pie. */
+    private static final int MIN_PIE_WEDGE_COUNT = 3;
+    /** Minimum number of wedges required when no separate full-disc fill box is present. */
+    private static final int MIN_PIE_WEDGE_COUNT_WITHOUT_DISC = 5;
+    /** Minimum side length (pt) of the pie's union bbox. */
+    private static final double PIE_MIN_SIZE = 30.0;
+    /** Absolute (pt) tolerance for the "union must be square" check. */
+    private static final double PIE_SQUARE_TOLERANCE = 4.0;
+    /** Relative tolerance for the "union must be square" check (fraction of the
+     *  larger side). Keeps large pies from being rejected for a few points of
+     *  rounding on the bounding box of the sectors. */
+    private static final double PIE_SQUARE_RATIO = 0.08;
+    /** Tolerance (pt) between the shared corner and the centre of the union bbox. */
+    private static final double PIE_CENTER_TOLERANCE = 2.0;
+    /** Tolerance (pt) when matching the centre of a separate full-disc fill box to the
+     *  shared wedge corner (the disc centre coincides with the pie centre). */
+    private static final double PIE_DISC_CENTER_TOLERANCE = 8.0;
+    /** A single fill may cover at most this share of the union area, otherwise it
+     *  is treated as a full-disc fill rather than one wedge of a pie. */
+    private static final double PIE_MAX_WEDGE_AREA_RATIO = 0.6;
+
+    /**
      * Fallback color assigned to filled rectangles that only surface through the
      * PDFBox fallback source (e.g. rectangles filled with a {@code /Pattern}
      * shading/gradient color space whose RGB cannot be resolved by the veraPDF
@@ -279,6 +313,9 @@ public class ShapeRecognizer {
         // reaches getArtifacts(). The PDFBox fill boxes act as a fallback source
         // (the same mechanism already used for merged arrowheads).
         shapes.addAll(recognizeBarChartsFromFillBoxes(pageNumber, fillBoxes, shapes));
+        // Pie charts are recognised from the same fill-box fallback source. Runs after
+        // the bar-chart pass so already recognised bars are excluded from pie candidates.
+        shapes.addAll(recognizePieChartsFromFillBoxes(pageNumber, fillBoxes, shapes));
         shapes.addAll(recognizePolylines(pageNumber, thinLines));
         // Single-segment lines that bridge two existing shapes are likely arrows/connectors.
         // They are too short to form a polyline on their own but are important for
@@ -412,6 +449,193 @@ public class ShapeRecognizer {
             }
         }
         return shapes;
+    }
+
+    /**
+     * Recognises pie charts from the raw PDFBox fill-box fallback source.
+     *
+     * <p>Pie sectors are filled polygons whose bounding boxes all share the pie
+     * centre as a corner. We cluster the candidate fills by corner coincidence
+     * and accept a cluster as the wedge set of one pie when:</p>
+     * <ul>
+     *   <li>it has at least {@link #MIN_PIE_WEDGE_COUNT} wedges;</li>
+     *   <li>the shared corner is the centre of a roughly square fill box (the
+     *       whole disc), which becomes the pie bbox — or, when no such disc box
+     *       exists, the cluster has at least
+     *       {@link #MIN_PIE_WEDGE_COUNT_WITHOUT_DISC} wedges and a bbox is
+     *       derived around the shared corner;</li>
+     *   <li>no single wedge covers more than {@link #PIE_MAX_WEDGE_AREA_RATIO}
+     *       of the disc (rejects a lone full-disc fill sharing a corner).</li>
+     * </ul>
+     * <p>The union of the wedge boxes is deliberately NOT used as the pie bbox:
+     * every wedge has the centre at one corner, so their union only spans the
+     * quadrant the wedges fan into, never the whole disc.</p>
+     */
+    private static List<ShapeChunk> recognizePieChartsFromFillBoxes(int pageNumber,
+                                                                    List<BoundingBox> fillBoxes,
+                                                                    List<ShapeChunk> existingShapes) {
+        if (fillBoxes == null || fillBoxes.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<BoundingBox> candidates = filterShapeCoincidentFills(fillBoxes, existingShapes);
+        if (candidates.size() < MIN_PIE_WEDGE_COUNT) {
+            return Collections.emptyList();
+        }
+
+        // Group candidate fills by shared corner point. Pie wedges all meet at the pie
+        // centre, so they share that corner even though each wedge's bbox only spans part
+        // of the disc (the centre sits at one corner of every wedge's bounding box). Their
+        // union is therefore NOT a square; the full disc is usually emitted separately as a
+        // full-circle fill whose centre equals that corner, which we use as the pie bbox.
+        Map<String, CornerCluster> byCorner = new LinkedHashMap<>();
+        for (BoundingBox box : candidates) {
+            for (double[] corner : cornerPoints(box)) {
+                String key = cornerKey(corner[0], corner[1]);
+                CornerCluster cluster = byCorner.computeIfAbsent(key, k -> new CornerCluster(corner[0], corner[1]));
+                cluster.boxes.add(box);
+            }
+        }
+
+        List<ShapeChunk> shapes = new ArrayList<>();
+        for (CornerCluster cluster : byCorner.values()) {
+            // A single fill can contribute several corners; de-duplicate.
+            List<BoundingBox> wedges = cluster.boxes.stream().distinct().collect(Collectors.toList());
+            if (wedges.size() < MIN_PIE_WEDGE_COUNT) {
+                continue;
+            }
+            // Prefer the separate full-disc fill (centre == shared corner) as the pie bbox.
+            // Fall back to a box centred on the shared corner with the largest wedge reach as
+            // its half-side (which equals the disc radius for a full pie). A pie that has no
+            // disc fill is only accepted with a higher wedge count, to avoid spurious small
+            // clusters of 3-4 fills that happen to share a corner and form a square.
+            BoundingBox disc = findDiscBox(candidates, cluster.x, cluster.y);
+            if (disc == null && wedges.size() < MIN_PIE_WEDGE_COUNT_WITHOUT_DISC) {
+                continue;
+            }
+            BoundingBox pieBox = disc != null ? disc : boxAroundCorner(cluster.x, cluster.y, wedges, pageNumber);
+            double discArea = pieBox.getWidth() * pieBox.getHeight();
+            boolean dominated = false;
+            for (BoundingBox w : wedges) {
+                if (w.getWidth() * w.getHeight() > PIE_MAX_WEDGE_AREA_RATIO * discArea) {
+                    dominated = true;
+                    break;
+                }
+            }
+            if (dominated || !isValidPieDisc(pieBox, cluster.x, cluster.y)) {
+                continue;
+            }
+            LOGGER.log(Level.INFO, "Page " + (pageNumber + 1) + ": recognized pie chart with " + wedges.size()
+                    + " wedges at bbox=[" + pieBox.getLeftX() + "," + pieBox.getBottomY() + "," + pieBox.getRightX() + "," + pieBox.getTopY() + "]");
+            shapes.add(new ShapeChunk(pieBox, ShapeChunk.TYPE_PIE_CHART, null, wedges.size(), wedges));
+        }
+        return shapes;
+    }
+
+    /**
+     * Returns the full-disc fill box whose centre is near ({@code cx},{@code cy}) and
+     * that is roughly square, or {@code null} if none qualifies. The disc is the
+     * natural bbox for the pie; its centre coincides with the shared wedge corner.
+     */
+    private static BoundingBox findDiscBox(List<BoundingBox> candidates, double cx, double cy) {
+        BoundingBox best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (BoundingBox box : candidates) {
+            if (box == null || box.isEmpty()) {
+                continue;
+            }
+            double centerX = (box.getLeftX() + box.getRightX()) / 2.0;
+            double centerY = (box.getBottomY() + box.getTopY()) / 2.0;
+            if (Math.abs(centerX - cx) > PIE_DISC_CENTER_TOLERANCE
+                    || Math.abs(centerY - cy) > PIE_DISC_CENTER_TOLERANCE) {
+                continue;
+            }
+            if (!isSquare(box)) {
+                continue;
+            }
+            double dist = Math.abs(centerX - cx) + Math.abs(centerY - cy);
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = box;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Builds a square box centred on ({@code cx},{@code cy}) whose half-side is the
+     * largest distance from that corner to any wedge corner (the disc radius for a
+     * full pie). Used only when no separate full-disc fill box is available.
+     */
+    private static BoundingBox boxAroundCorner(double cx, double cy, List<BoundingBox> wedges, int pageNumber) {
+        double reach = 0.0;
+        for (BoundingBox w : wedges) {
+            reach = Math.max(reach, Math.abs(w.getLeftX() - cx));
+            reach = Math.max(reach, Math.abs(w.getRightX() - cx));
+            reach = Math.max(reach, Math.abs(w.getBottomY() - cy));
+            reach = Math.max(reach, Math.abs(w.getTopY() - cy));
+        }
+        BoundingBox box = new BoundingBox(pageNumber);
+        box.setLeftX(cx - reach);
+        box.setRightX(cx + reach);
+        box.setBottomY(cy - reach);
+        box.setTopY(cy + reach);
+        return box;
+    }
+
+    /** Returns true when {@code box} is roughly square. */
+    private static boolean isSquare(BoundingBox box) {
+        double w = box.getWidth();
+        double h = box.getHeight();
+        return Math.abs(w - h) <= Math.max(PIE_SQUARE_TOLERANCE, PIE_SQUARE_RATIO * Math.max(w, h));
+    }
+
+    /**
+     * Returns true when {@code box} looks like a pie disc: roughly square and
+     * centred on the shared {@code hubX}/{@code hubY} corner.
+     */
+    private static boolean isValidPieDisc(BoundingBox box, double hubX, double hubY) {
+        if (box == null || box.isEmpty()) {
+            return false;
+        }
+        double width = box.getWidth();
+        double height = box.getHeight();
+        if (width < PIE_MIN_SIZE || height < PIE_MIN_SIZE) {
+            return false;
+        }
+        if (!isSquare(box)) {
+            return false;
+        }
+        double centerX = (box.getLeftX() + box.getRightX()) / 2.0;
+        double centerY = (box.getBottomY() + box.getTopY()) / 2.0;
+        return Math.abs(hubX - centerX) <= PIE_CENTER_TOLERANCE
+                && Math.abs(hubY - centerY) <= PIE_CENTER_TOLERANCE;
+    }
+
+    /** Returns the four corners of a fill box as {@code {x, y}} pairs. */
+    private static List<double[]> cornerPoints(BoundingBox box) {
+        List<double[]> points = new ArrayList<>(4);
+        points.add(new double[]{box.getLeftX(), box.getBottomY()});
+        points.add(new double[]{box.getRightX(), box.getBottomY()});
+        points.add(new double[]{box.getLeftX(), box.getTopY()});
+        points.add(new double[]{box.getRightX(), box.getTopY()});
+        return points;
+    }
+
+    /** Quantises a corner coordinate into a tolerance bucket for coincidence grouping. */
+    private static String cornerKey(double x, double y) {
+        return Math.round(x / PIE_CORNER_TOLERANCE) + "_" + Math.round(y / PIE_CORNER_TOLERANCE);
+    }
+
+    /** Accumulates the fills that share one corner point. */
+    private static final class CornerCluster {
+        final double x;
+        final double y;
+        final List<BoundingBox> boxes = new ArrayList<>();
+
+        CornerCluster(double x, double y) {
+            this.x = x;
+            this.y = y;
+        }
     }
 
     /**
