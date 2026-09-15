@@ -48,6 +48,7 @@ import org.verapdf.cos.COSObjType;
 import org.verapdf.cos.COSObject;
 import org.verapdf.cos.COSTrailer;
 import org.verapdf.exceptions.InvalidPasswordException;
+import org.verapdf.exceptions.LoopedException;
 import org.verapdf.gf.model.impl.containers.StaticStorages;
 import org.verapdf.gf.model.impl.cos.GFCosInfo;
 import org.verapdf.gf.model.impl.sa.GFSAPDFDocument;
@@ -981,16 +982,18 @@ public class DocumentProcessor {
             // Encrypted PDFs are not a content-validity failure — let the
             // password-handling branch in callers (e.g. CLIMain) take over.
             throw pw;
-        } catch (IOException cause) {
+        } catch (IOException | LoopedException cause) {
             // veraPDF is strict about cross-reference validation and refuses
             // some real-world PDFs that PDFBox still reads successfully — the
-            // most common symptom is an empty page tree ("Pages not found")
-            // caused by a partially corrupt xref table. If PDFBox can load
-            // the file, re-saving it rebuilds the xref on serialization and
-            // lets veraPDF parse the result. Any other IOException (truncated
+            // most common symptoms are an empty page tree ("Pages not found")
+            // caused by a partially corrupt xref table, and an LoopedException
+            // ("XRef loop", an unchecked exception) caused by a /Prev or
+            // /XRefStm chain that revisits the same xref offset. If PDFBox can
+            // load the file, re-saving it rebuilds the xref on serialization
+            // and lets veraPDF parse the result. Any other failure (truncated
             // body, malformed header, encryption wrong, ...) cannot be fixed
             // this way, so we surface a friendly message instead of letting
-            // the raw veraPDF IOException leak as a stack trace.
+            // the raw veraPDF exception leak as a stack trace.
             File repaired = tryRepairPdfWithPdfBox(pdfName, cause);
             if (repaired != null) {
                 try {
@@ -1001,9 +1004,12 @@ public class DocumentProcessor {
                             + cause.getMessage() + "). PDFBox rebuilt the xref on the fly; "
                             + "processing continues from the repaired copy at '"
                             + repaired.getAbsolutePath() + "'.");
-                } catch (IOException retryCause) {
+                } catch (IOException | RuntimeException retryCause) {
                     // Repair did not help; drop the temp file and surface
                     // the original cause rather than the after-repair error.
+                    // RuntimeException is included because veraPDF signals
+                    // xref-chain problems (e.g. LoopedException) unchecked,
+                    // so a still-broken repaired copy would otherwise leak.
                     deleteRepairedPdfTempFile();
                     throw new InvalidPdfFileException(
                         "'" + displayName(pdfName) + "' is not a valid PDF file (corrupted or truncated content).",
@@ -1059,8 +1065,10 @@ public class DocumentProcessor {
      * through PDFBox serializes a fresh xref table on disk. Reloading that copy
      * with veraPDF then succeeds.</p>
      *
-     * <p>Only the specific "Pages not found" symptom is known to be xref-related;
-     * other IOExceptions (truncated body, malformed header, wrong password) are
+     * <p>Only xref-chain symptoms are known to be repairable this way: the
+     * "Pages not found" IOException and veraPDF's unchecked {@link LoopedException}
+     * ("XRef loop", thrown when a /Prev or /XRefStm chain revisits an offset).
+     * Other failures (truncated body, malformed header, wrong password) are
      * unaffected by a re-save, so we ignore them and let the caller surface the
      * original error.</p>
      *
@@ -1070,13 +1078,15 @@ public class DocumentProcessor {
      * linger for the lifetime of a server process.</p>
      *
      * @param pdfName the original PDF path that veraPDF rejected
-     * @param cause   the IOException thrown by veraPDF; used to gate the recovery
+     * @param cause   the exception thrown by veraPDF; used to gate the recovery
      *                on the recoverable symptom only
      * @return the repaired temp file, or {@code null} if recovery was not
      *         applicable or failed
      */
-    private static File tryRepairPdfWithPdfBox(String pdfName, IOException cause) {
-        if (!"Pages not found".equals(cause.getMessage())) {
+    private static File tryRepairPdfWithPdfBox(String pdfName, Throwable cause) {
+        boolean xrefChainFailure = "Pages not found".equals(cause.getMessage())
+            || cause instanceof LoopedException;
+        if (!xrefChainFailure) {
             // A re-save only fixes xref-related failures. Anything else
             // (truncated body, encrypted, etc.) wastes effort and risks
             // masking the real error.
