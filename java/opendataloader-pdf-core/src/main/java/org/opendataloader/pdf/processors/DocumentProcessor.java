@@ -40,6 +40,7 @@ import org.opendataloader.pdf.text.TextGenerator;
 import org.opendataloader.pdf.utils.ContentSanitizer;
 import org.opendataloader.pdf.utils.FileUtils;
 import org.opendataloader.pdf.utils.ImagesUtils;
+import org.opendataloader.pdf.utils.ProcessingDeadline;
 import org.opendataloader.pdf.utils.TextNodeUtils;
 import org.verapdf.as.ASAtom;
 import org.verapdf.containers.StaticCoreContainers;
@@ -65,6 +66,7 @@ import org.verapdf.wcag.algorithms.semanticalgorithms.containers.StaticContainer
 import org.verapdf.xmp.containers.StaticXmpCoreContainers;
 
 import org.opendataloader.pdf.exceptions.InvalidPdfFileException;
+import org.opendataloader.pdf.exceptions.ProcessingTimeoutException;
 
 import java.awt.image.BufferedImage;
 import java.io.File;
@@ -511,11 +513,17 @@ public class DocumentProcessor {
             isImmediateOcr = false;
         }
 
+        // Processing budget armed by the caller through ProcessingDeadline (0 = disabled).
+        // Captured once on this thread: the phases below run on ForkJoinPool workers that
+        // do NOT inherit the ThreadLocal, so they check this exact absolute deadline instead.
+        final long deadline = ProcessingDeadline.snapshot();
+
         try {
             // Loop 1: ContentFilter per-page (largest bottleneck)
             pool.submit(() ->
                 IntStream.range(0, totalPages).parallel().forEach(pageNumber -> {
                     try {
+                        ProcessingDeadline.check(deadline, "loop1 page " + (pageNumber + 1));
                         propagateState.run();
                         if (shouldProcessPage(pageNumber, pagesToProcess)) {
                             List<IObject> pageContents = ContentFilterProcessor.getFilteredContents(inputPdfName,
@@ -535,6 +543,7 @@ public class DocumentProcessor {
             Set<Integer> ocrFallbackPages = new HashSet<>();
             if (paddleUrl != null && !"".equals(paddleUrl)) {
                 for (int pageNumber = 0; pageNumber < totalPages; pageNumber++) {
+                    ProcessingDeadline.check(deadline, "ocr-fallback page " + (pageNumber + 1));
                     if (!shouldProcessPage(pageNumber, pagesToProcess)) {
                         continue;
                     }
@@ -561,6 +570,7 @@ public class DocumentProcessor {
             // which renders PDF pages — not safe to parallelize due to per-thread PDF file I/O)
             if (config.getFilterConfig().isFilterHiddenText()) {
                 for (int pageNumber = 0; pageNumber < totalPages; pageNumber++) {
+                    ProcessingDeadline.check(deadline, "hidden-text page " + (pageNumber + 1));
                     if (shouldProcessPage(pageNumber, pagesToProcess)) {
                         List<IObject> pageContents = HiddenTextProcessor.findHiddenText(contents.get(pageNumber), true);
                         contents.set(pageNumber, pageContents);
@@ -601,6 +611,7 @@ public class DocumentProcessor {
             final String finalImagesDirectory = absoluteImagesDirectory;
             pool.submit(() ->
                 IntStream.range(0, totalPages).parallel().forEach(pageNumber -> {
+                    ProcessingDeadline.checkUnchecked(deadline, "loop2 page " + (pageNumber + 1));
                     if (!shouldProcessPage(pageNumber, pagesToProcess)) {
                         return;
                     }
@@ -657,6 +668,7 @@ public class DocumentProcessor {
             // Loop 3: Paragraph + Heading per-page (always need ParagraphProcessor for text output)
             pool.submit(() ->
                 IntStream.range(0, totalPages).parallel().forEach(pageNumber -> {
+                    ProcessingDeadline.checkUnchecked(deadline, "loop3 page " + (pageNumber + 1));
                     if (!shouldProcessPage(pageNumber, pagesToProcess)) {
                         return;
                     }
@@ -670,6 +682,7 @@ public class DocumentProcessor {
             if (structured) {
                 pool.submit(() ->
                     IntStream.range(0, totalPages).parallel().forEach(pageNumber -> {
+                        ProcessingDeadline.checkUnchecked(deadline, "headings page " + (pageNumber + 1));
                         if (!shouldProcessPage(pageNumber, pagesToProcess)) return;
                         propagateState.run();
                         HeadingProcessor.processHeadings(contents.get(pageNumber), false);
@@ -682,7 +695,14 @@ public class DocumentProcessor {
                 LOGGER.log(Level.INFO, "No OCR service configured; skipping formula recognition to avoid false positives.");
             }
             // Process each page: first chart/flowchart screenshots, then formula screenshots.
+            // This loop is inherently sequential (one page at a time on the calling thread)
+            // and is where runaway documents burn unbounded wall-clock time: measured ~11-12
+            // minutes for a single scanned page with heavy line-art / formula candidates,
+            // versus ~100 pages/second for ordinary pages. The per-page deadline check is
+            // therefore the most important checkpoint in the whole pipeline.
             for (int pageNumber = 0; pageNumber < totalPages; pageNumber++) {
+                ProcessingDeadline.check(deadline, "chart/formula page " + (pageNumber + 1)
+                    + " of " + totalPages + " of " + inputPdfName);
                 List<IObject> pageContents = contents.get(pageNumber);
                 ImagesUtils imagesUtils = new ImagesUtils();
                 List<IObject> shapeChunks = pageContents.stream()
@@ -725,6 +745,7 @@ public class DocumentProcessor {
 
             // Sequential ID assignment (must be in page order, before CaptionProcessor)
             for (int pageNumber = 0; pageNumber < totalPages; pageNumber++) {
+                ProcessingDeadline.check(deadline, "id-assignment page " + (pageNumber + 1));
                 if (shouldProcessPage(pageNumber, pagesToProcess)) {
                     setIDs(contents.get(pageNumber));
                 }
@@ -742,6 +763,7 @@ public class DocumentProcessor {
 
             if (structured) {
                 // Cross-page post-processing (must be sequential)
+                ProcessingDeadline.check(deadline, "cross-page post-processing");
                 ListProcessor.checkNeighborLists(contents);
                 TableBorderProcessor.checkNeighborTables(contents);
                 HeadingProcessor.detectHeadingsLevels();
@@ -756,6 +778,13 @@ public class DocumentProcessor {
             // way to triage. surfacing the cause class+message here lets Kibana message-only
             // queries narrow it down.
             Throwable cause = (e instanceof ExecutionException && e.getCause() != null) ? e.getCause() : e;
+            if (cause instanceof ProcessingTimeoutException) {
+                // Budget exhaustion is a controlled abort, not a pipeline defect. Surface the
+                // timeout itself so callers (Pulsar consumer) can classify the message as
+                // "timed out" and report it as such instead of "broken pipeline".
+                // (Explicit cast: this module compiles at source level 11.)
+                throw (ProcessingTimeoutException) cause;
+            }
             throw new IOException("Parallel page processing failed ("
                     + cause.getClass().getSimpleName() + ": " + cause.getMessage() + ")", e);
         } finally {

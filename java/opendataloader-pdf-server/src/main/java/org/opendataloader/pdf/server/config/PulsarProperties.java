@@ -22,6 +22,21 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * Pulsar broker / topic settings bound from the {@code pulsar} block.
  * Snake_case keys in application-*.yml map to camelCase components through
  * Spring Boot's relaxed binding (e.g. {@code receive_topic_name} -> receiveTopicName).
+ *
+ * <p>{@code ackTimeoutSeconds} and {@code consumTimeoutMin} are two independent
+ * timeouts that must not fight each other:
+ * <ul>
+ *   <li>{@code ack_timeout_seconds} - broker-side redelivery of a message the
+ *       consumer has not acknowledged. {@code 0} disables it.</li>
+ *   <li>{@code consum_timeout_min} - wall-clock watchdog around one message in
+ *       {@code PulsarService}: on expiry the message is failed, acknowledged
+ *       without redelivery, and the next one is consumed. {@code 0} disables it.</li>
+ * </ul>
+ * An ack timeout shorter than the watchdog makes the broker redeliver messages
+ * that are still being processed, which produces multiple consumers working on
+ * the same document simultaneously - so the watchdog deployment must set
+ * {@code ack_timeout_seconds=0}. {@code PulsarService#start()} logs an error when
+ * it sees a contradictory combination.</p>
  */
 @ConfigurationProperties("pulsar")
 public record PulsarProperties(
@@ -33,5 +48,6 @@ public record PulsarProperties(
         @DefaultValue("") String ocrReceiveTopicName,
         @DefaultValue("1") int count,
         @DefaultValue("1") int ocrCount,
-        @DefaultValue("60") int ackTimeoutSeconds) {
+        @DefaultValue("60") int ackTimeoutSeconds,
+        @DefaultValue("0") int consumTimeoutMin) {
 }

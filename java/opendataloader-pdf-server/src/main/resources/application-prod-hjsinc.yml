@@ -35,7 +35,14 @@ pulsar:
     ocr_send_topic_name: capital/pdf_parse/announcement_ocr_image_analysis_increment
     ocr_receive_topic_name: capital/pdf_parse/announcement_ocr_image_analysis_increment_result
     ocrCount: 4
-    ack_timeout_seconds: 60
+    # Broker-side ack-timeout redelivery is disabled on purpose: the consumer-side
+    # watchdog owns the timeout, so a slow message is never processed by several
+    # consumers at once (see PulsarService).
+    ack_timeout_seconds: 0
+    # Max wall-clock time for one message (minutes). On expiry the message is failed
+    # with jsonUrl="", acknowledged WITHOUT redelivery, its worker stack is logged,
+    # and the next message is consumed. 0 disables the watchdog.
+    consum_timeout_min: 40
 
 oss:
     temp_bucket_name: stock-temp-bucket

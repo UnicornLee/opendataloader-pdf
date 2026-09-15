@@ -39,6 +39,7 @@ import org.opendataloader.pdf.processors.CatalogBookmarkProcessor;
 import org.opendataloader.pdf.processors.DocumentProcessor;
 import org.opendataloader.pdf.processors.PageBookmarkProcessor;
 import org.opendataloader.pdf.utils.HuaweiObsClient;
+import org.opendataloader.pdf.utils.ProcessingDeadline;
 import org.opendataloader.pdf.utils.SmartTextJoiner;
 import org.verapdf.as.ASAtom;
 import org.verapdf.cos.COSDictionary;
@@ -162,9 +163,11 @@ public class JsonWriter {
      * @throws IOException when reading, writing or uploading the JSON fails
      */
     public static RebuildBookmarksResult rebuildBookmarksFromJson(String inputJsonName, Config config) throws IOException {
+        ProcessingDeadline.check("rebuild-bookmarks start");
         File jsonFile = new File(inputJsonName);
         ObjectMapper mapper = new ObjectMapper();
         Map<String, Object> map = mapper.readValue(jsonFile, new TypeReference<Map<String, Object>>() {});
+        ProcessingDeadline.check("rebuild-bookmarks json read");
 
         // self_bookmarks from JSON, fallback to bookmarks, fallback to empty list
         List<Bookmark> selfBookmarks;
@@ -191,6 +194,7 @@ public class JsonWriter {
             List<Map<String, Object>> data = (List<Map<String, Object>>) map.get(JsonName.DATA);
 
             if (data != null) {
+                    ProcessingDeadline.check("rebuild-bookmarks resolve related ids");
                     resolveSelfBookmarkRelatedIds(mapper, map, data);
                     CatalogBookmarkProcessor.CatalogResult catalogResult =
                         CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, config);
@@ -225,11 +229,13 @@ public class JsonWriter {
             }
 
             // Write back to JSON
+            ProcessingDeadline.check("rebuild-bookmarks before write");
             mapper.writerWithDefaultPrettyPrinter().writeValue(jsonFile, map);
 
             String jsonUrlOrPath;
             boolean ossUploadSuccess = false;
             if (ossEnabled) {
+                ProcessingDeadline.check("rebuild-bookmarks before obs upload");
                 obsClient = new HuaweiObsClient(ossConfig.getEndpoint(), ossConfig.getAccessKey(), ossConfig.getSecretKey());
                 String jsonObjectKey = buildJsonObjectKeyForRebuild(ossConfig);
                 jsonUrlOrPath = obsClient.uploadFile(ossConfig.getTempBucketName(), jsonObjectKey, jsonFile, ossConfig.getTempDomainName());
@@ -305,6 +311,10 @@ public class JsonWriter {
                 jsonGenerator.writeArrayFieldStart(JsonName.DATA);
                 JsonFactory pageJsonFactory = new JsonFactory();
                 for (int pageNumber = 0; pageNumber < StaticContainers.getDocument().getNumberOfPages(); pageNumber++) {
+                    // Deadline checkpoint: output generation for huge scanned documents can
+                    // dominate the whole run (observed ~17 minutes of "generating outputs"),
+                    // so it must be abortable just like the extraction phases.
+                    ProcessingDeadline.check("json output page " + (pageNumber + 1));
                     // Serialize each page to an independent in-memory buffer first;
                     // only after the whole page succeeds (balanced and closed) is it
                     // appended to the main stream. A per-page exception affects only
