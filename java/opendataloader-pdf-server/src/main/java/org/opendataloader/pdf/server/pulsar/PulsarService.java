@@ -34,11 +34,15 @@ import org.opendataloader.pdf.server.config.OssProperties;
 import org.opendataloader.pdf.server.config.PdfProperties;
 import org.opendataloader.pdf.server.config.PulsarProperties;
 import org.opendataloader.pdf.server.constant.Global;
+import org.opendataloader.pdf.utils.ProcessingDeadline;
 import org.springframework.core.env.Environment;
 import org.springframework.core.env.Profiles;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
+import java.lang.management.ThreadMXBean;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -49,12 +53,21 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 /**
@@ -74,15 +87,36 @@ import java.util.stream.Stream;
  * acknowledges the inbound message. There is no negative-acknowledge path -
  * downstream observes the empty {@code jsonUrl} and reacts accordingly.</p>
  *
- * <p>Hung-consumer safeguard: every consumer is built with
- * {@code receiverQueueSize=1} plus {@code ackTimeout} (tunable via
- * {@code pulsar.ack_timeout_seconds}, default 60s). If a consumer receives a
- * message but neither acknowledges nor negatively acknowledges it within
- * the timeout - e.g. due to a deadlock, blocking IO, or the JVM being stuck
- * without the connection dropping - the broker automatically redelivers
- * the message. This does NOT change the failure semantics above: the
- * auto-redelivery only fires when the consumer is genuinely hung; normal
- * processing still completes via {@code consumer.acknowledge(msg)}.</p>
+ * <p>Wall-clock watchdog ({@code pulsar.consum_timeout_min}, default 0 =
+ * disabled, production 40): each inbound message is executed on its own worker
+ * thread and the consumer loop waits at most that long for it. On expiry the
+ * item is treated as failed - a result message with {@code jsonUrl=""} is
+ * published (same contract as any other failure) and the inbound message is
+ * <strong>acknowledged without redelivery</strong>, so the consumer slot is
+ * released and the next message can be consumed. The abandoned worker is
+ * logged with its full stack, counted, and escalated (error log at
+ * {@code count + ocrCount}, process exit at twice that) so a permanent pile-up
+ * of runaway documents cannot silently degrade the instance.</p>
+ *
+ * <p>Why both a watchdog <em>and</em> a deadline: the watchdog is a hard,
+ * mechanism-independent bound, but it cannot stop the abandoned computation -
+ * Java has no safe way to kill a thread, and {@code shutdownNow()} only works
+ * for the parts of the pipeline that respond to interrupts. The cooperative
+ * {@link ProcessingDeadline} checkpoints in the core pipeline (armed by the
+ * same worker, see below) normally fire <em>before</em> the watchdog and abort
+ * the document cleanly through the existing failure path, which means no worker
+ * is left behind. The watchdog only catches the residual cases where even the
+ * checkpoints cannot fire.</p>
+ *
+ * <p>{@code ackTimeout} vs {@code consum_timeout_min}: {@code ackTimeout} makes
+ * the <em>broker</em> redeliver an unacked message, which for a slow item means
+ * a second consumer starts the very same document from scratch. That is exactly
+ * the 7x-duplicated-work failure mode observed in production (one oversized
+ * announcement was consumed 21 times over 24h and froze the whole subscription).
+ * The watchdog replaces it, so {@code pulsar.ack_timeout_seconds} must be
+ * {@code 0} (or at least larger than {@code consum_timeout_min}); the two
+ * settings are cross-checked in {@link #start()} and a mismatch is reported as
+ * an error.</p>
  *
  * <p>Thread-survival safeguard: both consumer loops and both message handlers
  * catch {@link Throwable} rather than {@code Exception}. {@code Error}s (e.g.
@@ -105,6 +139,9 @@ public class PulsarService {
 
     private static final int DOWNLOAD_MAX_ATTEMPTS = 5;
 
+    /** Name prefix of the per-message worker thread that the watchdog supervises. */
+    static final String WORKER_THREAD_PREFIX = "pulsar-work-";
+
     private final PulsarProperties pulsarProperties;
     private final BasicProperties basicProperties;
     private final OssProperties ossProperties;
@@ -123,6 +160,17 @@ public class PulsarService {
     private final List<Thread> ocrReceiveThreads = new ArrayList<>();
 
     private final Environment env;
+
+    /**
+     * Worker executors that are still alive: one per message currently being
+     * processed, plus one per abandoned (timed-out) message whose worker refused
+     * to stop. Pruned on normal completion; torn down in {@link #stop()}.
+     */
+    private final List<ExecutorService> workerExecutors =
+            Collections.synchronizedList(new ArrayList<>());
+
+    /** Number of messages that blew the watchdog and were abandoned mid-flight. */
+    private final AtomicInteger abandonedWorkers = new AtomicInteger();
 
     public PulsarService(PulsarProperties pulsarProperties,
                          BasicProperties basicProperties,
@@ -143,6 +191,7 @@ public class PulsarService {
     @PostConstruct
     public void start() {
         try {
+            validateTimeoutConfiguration();
             client = PulsarClient.builder()
                     .serviceUrl(pulsarProperties.servers())
                     .authentication(AuthenticationFactory.token(pulsarProperties.token()))
@@ -221,6 +270,9 @@ public class PulsarService {
         closeQuietly(sendProducer, "sendProducer");
         closeQuietly(ocrProducer, "ocrProducer");
         closeQuietly(client, "pulsarClient");
+        for (ExecutorService worker : new ArrayList<>(workerExecutors)) {
+            shutdownWorker(worker);
+        }
         for (int i = 0; i < receiveThreads.size(); i++) {
             joinQuietly(receiveThreads.get(i), "pulsar-receive-" + i);
         }
@@ -236,20 +288,274 @@ public class PulsarService {
 
     private void consumeReceiveLoop(Consumer<byte[]> consumer) {
         while (running) {
+            Message<byte[]> msg;
             try {
-                Message<byte[]> msg = consumer.receive();
-                handleReceiveMessage(consumer, msg);
+                msg = consumer.receive();
             } catch (Throwable e) {
                 if (!running) {
                     break;
                 }
                 log.error("pulsar receive loop error: {}", e.getMessage(), e);
                 sleepBriefly();
+                continue;
+            }
+            try {
+                runWithWatchdog(consumer, msg, this::handleReceiveMessage);
+            } catch (Throwable e) {
+                if (!running) {
+                    break;
+                }
+                // Never let anything escape the loop: a dead receive thread leaves its
+                // Consumer registered with the broker while nothing consumes from it.
+                log.error("pulsar receive watchdog error: {}", e.getMessage(), e);
+                sleepBriefly();
             }
         }
     }
 
-    private void handleReceiveMessage(Consumer<byte[]> consumer, Message<byte[]> pulsarMsg) {
+    // ---------------------------------------------------------------------
+    // Per-message wall-clock watchdog (pulsar.consum_timeout_min)
+    // ---------------------------------------------------------------------
+
+    /**
+     * Work item executed on the watchdog worker thread. Implementations must fill
+     * the two references as early as they can: the watchdog uses them to report
+     * and identify an item that is still stuck inside the worker.
+     */
+    @FunctionalInterface
+    private interface MessageHandler {
+        void handle(Consumer<byte[]> consumer, Message<byte[]> msg,
+                    AtomicReference<Object> businessIdRef,
+                    AtomicReference<Map<String, Object>> extendRef,
+                    AtomicBoolean abandoned);
+    }
+
+    /**
+     * Runs one inbound message on a dedicated worker thread under a wall-clock
+     * watchdog.
+     *
+     * <p>When {@code pulsar.consum_timeout_min} is {@code 0} (default) the
+     * handler runs inline on the consumer thread, exactly as it did before the
+     * watchdog existed. Otherwise the consumer thread waits at most that long:
+     * on expiry the item is reported downstream as a failure
+     * ({@code jsonUrl=""}), acknowledged <strong>without redelivery</strong>,
+     * and the worker is abandoned (see {@link #onMessageTimeout}).</p>
+     *
+     * <p>The worker also arms {@link ProcessingDeadline} with the same budget so
+     * the core pipeline's cooperative checkpoints normally abort the document
+     * first - cleanly, leaving no orphan thread behind.</p>
+     */
+    private void runWithWatchdog(Consumer<byte[]> consumer, Message<byte[]> msg, MessageHandler handler) {
+        long timeoutMillis = messageTimeoutMillis();
+        AtomicReference<Object> businessIdRef = new AtomicReference<>();
+        AtomicReference<Map<String, Object>> extendRef = new AtomicReference<>();
+        AtomicBoolean abandoned = new AtomicBoolean(false);
+
+        if (timeoutMillis <= 0) {
+            // Watchdog disabled: keep the historical inline behaviour (and its thread
+            // count) so operators can turn the feature off without surprises.
+            handler.handle(consumer, msg, businessIdRef, extendRef, abandoned);
+            return;
+        }
+
+        ExecutorService worker = newWorkerExecutor(consumer.getConsumerName());
+        try {
+            Future<?> future = worker.submit(() -> {
+                ProcessingDeadline.start(timeoutMillis);
+                try {
+                    handler.handle(consumer, msg, businessIdRef, extendRef, abandoned);
+                } catch (Throwable t) {
+                    log.error("message handler threw on worker thread: {}", t.getMessage(), t);
+                } finally {
+                    // Worker threads are per-message, but the budget is a ThreadLocal and
+                    // the thread may be reused by the pool, so always clear it.
+                    ProcessingDeadline.clear();
+                    if (abandoned.get()) {
+                        // The watchdog gave up on this item earlier; the worker has now
+                        // stopped by itself, so it no longer holds heap. Release its slot
+                        // so the escalation counter reflects *live* abandoned workers
+                        // rather than a lifetime total.
+                        int live = abandonedWorkers.decrementAndGet();
+                        log.warn("abandoned worker finished after the watchdog gave up on it, "
+                                + "liveAbandonedWorkers={}", live);
+                        workerExecutors.remove(worker);
+                        worker.shutdown();
+                    }
+                }
+            });
+            future.get(timeoutMillis, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            onMessageTimeout(consumer, msg, businessIdRef, extendRef, worker);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("interrupted while waiting for message processing, businessId={}", businessIdRef.get());
+            acknowledgeQuietly(consumer, msg, businessIdRef.get());
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            log.error("message worker failed, businessId={}: {}", businessIdRef.get(), cause.getMessage(), cause);
+            acknowledgeQuietly(consumer, msg, businessIdRef.get());
+        } finally {
+            if (!abandoned.get()) {
+                worker.shutdown();
+                workerExecutors.remove(worker);
+            }
+        }
+    }
+
+    /**
+     * Handles an item whose worker exceeded {@code pulsar.consum_timeout_min}:
+     * publish the failure result, acknowledge the inbound message so the broker
+     * never redelivers it, abandon the worker, and escalate if such workers pile up.
+     */
+    private void onMessageTimeout(Consumer<byte[]> consumer, Message<byte[]> msg,
+                                  AtomicReference<Object> businessIdRef,
+                                  AtomicReference<Map<String, Object>> extendRef,
+                                  ExecutorService worker) {
+        int abandoned = abandonedWorkers.incrementAndGet();
+        Object businessId = businessIdRef.get();
+        Map<String, Object> extend = extendRef.get();
+        if (businessId == null) {
+            // The worker never reached the payload parsing (e.g. it is stuck in the
+            // download). Recover the identity here so the failure report is usable.
+            Map<String, Object> inbound = parseInbound(msg);
+            businessId = inbound == null ? null : inbound.get("businessId");
+            extend = inbound == null ? null : uncheckedMap(inbound.get("extend"));
+        }
+        log.error("message processing TIMEOUT after {} min, force-ack and skip (no redelivery): "
+                + "businessId={}, consumer={}, abandonedWorkers={}. Stuck worker stack:{}",
+                pulsarProperties.consumTimeoutMin(), businessId, consumer.getConsumerName(),
+                abandoned, describeWorkerThreads());
+        // Same failure contract as every other failure: downstream sees jsonUrl="" and
+        // decides what to do with it (e.g. retry_pdf_parse). Per the agreed semantics
+        // there is deliberately NO redelivery on the Pulsar side.
+        sendResultMessage("", businessId, extend);
+        acknowledgeQuietly(consumer, msg, businessId);
+        // Best effort: only helps for code paths that honour interrupts. The core
+        // pipeline's ProcessingDeadline checkpoints are the mechanism that actually
+        // stops a runaway document; a worker that ignores interrupts stays until it
+        // finishes, hence the escalation below.
+        worker.shutdownNow();
+        escalateIfTooManyAbandoned(abandoned);
+    }
+
+    /**
+     * @return configured watchdog budget in milliseconds; {@code 0} disables it
+     */
+    private long messageTimeoutMillis() {
+        return Math.max(0L, TimeUnit.MINUTES.toMillis(pulsarProperties.consumTimeoutMin()));
+    }
+
+    /**
+     * One abandoned worker per consumer slot is expected when a poison oversized
+     * document shows up; beyond that the instance is degrading and operators must
+     * hear about it.
+     */
+    private int abandonedSoftLimit() {
+        return Math.max(1, pulsarProperties.count() + pulsarProperties.ocrCount());
+    }
+
+    /**
+     * Twice the soft limit: abandoned workers keep their heap (page contents,
+     * images) alive, so at this point restarting is strictly better than sliding
+     * into an OOM. Restarting is recoverable; a slow-motion OOM is not.
+     */
+    private int abandonedHardLimit() {
+        return 2 * abandonedSoftLimit();
+    }
+
+    private void escalateIfTooManyAbandoned(int abandoned) {
+        int hardLimit = abandonedHardLimit();
+        if (abandoned >= hardLimit) {
+            log.error("abandoned message workers reached the hard limit ({} >= {}); exiting so the "
+                    + "orchestrator restarts this instance with a clean heap. "
+                    + "Investigate the timed-out businessIds above.", abandoned, hardLimit);
+            System.exit(1);
+        } else if (abandoned >= abandonedSoftLimit()) {
+            log.error("abandoned message workers reached the soft limit ({} >= {}); consumption "
+                    + "continues but this instance is degrading.", abandoned, abandonedSoftLimit());
+        }
+    }
+
+    private ExecutorService newWorkerExecutor(String consumerName) {
+        ExecutorService worker = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, WORKER_THREAD_PREFIX + consumerName);
+            t.setDaemon(true);
+            return t;
+        });
+        workerExecutors.add(worker);
+        return worker;
+    }
+
+    private static void shutdownWorker(ExecutorService worker) {
+        try {
+            worker.shutdownNow();
+        } catch (Throwable e) {
+            // best effort
+        }
+    }
+
+    /**
+     * Dumps the stack of every live worker thread. Attached to the timeout error
+     * log so the next occurrence can be triaged from Kibana alone - the previous
+     * production incident required a manual {@code jcmd Thread.print} on the pod.
+     */
+    private static String describeWorkerThreads() {
+        ThreadMXBean bean = ManagementFactory.getThreadMXBean();
+        ThreadInfo[] infos = bean.getThreadInfo(bean.getAllThreadIds(), Integer.MAX_VALUE);
+        StringBuilder sb = new StringBuilder();
+        for (ThreadInfo info : infos) {
+            if (info == null || info.getThreadName() == null
+                    || !info.getThreadName().startsWith(WORKER_THREAD_PREFIX)) {
+                continue;
+            }
+            sb.append(System.lineSeparator()).append(info);
+        }
+        return sb.length() == 0 ? " <none>" : sb.toString();
+    }
+
+    private Map<String, Object> parseInbound(Message<byte[]> msg) {
+        try {
+            return objectMapper.readValue(
+                    new String(msg.getData(), StandardCharsets.UTF_8),
+                    new TypeReference<Map<String, Object>>() {});
+        } catch (Throwable e) {
+            log.warn("cannot parse inbound payload for timeout reporting: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> uncheckedMap(Object value) {
+        return value instanceof Map ? (Map<String, Object>) value : null;
+    }
+
+    /**
+     * Cross-checks {@code pulsar.ack_timeout_seconds} against
+     * {@code pulsar.consum_timeout_min}. An ack timeout shorter than the watchdog
+     * makes the broker redeliver an item that is still being processed, which is
+     * precisely the duplicate-work storm this watchdog replaces.
+     */
+    private void validateTimeoutConfiguration() {
+        int ackTimeoutSeconds = pulsarProperties.ackTimeoutSeconds();
+        long watchdogMillis = messageTimeoutMillis();
+        if (watchdogMillis <= 0 || ackTimeoutSeconds <= 0) {
+            return;
+        }
+        if (TimeUnit.SECONDS.toMillis(ackTimeoutSeconds) < watchdogMillis) {
+            log.error("pulsar.ack_timeout_seconds={}s is SHORTER than pulsar.consum_timeout_min={}min. "
+                    + "The broker will redeliver every message that outlives the ack timeout while the "
+                    + "watchdog is still waiting, so one slow document gets processed by several "
+                    + "consumers at once (observed in production: 21 duplicate deliveries of a single "
+                    + "message). Set ack_timeout_seconds=0 to disable broker-side redelivery and let "
+                    + "the watchdog own the timeout.",
+                    ackTimeoutSeconds, pulsarProperties.consumTimeoutMin());
+        }
+    }
+
+    private void handleReceiveMessage(Consumer<byte[]> consumer, Message<byte[]> pulsarMsg,
+                                      AtomicReference<Object> businessIdRef,
+                                      AtomicReference<Map<String, Object>> extendRef,
+                                      AtomicBoolean abandoned) {
         String jsonUrl = "";
         byte[] ocrJsonBytes = new byte[0];
         Object businessId = null;
@@ -264,6 +570,10 @@ public class PulsarService {
                     payload, new TypeReference<Map<String, Object>>() {});
             businessId = inbound.get("businessId");
             extend = (Map<String, Object>) inbound.get("extend");
+            // Published to the watchdog as early as possible: if this worker is
+            // abandoned later, these references are all it has to identify the item.
+            businessIdRef.set(businessId);
+            extendRef.set(extend);
             String fileUrl = resolveFileUrl(asString(inbound.get("fileUrl")));
             /*if (shouldSkipAnnualReport(extend) && env.acceptsProfiles(Profiles.of("prod"))) {
                 log.info("Skip annual report, businessId={}, fileUrl={}", businessId, fileUrl);
@@ -301,12 +611,20 @@ public class PulsarService {
             log.error("handleReceiveMessage failed, businessId={}: {}", businessId, e.getMessage(), e);
         }
 
-        boolean sendResult = !basicProperties.completeDisplay() || ocrJsonBytes.length == 0;
-        if (sendResult) {
-            sendResultMessage(jsonUrl, businessId, extend);
-        } else {
-            log.info("complete_display=true and ocr json present, skip send_topic_name, businessId={}",
+        if (abandoned.get()) {
+            // The watchdog already published the failure result and acknowledged the
+            // message; publishing/acking again for an abandoned item would double-report
+            // it downstream. Only the local temp cleanup below is still worth doing.
+            log.warn("message was abandoned by the watchdog, skip result publish and ack, businessId={}",
                     businessId);
+        } else {
+            boolean sendResult = !basicProperties.completeDisplay() || ocrJsonBytes.length == 0;
+            if (sendResult) {
+                sendResultMessage(jsonUrl, businessId, extend);
+            } else {
+                log.info("complete_display=true and ocr json present, skip send_topic_name, businessId={}",
+                        businessId);
+            }
         }
 
         // Local cleanup runs AFTER downstream messages have been published
@@ -317,7 +635,9 @@ public class PulsarService {
             deleteRecursively(inputDir);
         }
 
-        acknowledgeQuietly(consumer, pulsarMsg, businessId);
+        if (!abandoned.get()) {
+            acknowledgeQuietly(consumer, pulsarMsg, businessId);
+        }
     }
 
     private String resolveFileUrl(String fileUrl) {
@@ -341,20 +661,33 @@ public class PulsarService {
 
     private void consumeOcrReceiveLoop(Consumer<byte[]> consumer) {
         while (running) {
+            Message<byte[]> msg;
             try {
-                Message<byte[]> msg = consumer.receive();
-                handleOcrReceiveMessage(consumer, msg);
+                msg = consumer.receive();
             } catch (Throwable e) {
                 if (!running) {
                     break;
                 }
                 log.error("pulsar ocr receive loop error: {}", e.getMessage(), e);
                 sleepBriefly();
+                continue;
+            }
+            try {
+                runWithWatchdog(consumer, msg, this::handleOcrReceiveMessage);
+            } catch (Throwable e) {
+                if (!running) {
+                    break;
+                }
+                log.error("pulsar ocr receive watchdog error: {}", e.getMessage(), e);
+                sleepBriefly();
             }
         }
     }
 
-    private void handleOcrReceiveMessage(Consumer<byte[]> consumer, Message<byte[]> pulsarMsg) {
+    private void handleOcrReceiveMessage(Consumer<byte[]> consumer, Message<byte[]> pulsarMsg,
+                                         AtomicReference<Object> businessIdRef,
+                                         AtomicReference<Map<String, Object>> extendRef,
+                                         AtomicBoolean abandoned) {
         Object businessId = null;
         String jsonUrl = "";
         Map<String, Object> extend = null;
@@ -364,6 +697,8 @@ public class PulsarService {
                     pulsarMsg.getValue(), new TypeReference<Map<String, Object>>() {});
             businessId = inbound.get("businessId");
             extend = (Map<String, Object>) inbound.get("extend");
+            businessIdRef.set(businessId);
+            extendRef.set(extend);
             Boolean hasError = asBoolean(inbound.get("hasError"));
             String receivedJsonUrl = resolveObsJsonUrl(asString(inbound.get("jsonUrl")));
             String errorMsg = asString(inbound.get("errorMsg"));
@@ -390,14 +725,21 @@ public class PulsarService {
 
         // Per task step 3 the OCR consumer always publishes to send_topic_name
         // (no complete_display branch). On any failure jsonUrl stays "".
-        sendResultMessage(jsonUrl, businessId, extend);
+        if (abandoned.get()) {
+            log.warn("ocr message was abandoned by the watchdog, skip result publish and ack, businessId={}",
+                    businessId);
+        } else {
+            sendResultMessage(jsonUrl, businessId, extend);
+        }
 
         // Local cleanup runs AFTER downstream messages have been published
         if (inputDir != null) {
             deleteRecursively(inputDir);
         }
 
-        acknowledgeQuietly(consumer, pulsarMsg, businessId);
+        if (!abandoned.get()) {
+            acknowledgeQuietly(consumer, pulsarMsg, businessId);
+        }
     }
 
     /**
