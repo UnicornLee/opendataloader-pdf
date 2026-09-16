@@ -111,6 +111,7 @@ public class PdfProcessService {
             Config config = new Config();
             config.setOutputFolder(outputDir.toString());
             config.setGenerateJSON(false);
+            config.setThreads(pdfProperties.threads());
             outputSpec.apply(config);
             if (StringUtils.hasText(pages)) {
                 config.setPages(pages);
@@ -181,6 +182,7 @@ public class PdfProcessService {
             Config config = new Config();
             config.setOutputFolder(outputDir.toString());
             config.setGenerateJSON(true);
+            config.setThreads(pdfProperties.threads());
             config.setCustomOptions(buildOssCustomOptions(businessId, extend));
             config.getCustomOptions().put("url", fileUrl);
 
