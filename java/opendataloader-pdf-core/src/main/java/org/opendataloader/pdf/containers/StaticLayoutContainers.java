@@ -25,6 +25,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
 
 
@@ -33,7 +34,16 @@ public class StaticLayoutContainers {
 
     private static final ThreadLocal<Long> currentContentId = new ThreadLocal<>();
     private static final ThreadLocal<List<SemanticHeading>> headings = new ThreadLocal<>();
-    private static final ThreadLocal<Integer> imageIndex = new ThreadLocal<>();
+    /**
+     * Global image-file index, unique across ALL threads. Must not be a
+     * ThreadLocal: image extraction now also runs on ForkJoinPool workers
+     * (chart/formula loop in DocumentProcessor), and per-thread counters would
+     * both NPE on first use (no initial value on workers) and produce duplicate
+     * imageFileN.png names across workers, silently overwriting each other's
+     * files. An AtomicInteger keeps names unique regardless of which thread
+     * stamps the next chunk.
+     */
+    private static final AtomicInteger imageIndex = new AtomicInteger(1);
     private static final ThreadLocal<Boolean> isUseStructTree = new ThreadLocal<>();
     private static final ThreadLocal<String> imagesDirectory = new ThreadLocal<>();
     private static final ThreadLocal<Boolean> embedImages = new ThreadLocal<>();
@@ -168,13 +178,11 @@ public class StaticLayoutContainers {
     }
 
     public static int incrementImageIndex() {
-        int imageIndex = StaticLayoutContainers.imageIndex.get();
-        StaticLayoutContainers.imageIndex.set(imageIndex + 1);
-        return imageIndex;
+        return imageIndex.getAndIncrement();
     }
 
     public static void resetImageIndex() {
-        StaticLayoutContainers.imageIndex.set(1);
+        imageIndex.set(1);
     }
 
     public static boolean isEmbedImages() {

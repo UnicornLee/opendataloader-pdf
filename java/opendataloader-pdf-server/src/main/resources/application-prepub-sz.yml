@@ -55,6 +55,8 @@ paddle:
     url: http://192.168.1.193:8088/layout-parsing
 
 pdf:
+    # Per-message worker-thread cap for the parse pipeline (see PdfProperties.threads)
+    threads: 4
     temp:
         path: /tmp/pdf_parse
     output:

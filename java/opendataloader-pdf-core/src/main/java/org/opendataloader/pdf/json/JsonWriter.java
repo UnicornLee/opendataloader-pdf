@@ -32,6 +32,7 @@ import org.opendataloader.pdf.custom.entities.Bookmark;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
 import org.opendataloader.pdf.custom.utils.BookmarkQualitySelector;
 import org.opendataloader.pdf.custom.utils.BookmarkUtils;
+import org.opendataloader.pdf.exceptions.ProcessingTimeoutException;
 import org.opendataloader.pdf.entities.content.ShapeChunk;
 import org.opendataloader.pdf.custom.utils.FileUtils;
 import org.opendataloader.pdf.markdown.MarkdownSyntax;
@@ -97,7 +98,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ForkJoinPool;
+import java.util.function.IntConsumer;
 import java.util.logging.Level;
+import java.util.stream.IntStream;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -1865,6 +1870,7 @@ public class JsonWriter {
      * @param outputFolder output directory (same as the main JSON)
      * @param pdfFileName  original PDF file name (with extension), used to derive {@code <pdfname>_ocr.json}
      */
+    @SuppressWarnings("unchecked")
     private static void writeOcrDetectionJson(ObjectMapper mapper,
                                               Map<String, Object> map,
                                               String outputFolder,
@@ -1883,49 +1889,70 @@ public class JsonWriter {
         List<Map<String, Object>> data = (List<Map<String, Object>>) dataObj;
         List<Map<String, Object>> ocrEntries = new ArrayList<>();
 
+        // Derived once for all three passes (the sequential version derived the same
+        // values at the top of each pass).
+        final File pdfFile = new File(inputPdfName);
+        String pdfBaseName = pdfFileName;
+        if (pdfBaseName.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
+            pdfBaseName = pdfBaseName.substring(0, pdfBaseName.length() - 4);
+        }
+        if (pdfBaseName.endsWith(".")) {
+            pdfBaseName = pdfBaseName.substring(0, pdfBaseName.length() - 1);
+        }
+        final String pdfBase = pdfBaseName;
+
+        // Pre-create the images directory once: the per-page render helpers call
+        // mkdirs() from pool workers below, and two threads racing mkdirs() on the
+        // same path would make the loser log a spurious "unable to create" warning.
+        File imagesDir = new File(outputFolder, pdfBase + MarkdownSyntax.IMAGES_DIRECTORY_SUFFIX);
+        if (!imagesDir.exists() && !imagesDir.mkdirs()) {
+            LOGGER.log(Level.WARNING, "Unable to create images directory for ocr screenshots: {0}",
+                imagesDir.getAbsolutePath());
+        }
+
+        // Screenshot rendering dominates this phase (~3s per 300-DPI page), so the
+        // three passes below run on a bounded pool exactly like DocumentProcessor's
+        // per-page loops. Pages are independent: each page renders its own uniquely
+        // named PNG, marks is_ocr only on its own page map, and writes its entry to a
+        // page-indexed slot merged in page order afterwards — entry order in the
+        // emitted _ocr.json is identical to the old sequential version. Parallelism
+        // follows Config.getThreads(); at the default of 1 this behaves sequentially.
+        // The deadline is captured on the caller thread because the watchdog
+        // ThreadLocal is not visible on pool workers, and passed explicitly via the
+        // checkUnchecked(deadline, ...) variant (mirrors DocumentProcessor).
+        final long deadline = ProcessingDeadline.snapshot();
+        // Clamp by the page count as in DocumentProcessor: fewer pages than threads
+        // gains nothing from the spare workers.
+        final int parallelism = Math.max(1, Math.min(config != null ? config.getThreads() : 1, data.size()));
+        final ForkJoinPool screenshotPool = new ForkJoinPool(parallelism);
+        try {
         // Pass 1: pages flagged with have_stream_table=true are rendered to PNG and
         // uploaded to the temp bucket (when OSS is enabled), then emitted as their own
         // entries in _ocr.json with have_stream_table=true so downstream OCR tooling
         // can distinguish stream-table-triggered entries from image-triggered ones.
+        // inputPdfName is the absolute path of the local PDF after download; using it
+        // directly avoids accidentally picking up the cloud url stored in map("url").
         if (pageHaveStreamTables != null) {
-            // inputPdfName is the absolute path of the local PDF after download; using it
-            // directly avoids accidentally picking up the cloud url stored in map("url").
-            File pdfFile = new File(inputPdfName);
-            String pdfBaseName = pdfFileName;
-            if (pdfBaseName.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
-                pdfBaseName = pdfBaseName.substring(0, pdfBaseName.length() - 4);
-            }
-            if (pdfBaseName.endsWith(".")) {
-                pdfBaseName = pdfBaseName.substring(0, pdfBaseName.length() - 1);
-            }
-            for (int i = 0; i < pageHaveStreamTables.length && i < data.size(); i++) {
+            final int n = Math.min(pageHaveStreamTables.length, data.size());
+            final Map<String, Object>[] entries = new Map[n];
+            runScreenshotPass(screenshotPool, deadline, 0, n, "ocr stream-table screenshot page ", i -> {
                 if (!pageHaveStreamTables[i]) {
-                    continue;
+                    return;
                 }
-                Map<String, Object> page = data.get(i);
-                double[] dims = readPageDimensions(page);
-                double pageWidth = dims[0];
-                double pageHeight = dims[1];
-                double[] clipY = computeClipY(page);
-                String imageUrl = renderStreamTablePageScreenshot(pdfFile, outputFolder, pdfBaseName, i,
-                    ossEnabled, ossConfig, obsClient, clipY);
-                if (imageUrl == null) {
-                    continue;
+                try {
+                    Map<String, Object> entry = buildStreamTableOcrEntry(pdfFile, outputFolder, pdfBase, i, data,
+                        ossEnabled, ossConfig, obsClient);
+                    if (entry != null) {
+                        entries[i] = entry;
+                    }
+                } catch (IOException ioe) {
+                    throw new UncheckedIOException(ioe);
                 }
-                // Mark is_ocr on the page (persisted to the main JSON when bookmarks are
-                // written back); also record that this page already produced an entry so the
-                // image-hit pass below skips it.
-                page.put(JsonName.IS_OCR, true);
-                Map<String, Object> entry = new LinkedHashMap<>();
-                entry.put(JsonName.PAGE_INDEX, page.get(JsonName.PAGE_INDEX));
-                entry.put("image_url", imageUrl);
-                // image_width/image_height describe the PDF region captured: x stays full page,
-                // y is the clip range (header/footer excluded) — falls back to the full page when
-                // neither header_pos nor footer_pos is available.
-                double capturedHeight = clipY != null ? (clipY[1] - clipY[0]) : pageHeight;
-                entry.put("image_height", capturedHeight);
-                entry.put("image_width", pageWidth);
-                ocrEntries.add(entry);
+            });
+            for (Map<String, Object> entry : entries) {
+                if (entry != null) {
+                    ocrEntries.add(entry);
+                }
             }
         }
 
@@ -1935,41 +1962,30 @@ public class JsonWriter {
         // got a stream-table entry it is skipped here so consumers see at most one image
         // entry per detected page.
         if (pageHaveFormulas != null) {
-            // Reuse the same inputPdfName/pdFBasename derivation as Pass 1.
-            File pdfFile = new File(inputPdfName);
-            String pdfBaseName = pdfFileName;
-            if (pdfBaseName.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
-                pdfBaseName = pdfBaseName.substring(0, pdfBaseName.length() - 4);
-            }
-            if (pdfBaseName.endsWith(".")) {
-                pdfBaseName = pdfBaseName.substring(0, pdfBaseName.length() - 1);
-            }
-            for (int i = 0; i < pageHaveFormulas.length && i < data.size(); i++) {
+            final int n = Math.min(pageHaveFormulas.length, data.size());
+            final Map<String, Object>[] entries = new Map[n];
+            runScreenshotPass(screenshotPool, deadline, 0, n, "ocr formula screenshot page ", i -> {
                 if (!pageHaveFormulas[i]) {
-                    continue;
+                    return;
                 }
                 // Mutex: a page already served by Pass 1 (stream-table) keeps that entry.
                 if (pageHaveStreamTables != null && i < pageHaveStreamTables.length && pageHaveStreamTables[i]) {
-                    continue;
+                    return;
                 }
-                Map<String, Object> page = data.get(i);
-                double[] dims = readPageDimensions(page);
-                double pageWidth = dims[0];
-                double pageHeight = dims[1];
-                double[] clipY = computeClipY(page);
-                String imageUrl = renderFormulaPageScreenshot(pdfFile, outputFolder, pdfBaseName, i,
-                    ossEnabled, ossConfig, obsClient, clipY);
-                if (imageUrl == null) {
-                    continue;
+                try {
+                    Map<String, Object> entry = buildFormulaOcrEntry(pdfFile, outputFolder, pdfBase, i, data,
+                        ossEnabled, ossConfig, obsClient);
+                    if (entry != null) {
+                        entries[i] = entry;
+                    }
+                } catch (IOException ioe) {
+                    throw new UncheckedIOException(ioe);
                 }
-                page.put(JsonName.IS_OCR, true);
-                Map<String, Object> entry = new LinkedHashMap<>();
-                entry.put(JsonName.PAGE_INDEX, page.get(JsonName.PAGE_INDEX));
-                entry.put("image_url", imageUrl);
-                double capturedHeight = clipY != null ? (clipY[1] - clipY[0]) : pageHeight;
-                entry.put("image_height", capturedHeight);
-                entry.put("image_width", pageWidth);
-                ocrEntries.add(entry);
+            });
+            for (Map<String, Object> entry : entries) {
+                if (entry != null) {
+                    ocrEntries.add(entry);
+                }
             }
         }
 
@@ -1979,98 +1995,28 @@ public class JsonWriter {
         // entry's image_url — the embedded image in the page is no longer used directly.
         // Pages already covered by Pass 1 / Pass 1.5 are skipped so consumers see at most one
         // image entry per page.
-        File pdfFile = new File(inputPdfName);
-        String pdfBaseName = pdfFileName;
-        if (pdfBaseName.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
-            pdfBaseName = pdfBaseName.substring(0, pdfBaseName.length() - 4);
+        {
+            final int pass2Size = data.size();
+            final Map<String, Object>[] pass2Entries = new Map[pass2Size];
+            runScreenshotPass(screenshotPool, deadline, 0, pass2Size, "ocr image-dominant screenshot page ", i -> {
+                try {
+                    Map<String, Object> entry = buildImageDominantOcrEntry(pdfFile, outputFolder, pdfBase, i, data,
+                        pageHaveStreamTables, pageHaveFormulas, ossEnabled, ossConfig, obsClient);
+                    if (entry != null) {
+                        pass2Entries[i] = entry;
+                    }
+                } catch (IOException ioe) {
+                    throw new UncheckedIOException(ioe);
+                }
+            });
+            for (Map<String, Object> entry : pass2Entries) {
+                if (entry != null) {
+                    ocrEntries.add(entry);
+                }
+            }
         }
-        if (pdfBaseName.endsWith(".")) {
-            pdfBaseName = pdfBaseName.substring(0, pdfBaseName.length() - 1);
-        }
-        for (int i = 0; i < data.size(); i++) {
-            // Skip pages already served by Pass 1 / Pass 1.5 so consumers see at most one
-            // image entry per page.
-            if (pageHaveStreamTables != null && i < pageHaveStreamTables.length && pageHaveStreamTables[i]) {
-                continue;
-            }
-            if (pageHaveFormulas != null && i < pageHaveFormulas.length && pageHaveFormulas[i]) {
-                continue;
-            }
-            Map<String, Object> page = data.get(i);
-            Object itemsObj = page.get(JsonName.ITEMS);
-            if (!(itemsObj instanceof List)) {
-                continue;
-            }
-            List<Map<String, Object>> items = (List<Map<String, Object>>) itemsObj;
-
-            // Condition 1: at most 4 items on the page.
-            if (items.size() > 4) {
-                continue;
-            }
-
-            // Condition 2: no tables.
-            boolean hasTable = false;
-            for (Map<String, Object> item : items) {
-                String itemType = (String) item.get(JsonName.ITEM_TYPE);
-                if ("lattice_table".equals(itemType) || "stream_table".equals(itemType)) {
-                    hasTable = true;
-                    break;
-                }
-            }
-            if (hasTable) {
-                continue;
-            }
-
-            // Conditions 3 + 4: contains an image and some image has height / page.height > 0.8.
-            Object pageHeightObj = page.get(JsonName.HEIGHT);
-            if (!(pageHeightObj instanceof Number)) {
-                continue;
-            }
-            double pageHeight = ((Number) pageHeightObj).doubleValue();
-            if (pageHeight <= 0) {
-                continue;
-            }
-
-            boolean hasLargeImage = false;
-            for (Map<String, Object> item : items) {
-                String itemType = (String) item.get(JsonName.ITEM_TYPE);
-                if (!"image".equals(itemType)) {
-                    continue;
-                }
-                Object imageHeightObj = item.get(JsonName.HEIGHT);
-                if (!(imageHeightObj instanceof Number)) {
-                    continue;
-                }
-                double imageHeight = ((Number) imageHeightObj).doubleValue();
-                if (imageHeight / pageHeight > 0.8) {
-                    hasLargeImage = true;
-                    break;
-                }
-            }
-            if (!hasLargeImage) {
-                continue;
-            }
-
-            // Hit: mark is_ocr on the page and render a fresh screenshot (clipped to
-            // header/footer bands) so OCR gets the cleaned-up page rather than the embedded image.
-            page.put(JsonName.IS_OCR, true);
-
-            double[] dims = readPageDimensions(page);
-            double pageWidth = dims[0];
-            double[] clipY = computeClipY(page);
-            String imageUrl = renderOcrPageScreenshot(pdfFile, outputFolder, pdfBaseName, i,
-                ossEnabled, ossConfig, obsClient, clipY);
-            if (imageUrl == null) {
-                continue;
-            }
-
-            Map<String, Object> entry = new LinkedHashMap<>();
-            entry.put(JsonName.PAGE_INDEX, page.get(JsonName.PAGE_INDEX));
-            entry.put("image_url", imageUrl);
-            double capturedHeight = clipY != null ? (clipY[1] - clipY[0]) : pageHeight;
-            entry.put("image_height", capturedHeight);
-            entry.put("image_width", pageWidth);
-            ocrEntries.add(entry);
+        } finally {
+            screenshotPool.shutdown();
         }
 
         // Skip writing when no page hit, to avoid producing an empty _ocr.json.
@@ -2113,6 +2059,199 @@ public class JsonWriter {
         // Compact JSON (single-line, matching the sample 202604231785283947722051256_ocr.json format).
         mapper.writeValue(new File(ocrFileName), ocrResult);
         LOGGER.log(Level.INFO, "Created {0}", ocrFileName);
+    }
+
+    /**
+     * Runs one OCR-screenshot pass over {@code [from, to)} on the given pool. Each index is
+     * one page: the per-page task decides eligibility (flag checks / hit conditions) and
+     * returns silently for non-eligible pages. A {@link ProcessingTimeoutException} thrown
+     * by the deadline checkpoint (wrapped in {@link UncheckedIOException} to pass through
+     * the lambda) is rethrown as-is so the watchdog keeps classifying the abort as a
+     * timeout; IO failures surface as the original {@link IOException}.
+     */
+    private static void runScreenshotPass(ForkJoinPool pool, long deadline, int from, int to,
+                                          String stage, IntConsumer pageTask) throws IOException {
+        try {
+            pool.submit(() ->
+                IntStream.range(from, to).parallel().forEach(i -> {
+                    ProcessingDeadline.checkUnchecked(deadline, stage + (i + 1));
+                    pageTask.accept(i);
+                })
+            ).get();
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while rendering OCR screenshots at " + stage, ie);
+        } catch (ExecutionException ee) {
+            Throwable c = ee.getCause() != null ? ee.getCause() : ee;
+            if (c instanceof UncheckedIOException && c.getCause() != null) {
+                c = c.getCause();
+            }
+            if (c instanceof ProcessingTimeoutException) {
+                throw (ProcessingTimeoutException) c;
+            }
+            if (c instanceof IOException) {
+                throw (IOException) c;
+            }
+            throw new IOException("OCR screenshot rendering failed at " + stage + " ("
+                + c.getClass().getSimpleName() + ": " + c.getMessage() + ")", ee);
+        }
+    }
+
+    /**
+     * Pass-1 worker (runs on a pool thread): renders the stream-table screenshot for one
+     * page and builds its _ocr.json entry. Page-local by construction — only {@code data.get(i)}
+     * is touched. Returns {@code null} when rendering failed (the helper already logged a
+     * warning), matching the old sequential loop's {@code continue}.
+     */
+    private static Map<String, Object> buildStreamTableOcrEntry(File pdfFile, String outputFolder, String pdfBaseName,
+                                                                int i, List<Map<String, Object>> data,
+                                                                boolean ossEnabled, OssUploadConfig ossConfig,
+                                                                HuaweiObsClient obsClient) throws IOException {
+        Map<String, Object> page = data.get(i);
+        double[] dims = readPageDimensions(page);
+        double pageWidth = dims[0];
+        double pageHeight = dims[1];
+        double[] clipY = computeClipY(page);
+        String imageUrl = renderStreamTablePageScreenshot(pdfFile, outputFolder, pdfBaseName, i,
+            ossEnabled, ossConfig, obsClient, clipY);
+        if (imageUrl == null) {
+            return null;
+        }
+        // Mark is_ocr on the page (persisted to the main JSON when bookmarks are
+        // written back); also record that this page already produced an entry so the
+        // image-hit pass below skips it.
+        page.put(JsonName.IS_OCR, true);
+        Map<String, Object> entry = new LinkedHashMap<>();
+        entry.put(JsonName.PAGE_INDEX, page.get(JsonName.PAGE_INDEX));
+        entry.put("image_url", imageUrl);
+        // image_width/image_height describe the PDF region captured: x stays full page,
+        // y is the clip range (header/footer excluded) — falls back to the full page when
+        // neither header_pos nor footer_pos is available.
+        double capturedHeight = clipY != null ? (clipY[1] - clipY[0]) : pageHeight;
+        entry.put("image_height", capturedHeight);
+        entry.put("image_width", pageWidth);
+        return entry;
+    }
+
+    /**
+     * Pass-1.5 worker (runs on a pool thread): renders the formula screenshot for one page
+     * and builds its _ocr.json entry. The Pass-1 mutex (stream-table pages keep their entry)
+     * is applied by the caller before this method is invoked. Returns {@code null} when
+     * rendering failed, matching the old sequential loop's {@code continue}.
+     */
+    private static Map<String, Object> buildFormulaOcrEntry(File pdfFile, String outputFolder, String pdfBaseName,
+                                                            int i, List<Map<String, Object>> data,
+                                                            boolean ossEnabled, OssUploadConfig ossConfig,
+                                                            HuaweiObsClient obsClient) throws IOException {
+        Map<String, Object> page = data.get(i);
+        double[] dims = readPageDimensions(page);
+        double pageWidth = dims[0];
+        double pageHeight = dims[1];
+        double[] clipY = computeClipY(page);
+        String imageUrl = renderFormulaPageScreenshot(pdfFile, outputFolder, pdfBaseName, i,
+            ossEnabled, ossConfig, obsClient, clipY);
+        if (imageUrl == null) {
+            return null;
+        }
+        page.put(JsonName.IS_OCR, true);
+        Map<String, Object> entry = new LinkedHashMap<>();
+        entry.put(JsonName.PAGE_INDEX, page.get(JsonName.PAGE_INDEX));
+        entry.put("image_url", imageUrl);
+        double capturedHeight = clipY != null ? (clipY[1] - clipY[0]) : pageHeight;
+        entry.put("image_height", capturedHeight);
+        entry.put("image_width", pageWidth);
+        return entry;
+    }
+
+    /**
+     * Pass-2 worker (runs on a pool thread): when the page is dominated by a single large
+     * image (height / page.height &gt; 0.8) with no tables and at most 4 items, marks the
+     * page is_ocr and renders a fresh screenshot (clipped to header/footer bands) so OCR
+     * gets the cleaned-up page rather than the embedded image. Pages already covered by
+     * Pass 1 / Pass 1.5 are skipped so consumers see at most one image entry per page.
+     * Returns {@code null} for non-eligible pages and for failed renders, matching the old
+     * sequential loop's {@code continue}.
+     */
+    private static Map<String, Object> buildImageDominantOcrEntry(File pdfFile, String outputFolder, String pdfBaseName,
+                                                                  int i, List<Map<String, Object>> data,
+                                                                  boolean[] pageHaveStreamTables,
+                                                                  boolean[] pageHaveFormulas,
+                                                                  boolean ossEnabled, OssUploadConfig ossConfig,
+                                                                  HuaweiObsClient obsClient) throws IOException {
+        // Mutex: pages already served by Pass 1 / Pass 1.5 keep that entry.
+        if (pageHaveStreamTables != null && i < pageHaveStreamTables.length && pageHaveStreamTables[i]) {
+            return null;
+        }
+        if (pageHaveFormulas != null && i < pageHaveFormulas.length && pageHaveFormulas[i]) {
+            return null;
+        }
+        Map<String, Object> page = data.get(i);
+        Object itemsObj = page.get(JsonName.ITEMS);
+        if (!(itemsObj instanceof List)) {
+            return null;
+        }
+        List<Map<String, Object>> items = (List<Map<String, Object>>) itemsObj;
+
+        // Condition 1: at most 4 items on the page.
+        if (items.size() > 4) {
+            return null;
+        }
+
+        // Condition 2: no tables.
+        for (Map<String, Object> item : items) {
+            String itemType = (String) item.get(JsonName.ITEM_TYPE);
+            if ("lattice_table".equals(itemType) || "stream_table".equals(itemType)) {
+                return null;
+            }
+        }
+
+        // Conditions 3 + 4: contains an image and some image has height / page.height > 0.8.
+        Object pageHeightObj = page.get(JsonName.HEIGHT);
+        if (!(pageHeightObj instanceof Number)) {
+            return null;
+        }
+        double pageHeight = ((Number) pageHeightObj).doubleValue();
+        if (pageHeight <= 0) {
+            return null;
+        }
+        boolean hasLargeImage = false;
+        for (Map<String, Object> item : items) {
+            String itemType = (String) item.get(JsonName.ITEM_TYPE);
+            if (!"image".equals(itemType)) {
+                continue;
+            }
+            Object imageHeightObj = item.get(JsonName.HEIGHT);
+            if (!(imageHeightObj instanceof Number)) {
+                continue;
+            }
+            double imageHeight = ((Number) imageHeightObj).doubleValue();
+            if (imageHeight / pageHeight > 0.8) {
+                hasLargeImage = true;
+                break;
+            }
+        }
+        if (!hasLargeImage) {
+            return null;
+        }
+
+        // Hit: mark is_ocr on the page and render a fresh screenshot (clipped to
+        // header/footer bands) so OCR gets the cleaned-up page rather than the embedded image.
+        page.put(JsonName.IS_OCR, true);
+        double[] dims = readPageDimensions(page);
+        double pageWidth = dims[0];
+        double[] clipY = computeClipY(page);
+        String imageUrl = renderOcrPageScreenshot(pdfFile, outputFolder, pdfBaseName, i,
+            ossEnabled, ossConfig, obsClient, clipY);
+        if (imageUrl == null) {
+            return null;
+        }
+        Map<String, Object> entry = new LinkedHashMap<>();
+        entry.put(JsonName.PAGE_INDEX, page.get(JsonName.PAGE_INDEX));
+        entry.put("image_url", imageUrl);
+        double capturedHeight = clipY != null ? (clipY[1] - clipY[0]) : pageHeight;
+        entry.put("image_height", capturedHeight);
+        entry.put("image_width", pageWidth);
+        return entry;
     }
 
     /**
