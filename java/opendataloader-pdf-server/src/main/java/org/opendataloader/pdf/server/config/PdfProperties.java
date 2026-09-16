@@ -24,7 +24,19 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * {@code pdf.output} group exposes the directory used for generated outputs.
  */
 @ConfigurationProperties("pdf")
-public record PdfProperties(@DefaultValue PdfTemp temp, @DefaultValue PdfOutput output) {
+public record PdfProperties(@DefaultValue PdfTemp temp, @DefaultValue PdfOutput output,
+                            /**
+                             * Per-message cap on the worker-thread parallelism used by the
+                             * core pipeline (per-page extraction loops, chart/formula loop,
+                             * OCR screenshot passes). The core clamps this further by the
+                             * document's page count, so small documents never spawn more
+                             * threads than pages. Sized against the pod's CPU/heap: every
+                             * consumer thread can process one message at a time, so the
+                             * effective worst-case thread count is roughly
+                             * {@code pulsar.count * pdf.threads}, and 300-DPI screenshot
+                             * rendering holds ~33MB of raster per worker.
+                             */
+                            @DefaultValue("4") int threads) {
 
     /**
      * {@code pdf.temp} sub-group; currently only the path is used.

@@ -97,6 +97,16 @@ public class DocumentProcessor {
     private static final double OCR_FALLBACK_GARBAGE_RATIO_THRESHOLD = 0.5;
     /** DPI used when rendering a page image for fallback OCR. */
     private static final float OCR_FALLBACK_RENDER_DPI = 300.0f;
+    /**
+     * Short-and-narrow {@code LineArtChunk} count above which per-page formula
+     * recognition is skipped in the chart/formula loop. Pages that exceed this
+     * threshold are typically dense scanned graphics (e.g. photo / signature /
+     * seal blocks) where {@link LineArtProcessor#haveFormulas} degenerates to
+     * its worst case (multi-minute per-page runtime on large scanned pages,
+     * see docs/memory/2026-09-15). Keep the threshold high enough that real
+     * formula-bearing pages still get scanned; tune with a regression set.
+     */
+    private static final long FORMULA_SCAN_LINE_ART_CHUNK_LIMIT = 20L;
 
     /**
      * Tracks the temp file produced by {@link #tryRepairPdfWithPdfBox} so
@@ -483,7 +493,10 @@ public class DocumentProcessor {
             pageArtifacts[i] = document.getArtifacts(i);
         }
 
-        int parallelism = config.getThreads();
+        // Clamp the configured cap by the page count: a 3-page document gains nothing
+        // from an 8-thread pool, and each spare worker costs a Thread plus whatever
+        // per-thread state the page tasks initialize.
+        int parallelism = Math.max(1, Math.min(config.getThreads(), totalPages));
         ForkJoinPool pool = new ForkJoinPool(parallelism);
         int pagesToProcessCount = (pagesToProcess != null) ? pagesToProcess.size() : totalPages;
         LOGGER.log(Level.INFO, "Processing {0} pages with {1} threads", new Object[]{pagesToProcessCount, parallelism});
@@ -694,54 +707,86 @@ public class DocumentProcessor {
             if (!paddleEnabled) {
                 LOGGER.log(Level.INFO, "No OCR service configured; skipping formula recognition to avoid false positives.");
             }
+            // Image output ThreadLocal state, captured on the main thread where
+            // setImagesDirectory() ran, for propagation to the pool workers below:
+            // the chart/formula loop writes image files from worker threads, and
+            // StaticLayoutContainers keeps imagesDirectory / imageFormat / embedImages
+            // in ThreadLocals that propagateState does not cover.
+            final String imagesDirectoryState = StaticLayoutContainers.getImagesDirectory();
+            final String imageFormatState = StaticLayoutContainers.getImageFormat();
+            final boolean embedImagesState = StaticLayoutContainers.isEmbedImages();
+            final Runnable propagateImageState = () -> {
+                StaticLayoutContainers.setImagesDirectory(imagesDirectoryState);
+                StaticLayoutContainers.setImageFormat(imageFormatState);
+                StaticLayoutContainers.setEmbedImages(embedImagesState);
+            };
             // Process each page: first chart/flowchart screenshots, then formula screenshots.
-            // This loop is inherently sequential (one page at a time on the calling thread)
-            // and is where runaway documents burn unbounded wall-clock time: measured ~11-12
+            // Parallelized like Loops 1-3: every step below is page-local (shape grouping,
+            // chart/flowchart screenshots, formula detection, consecutive-image merge all
+            // mutate only this page's contents list), so pages are independent. Image-file
+            // naming stays correct on workers because StaticLayoutContainers.imageIndex is
+            // a global AtomicInteger, and each worker lazily creates its own veraPDF
+            // ImagesUtils (ThreadLocal in veraPDF StaticContainers). Previously this loop
+            // was sequential and was the pipeline's worst bottleneck: measured ~11-12
             // minutes for a single scanned page with heavy line-art / formula candidates,
-            // versus ~100 pages/second for ordinary pages. The per-page deadline check is
-            // therefore the most important checkpoint in the whole pipeline.
-            for (int pageNumber = 0; pageNumber < totalPages; pageNumber++) {
-                ProcessingDeadline.check(deadline, "chart/formula page " + (pageNumber + 1)
-                    + " of " + totalPages + " of " + inputPdfName);
-                List<IObject> pageContents = contents.get(pageNumber);
-                ImagesUtils imagesUtils = new ImagesUtils();
-                List<IObject> shapeChunks = pageContents.stream()
+            // versus ~100 pages/second for ordinary pages. The per-page deadline check
+            // remains the most important checkpoint in the whole pipeline.
+            pool.submit(() ->
+                IntStream.range(0, totalPages).parallel().forEach(pageNumber -> {
+                    ProcessingDeadline.checkUnchecked(deadline, "chart/formula page " + (pageNumber + 1)
+                        + " of " + totalPages + " of " + inputPdfName);
+                    propagateState.run();
+                    propagateImageState.run();
+                    List<IObject> pageContents = contents.get(pageNumber);
+                    ImagesUtils imagesUtils = new ImagesUtils();
+                    List<IObject> shapeChunks = pageContents.stream()
                         .filter(ShapeChunk.class::isInstance)
                         .collect(Collectors.toList());
-                // Group ShapeChunks in pageContents by intersection.
-                List<List<IObject>> groupedShapeChunks = ShapeRecognizer.groupShapes(shapeChunks);
-                if (groupedShapeChunks != null && !groupedShapeChunks.isEmpty()) {
-                    BarChartProcessor.processBarChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
-                    PieChartProcessor.processPieChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
-                    FlowchartProcessor.processFlowchartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
-                }
-                if (paddleEnabled) {
-                    long count = pageContents.stream()
-                        .filter(c -> c instanceof LineArtChunk && c.getHeight() <= 3 && c.getWidth() <= 300)
-                        .count();
-                    LOGGER.log(Level.INFO, "Page {0} - LineArtChunk count with height <= 3 and width <= 300 in pageContents: {1}.",
-                        new Object[]{pageNumber + 1, count});
-                    // Per-page lightweight formula detection (no OCR rewrite). The boolean result
-                    // is exposed via the main JSON's `have_formula` field and surfaces as an entry in
-                    // `_ocr.json`; this replaces the previous `processLineArtGroups` call here so
-                    // pageContents is no longer rewritten by this stage. Callers that need the actual
-                    // formula OCR + ImageChunk/TextChunk substitution must invoke
-                    // `LineArtProcessor.processLineArtGroups` separately.
-                    try {
-                        pageHaveFormulas[pageNumber] = LineArtProcessor.haveFormulas(
-                            pageContents, pageNumber, imagesUtils, paddleUrl,
-                            inputPdfName, pageWidths[pageNumber], pageHeights[pageNumber], basicFormulaRecognize);
-                    } catch (Exception e) {
-                        LOGGER.log(Level.WARNING,
-                            "haveFormulas failed for page " + pageNumber + " of " + inputPdfName
-                                + ": " + e.getClass().getSimpleName() + ": " + e.getMessage(), e);
+                    // Group ShapeChunks in pageContents by intersection.
+                    List<List<IObject>> groupedShapeChunks = ShapeRecognizer.groupShapes(shapeChunks);
+                    if (groupedShapeChunks != null && !groupedShapeChunks.isEmpty()) {
+                        BarChartProcessor.processBarChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
+                        PieChartProcessor.processPieChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
+                        FlowchartProcessor.processFlowchartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
+                    }
+                    if (paddleEnabled) {
+                        long count = countFormulaScanCandidates(pageContents);
+                        final int pageOneBased = pageNumber + 1;
+                        final long counted = count;
+                        LOGGER.log(Level.INFO, () -> displayName(inputPdfName)
+                            + " - Page " + pageOneBased
+                            + ": LineArtChunk count (height <= 3, width <= 300) in pageContents = "
+                            + counted);
+                        if (count >= FORMULA_SCAN_LINE_ART_CHUNK_LIMIT) {
+                            LOGGER.log(Level.WARNING, () -> displayName(inputPdfName)
+                                + " - Page " + pageOneBased
+                                + ": skipping formula recognition (LineArtChunk count "
+                                + counted + " >= limit " + FORMULA_SCAN_LINE_ART_CHUNK_LIMIT + ")");
+                        } else {
+                            // Per-page lightweight formula detection (no OCR rewrite). The boolean result
+                            // is exposed via the main JSON's `have_formula` field and surfaces as an entry in
+                            // `_ocr.json`; this replaces the previous `processLineArtGroups` call here so
+                            // pageContents is no longer rewritten by this stage. Callers that need the actual
+                            // formula OCR + ImageChunk/TextChunk substitution must invoke
+                            // `LineArtProcessor.processLineArtGroups` separately.
+                            try {
+                                pageHaveFormulas[pageNumber] = LineArtProcessor.haveFormulas(
+                                    pageContents, pageNumber, imagesUtils, paddleUrl,
+                                    inputPdfName, pageWidths[pageNumber], pageHeights[pageNumber], basicFormulaRecognize);
+                            } catch (Exception e) {
+                                LOGGER.log(Level.WARNING,
+                                    displayName(inputPdfName) + " - haveFormulas failed for page "
+                                        + pageOneBased + ": " + e.getClass().getSimpleName() + ": " + e.getMessage(),
+                                    e);
+                                pageHaveFormulas[pageNumber] = false;
+                            }
+                        }
+                    } else {
                         pageHaveFormulas[pageNumber] = false;
                     }
-                } else {
-                    pageHaveFormulas[pageNumber] = false;
-                }
-                ConsecutiveImageProcessor.processConsecutiveImages(pageContents, pageNumber, imagesUtils);
-            }
+                    ConsecutiveImageProcessor.processConsecutiveImages(pageContents, pageNumber, imagesUtils);
+                })
+            ).get();
 
             // Sequential ID assignment (must be in page order, before CaptionProcessor)
             for (int pageNumber = 0; pageNumber < totalPages; pageNumber++) {
@@ -1392,6 +1437,19 @@ public class DocumentProcessor {
      *       a scanned page with a full-page image and little or no extractable text.</li>
      * </ul>
      */
+    /**
+     * Counts the short-and-narrow {@code LineArtChunk}s in {@code pageContents}
+     * — the candidate set used by {@link LineArtProcessor#haveFormulas}. The
+     * count drives the {@link #FORMULA_SCAN_LINE_ART_CHUNK_LIMIT} short-circuit
+     * in the chart/formula loop: pages with many such chunks are typically
+     * dense scanned graphics where formula recognition degenerates.
+     */
+    private static long countFormulaScanCandidates(List<IObject> pageContents) {
+        return pageContents.stream()
+            .filter(c -> c instanceof LineArtChunk && c.getHeight() <= 3 && c.getWidth() <= 300)
+            .count();
+    }
+
     private static boolean shouldUseOcrFallback(List<IObject> pageContents, double pageWidth, double pageHeight) {
         if (pageContents == null || pageContents.isEmpty()) {
             return false;
