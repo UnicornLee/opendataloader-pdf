@@ -198,4 +198,140 @@ public class HeaderFooterProcessorTest {
                 "Page " + page + ": footer should contain both close footer lines (gap=11pt < 30pt)");
         }
     }
+
+    /**
+     * Reproduces the issue where a 2-page style match on two isolated pages was treated
+     * as a repeating header. In 招股意向书 the text "单位：万元/吨" appears at the same
+     * y=73.49 position on PDF pages 196 and 198, but page 197 has a different layout
+     * (table at top). Before the fix the 2-page style branch in
+     * {@link HeaderFooterProcessor#getIndexesOfHeaderOrFootersContents} would mark the
+     * text as a header on both 196 and 198 and silently drop it from the output JSON.
+     *
+     * <p>The tightened 2-page style rule requires at least 3 distinct pages to
+     * participate in 2-page matches AND >= 50% of pages to participate, so two
+     * isolated matches are no longer enough to classify something as a header.</p>
+     */
+    @Test
+    public void testTwoPageStyleRequiresMajority() {
+        initContainers();
+        List<List<IObject>> contents = new ArrayList<>();
+
+        // Mimic the 招股意向书 layout: 10 pages, two of which (PDF pages 196 and 198)
+        // share an identical body text "单位：万元/吨" at the same y=73.49pt from the top.
+        // The other pages have different body content at the same y position.
+        //
+        // BoundingBox uses PDF bottom-up coordinates, so a top-y of 73.49pt corresponds
+        // to bottomY=841.92-84.84=757.08 and topY=841.92-73.49=768.44.
+        double headerBottomY = 841.92 - 54.77;   // 787.15 — title bottom
+        double headerTopY = 841.92 - 44.21;      // 797.71 — title top
+        double unitBottomY = 841.92 - 84.84;     // 757.08 — "单位" bottom
+        double unitTopY = 841.92 - 73.49;        // 768.44 — "单位" top
+        // Other pages put their body text well below the header candidate region
+        // (PDF bottomY < height*2/3 = 561.28 → filterHeaderOrFooterContents drops it).
+        double altBottomY = 841.92 - 500.0;      // 341.92 — below header region
+        double altTopY = 841.92 - 480.0;         // 361.92
+        double bodyBottomY = 841.92 - 220.0;     // 621.92
+        double bodyTopY = 841.92 - 200.0;        // 641.92
+
+        int totalPages = 10;
+        int[] pagesWithRepeated = {3, 5}; // 0-based; matches pageNumber+2 in the 2-page loop
+
+        for (int page = 0; page < totalPages; page++) {
+            List<IObject> pageContents = new ArrayList<>();
+
+            // Real repeating header line (appears on every page at the same position)
+            pageContents.add(new TextLine(new TextChunk(
+                new BoundingBox(page, 89.9, headerBottomY, 505.66, headerTopY),
+                "威海市泓淋电力技术股份有限公司 招股意向书", 10.56, headerTopY)));
+
+            if (page == pagesWithRepeated[0] || page == pagesWithRepeated[1]) {
+                // The candidate that should NOT be classified as a header.
+                pageContents.add(new TextLine(new TextChunk(
+                    new BoundingBox(page, 439.66, unitBottomY, 505.68, unitTopY),
+                    "单位：万元/吨", 10.56, unitTopY)));
+            } else {
+                // Body text well below the header candidate region so it never enters
+                // the 2-page style matching (filterHeaderOrFooterContents drops it).
+                pageContents.add(new TextLine(new TextChunk(
+                    new BoundingBox(page, 89.9, altBottomY, 505.0, altTopY),
+                    "Body text page " + (page + 1), 10.56, altTopY)));
+            }
+
+            pageContents.add(new TextLine(new TextChunk(
+                new BoundingBox(page, 89.9, bodyBottomY, 505.0, bodyTopY),
+                "Body paragraph page " + (page + 1), 12.0, bodyTopY)));
+
+            contents.add(pageContents);
+        }
+
+        HeaderFooterProcessor.processHeadersAndFooters(contents, false);
+
+        // The genuine header (line 0) should be classified as a header on every page.
+        for (int page = 0; page < totalPages; page++) {
+            List<IObject> pageContent = contents.get(page);
+            IObject first = pageContent.get(0);
+            Assertions.assertTrue(first instanceof SemanticHeaderOrFooter,
+                "Page " + page + ": first element should be header (the real repeating title)");
+        }
+
+        // The two pages that share "单位：万元/吨" should NOT have it absorbed into a header.
+        for (int page : pagesWithRepeated) {
+            List<IObject> pageContent = contents.get(page);
+            boolean foundUnit = false;
+            for (IObject obj : pageContent) {
+                if (obj instanceof SemanticHeaderOrFooter) {
+                    SemanticHeaderOrFooter hf = (SemanticHeaderOrFooter) obj;
+                    for (IObject c : hf.getContents()) {
+                        if (c instanceof TextLine && ((TextLine) c).getValue().contains("单位")) {
+                            Assertions.fail("Page " + page + ": \"单位：万元/吨\" should remain in body, "
+                                + "but it was absorbed into a header/footer");
+                        }
+                    }
+                } else if (obj instanceof TextLine && ((TextLine) obj).getValue().contains("单位")) {
+                    foundUnit = true;
+                }
+            }
+            Assertions.assertTrue(foundUnit,
+                "Page " + page + ": \"单位：万元/吨\" should remain in body content");
+        }
+    }
+
+    /**
+     * Positive control: a genuine two-sided header pattern (odd pages share one
+     * header, even pages share another) must still be detected. We model 6 pages
+     * where every odd page (1, 3, 5) has "奇数页眉" at the same y, and every even
+     * page (2, 4, 6) has "偶数页眉" at the same y. After processing, both should be
+     * classified as headers — even though adjacent pages don't match (1-page style
+     * misses), only the tightened 2-page style catches them.
+     */
+    @Test
+    public void testTwoPageStyleGenuineOddEvenStillDetected() {
+        initContainers();
+        List<List<IObject>> contents = new ArrayList<>();
+        double oddBottomY = 841.92 - 65.0;
+        double oddTopY = 841.92 - 55.0;
+        double evenBottomY = 841.92 - 65.0;
+        double evenTopY = 841.92 - 55.0;
+
+        for (int page = 0; page < 6; page++) {
+            List<IObject> pageContents = new ArrayList<>();
+            String headerText = (page % 2 == 0) ? "偶数页眉" : "奇数页眉";
+            pageContents.add(new TextLine(new TextChunk(
+                new BoundingBox(page, 50.0, oddBottomY, 300.0, oddTopY),
+                headerText, 12.0, oddTopY)));
+            pageContents.add(new TextLine(new TextChunk(
+                new BoundingBox(page, 50.0, 200.0, 400.0, 220.0),
+                "Body page " + (page + 1), 12.0, 220.0)));
+            contents.add(pageContents);
+        }
+
+        HeaderFooterProcessor.processHeadersAndFooters(contents, false);
+
+        for (int page = 0; page < 6; page++) {
+            List<IObject> pageContent = contents.get(page);
+            IObject first = pageContent.get(0);
+            Assertions.assertTrue(first instanceof SemanticHeaderOrFooter,
+                "Page " + page + ": first element should be header (two-sided pattern must still be detected)");
+        }
+    }
 }

@@ -183,7 +183,7 @@ public class HeaderFooterProcessor {
                     contents.add(null);
                 }
             }
-            Set<Integer> newIndexes = getIndexesOfHeaderOrFootersContents(contents);
+            Set<Integer> newIndexes = getIndexesOfHeaderOrFootersContents(contents, isHeaderDetection);
             if (newIndexes.isEmpty()) {
                 break;
             }
@@ -203,36 +203,119 @@ public class HeaderFooterProcessor {
         }
         IObject previousElement = pageContents.get(previousIndex);
         double gap;
+        // Use cross-page coordinates for the gap so the test stays meaningful
+        // across pages with different sizes (e.g., a landscape page header
+        // and a portrait page header both sit near y=44 from the top, but
+        // their PDF bottom-up topY values differ by hundreds of pt).
+        BoundingBox prevBox = toCrossPageCoords(previousElement.getBoundingBox(), isHeaderDetection);
+        BoundingBox candBox = toCrossPageCoords(candidate.getBoundingBox(), isHeaderDetection);
         if (isHeaderDetection) {
-            gap = previousElement.getBottomY() - candidate.getTopY();
+            gap = prevBox.getBottomY() - candBox.getTopY();
         } else {
-            gap = candidate.getBottomY() - previousElement.getTopY();
+            gap = candBox.getBottomY() - prevBox.getTopY();
         }
         return gap <= MAX_HEADER_FOOTER_GAP;
     }
 
-    private static Set<Integer> getIndexesOfHeaderOrFootersContents(List<IObject> contents) {
+    /**
+     * Convert a BoundingBox into coordinates that are independent of the page
+     * size so cross-page-size bbox overlap checks work consistently.
+     *
+     * <p>Without this, a header line at y=44 from the top on a landscape page
+     * (PDF topY ≈ 551 with page height 595) and on a portrait page (PDF topY ≈
+     * 798 with page height 842) would not be recognized as the same header —
+     * their PDF y ranges are hundreds of points apart, even though their
+     * visual positions match exactly.</p>
+     *
+     * <p>For headers we convert PDF bottom-up y to screen top-down y (0 = page
+     * top) so all pages' headers sit at the same y regardless of page height.
+     * For footers we keep PDF bottom-up y because the footer distance from the
+     * bottom is the same on every page (≈60 pt here) — both choices correctly
+     * line up a landscape page's footer with the next portrait page's footer.
+     * x is normalized to [0, 1] across the page width so a footer at x≈0.48 on a
+     * wide page matches the same visual position on a narrow page.</p>
+     */
+    private static BoundingBox toCrossPageCoords(BoundingBox bbox, boolean isHeaderDetection) {
+        if (bbox == null || bbox.getPageNumber() == null) {
+            return bbox;
+        }
+        BoundingBox pageBox = DocumentProcessor.getPageBoundingBox(bbox.getPageNumber());
+        if (pageBox == null) {
+            return bbox;
+        }
+        double pageHeight = pageBox.getTopY() - pageBox.getBottomY();
+        double pageWidth = pageBox.getRightX() - pageBox.getLeftX();
+        if (pageHeight <= 0 || pageWidth <= 0) {
+            return bbox;
+        }
+        double leftX = (bbox.getLeftX() - pageBox.getLeftX()) / pageWidth;
+        double rightX = (bbox.getRightX() - pageBox.getLeftX()) / pageWidth;
+        double bottomY;
+        double topY;
+        if (isHeaderDetection) {
+            // PDF bottom-up → screen top-down (0 at page top)
+            bottomY = pageHeight - bbox.getTopY();
+            topY = pageHeight - bbox.getBottomY();
+        } else {
+            // Footer: keep PDF y as distance from page bottom; same value
+            // (~60 pt) regardless of page height, so footers line up across sizes.
+            bottomY = bbox.getBottomY();
+            topY = bbox.getTopY();
+        }
+        return new BoundingBox(bbox.getPageNumber(), leftX, bottomY, rightX, topY);
+    }
+
+    private static Set<Integer> getIndexesOfHeaderOrFootersContents(List<IObject> contents, boolean isHeaderDetection) {
         Set<Integer> result = new HashSet<>(contents.size());
         for (int pageNumber = 0; pageNumber < contents.size() - 1; pageNumber++) {
             IObject currentObject = contents.get(pageNumber);
             IObject nextObject = contents.get(pageNumber + 1);
             if (currentObject != null && nextObject != null) {
-                if (arePossibleHeadersOrFooters(currentObject, nextObject, 1)) {
+                if (arePossibleHeadersOrFooters(currentObject, nextObject, 1, isHeaderDetection)) {
                     result.add(pageNumber);
                     result.add(pageNumber + 1);
                 }
             }
         }
-        //2-page style
+        //2-page style (tightened): a single isolated 2-page pair (A, A+2) is not enough to
+        //classify something as a repeating header. In 招股意向书 the text "单位：万元/吨"
+        //appears at y=73.49 on PDF pages 196 and 198 — only two pages with the same body
+        //layout, not a genuine odd/even pattern. We accept 2-page matches only when either:
+//   (a) there are exactly 2 pair starts and their pages cover >= 50% of all pages —
+//       the minimal two-sided pattern (e.g. a 4-page document with CGM / CERAGEM
+//       alternating footers); or
+//   (b) there are >= 3 pair starts AND every pair start participates in a chain
+//       (its start+2 or start-2 is also a pair start) — i.e. a longer repeating
+//       odd/even pattern with no isolated pair.
+//An isolated pair like (196, 198) alone in a 765-page document fails (b) and never
+//triggers (a).
+        Set<Integer> pairStarts = new HashSet<>();
         for (int pageNumber = 0; pageNumber < contents.size() - 2; pageNumber++) {
             IObject currentObject = contents.get(pageNumber);
             IObject nextObject = contents.get(pageNumber + 2);
             if (currentObject != null && nextObject != null) {
-                if (arePossibleHeadersOrFooters(currentObject, nextObject, 2)) {
-                    result.add(pageNumber);
-                    result.add(pageNumber + 2);
+                if (arePossibleHeadersOrFooters(currentObject, nextObject, 2, isHeaderDetection)) {
+                    pairStarts.add(pageNumber);
                 }
             }
+        }
+        Set<Integer> twoPageStyleMatches = new HashSet<>();
+        for (Integer start : pairStarts) {
+            twoPageStyleMatches.add(start);
+            twoPageStyleMatches.add(start + 2);
+        }
+        Set<Integer> chainMembers = new HashSet<>();
+        for (Integer start : pairStarts) {
+            if (pairStarts.contains(start + 2) || pairStarts.contains(start - 2)) {
+                chainMembers.add(start);
+            }
+        }
+        boolean isSmallTwoSidedPattern = pairStarts.size() == 2
+                && twoPageStyleMatches.size() * 2 >= contents.size();
+        boolean isChainedLongPattern = pairStarts.size() >= 3
+                && chainMembers.size() == pairStarts.size();
+        if (isSmallTwoSidedPattern || isChainedLongPattern) {
+            result.addAll(twoPageStyleMatches);
         }
         return result;
     }
@@ -274,11 +357,16 @@ public class HeaderFooterProcessor {
         return result;
     }
 
-    private static boolean arePossibleHeadersOrFooters(IObject object1, IObject object2, int increment) {
+    private static boolean arePossibleHeadersOrFooters(IObject object1, IObject object2, int increment, boolean isHeaderDetection) {
+        // Compare bounding boxes in coordinates that are independent of page
+        // size so a header line that visually sits near y=44 from the top can
+        // match across landscape and portrait pages regardless of PDF page height.
+        BoundingBox bbox1 = toCrossPageCoords(object1.getBoundingBox(), isHeaderDetection);
+        BoundingBox bbox2 = toCrossPageCoords(object2.getBoundingBox(), isHeaderDetection);
         if (object1 instanceof SemanticTextNode && object2 instanceof SemanticTextNode) {
             SemanticTextNode textNode1 = (SemanticTextNode) object1;
             SemanticTextNode textNode2 = (SemanticTextNode) object2;
-            if (!BoundingBox.areOverlapsBoundingBoxesExcludingPages(object1.getBoundingBox(), object2.getBoundingBox())) {
+            if (!BoundingBox.areOverlapsBoundingBoxesExcludingPages(bbox1, bbox2)) {
                 return false;
             }
             if (!NodeUtils.areCloseNumbers(textNode1.getFontSize(), textNode2.getFontSize())) {
@@ -300,9 +388,9 @@ public class HeaderFooterProcessor {
             textNode1.add(line1);
             SemanticTextNode textNode2 = new SemanticTextNode();
             textNode2.add(line2);
-            return arePossibleHeadersOrFooters(textNode1, textNode2, increment);
+            return arePossibleHeadersOrFooters(textNode1, textNode2, increment, isHeaderDetection);
         } else {
-            if (BoundingBox.areSameBoundingBoxesExcludingPages(object1.getBoundingBox(), object2.getBoundingBox())) {
+            if (BoundingBox.areSameBoundingBoxesExcludingPages(bbox1, bbox2)) {
                 return true;
             }
         }
