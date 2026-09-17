@@ -50,6 +50,12 @@ public class DoubleSerializer extends StdSerializer<Double> {
         if (decimalPlaces < 0) {
             throw new IllegalArgumentException();
         }
+        if (!Double.isFinite(value)) {
+            // NaN and +/-Infinity are not valid JSON numbers and have no BigDecimal(String)
+            // counterpart either, so new BigDecimal(Double.toString(value)) would throw a
+            // NumberFormatException and abort the serialization of the whole page.
+            return 0.0;
+        }
 
         BigDecimal bigDecimalValue = new BigDecimal(Double.toString(value));
         bigDecimalValue = bigDecimalValue.setScale(decimalPlaces, RoundingMode.HALF_UP);

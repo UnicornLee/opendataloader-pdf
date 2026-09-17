@@ -234,9 +234,84 @@ class FlowchartProcessorTest {
         Assertions.assertInstanceOf(ImageChunk.class, pageContents.get(0));
         BoundingBox bbox = imagesUtils.saved.get(0).getBoundingBox();
         Assertions.assertEquals(95.0, bbox.getLeftX(), 0.0001);
-        Assertions.assertEquals(250.0, bbox.getRightX(), 0.0001, "Screenshot should cover the absorbed group");
+        // The region is recomputed from all absorbed groups and then padded by the
+        // horizontal margin (250 + 5), so the margin is applied exactly once.
+        Assertions.assertEquals(255.0, bbox.getRightX(), 0.0001, "Screenshot should cover the absorbed group");
         Assertions.assertEquals(199.0, bbox.getBottomY(), 0.0001);
         Assertions.assertEquals(441.0, bbox.getTopY(), 0.0001);
+    }
+
+    @Test
+    void absorbsTextInsideDiagramRegion() {
+        List<IObject> pageContents = new ArrayList<>();
+        List<List<IObject>> grouped = new ArrayList<>();
+
+        // Boxes plus a connector: the region is (100,200)-(400,440).
+        ShapeChunk box1 = new ShapeChunk(new BoundingBox(0, 100, 400, 400, 440), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk box2 = new ShapeChunk(new BoundingBox(0, 100, 200, 400, 240), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk line1 = new ShapeChunk(new BoundingBox(0, 200, 240, 202, 400), ShapeChunk.TYPE_ARROW, BLACK, 1);
+
+        List<IObject> group = Arrays.asList(box1, box2, line1);
+        grouped.add(group);
+        pageContents.addAll(group);
+
+        // A stacked column of short values inside the region: it looks like prose (adjacent
+        // lines) but it is a chart label and must end up inside the screenshot only.
+        TextChunk value1 = new TextChunk("10%");
+        value1.setBoundingBox(new BoundingBox(0, 150, 300, 200, 310));
+        TextChunk value2 = new TextChunk("20%");
+        value2.setBoundingBox(new BoundingBox(0, 150, 288, 200, 298));
+        TextChunk value3 = new TextChunk("30%");
+        value3.setBoundingBox(new BoundingBox(0, 150, 276, 200, 286));
+        pageContents.add(value1);
+        pageContents.add(value2);
+        pageContents.add(value3);
+
+        CapturingImagesUtils imagesUtils = new CapturingImagesUtils();
+        FlowchartProcessor.processFlowchartGroups(pageContents, grouped, imagesUtils, 0);
+
+        Assertions.assertEquals(1, imagesUtils.saved.size());
+        Assertions.assertEquals(1, pageContents.size(), "Interior labels must be replaced by the screenshot");
+        Assertions.assertInstanceOf(ImageChunk.class, pageContents.get(0));
+    }
+
+    @Test
+    void skipsPageFrameShape() {
+        List<IObject> pageContents = new ArrayList<>();
+        List<List<IObject>> grouped = new ArrayList<>();
+
+        // A single shape spanning almost the whole page: a page border / background frame.
+        ShapeChunk frame = new ShapeChunk(new BoundingBox(0, 0, 0, 500, 700), ShapeChunk.TYPE_POLYLINE, GRAY, 4);
+        grouped.add(Collections.singletonList(frame));
+        pageContents.add(frame);
+
+        CapturingImagesUtils imagesUtils = new CapturingImagesUtils();
+        FlowchartProcessor.processFlowchartGroups(pageContents, grouped, imagesUtils, 0, 500, 700);
+
+        Assertions.assertEquals(0, imagesUtils.saved.size(), "A page frame must not be cropped as a flowchart");
+        Assertions.assertEquals(1, pageContents.size(), "Original content should be untouched");
+    }
+
+    @Test
+    void skipsClusterCoveringWholePage() {
+        List<IObject> pageContents = new ArrayList<>();
+        List<List<IObject>> grouped = new ArrayList<>();
+
+        // Boxes plus connectors that reach across the whole page: the region would be the
+        // page itself, and cropping it would remove every text block on the page.
+        ShapeChunk box1 = new ShapeChunk(new BoundingBox(0, 0, 0, 500, 700), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk box2 = new ShapeChunk(new BoundingBox(0, 0, 0, 500, 350), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk line = new ShapeChunk(new BoundingBox(0, 250, 0, 252, 700), ShapeChunk.TYPE_ARROW, BLACK, 1);
+
+        List<IObject> group = Arrays.asList(box1, box2, line);
+        grouped.add(group);
+        pageContents.addAll(group);
+
+        CapturingImagesUtils imagesUtils = new CapturingImagesUtils();
+        FlowchartProcessor.processFlowchartGroups(pageContents, grouped, imagesUtils, 0, 500, 700);
+
+        Assertions.assertEquals(0, imagesUtils.saved.size(), "A page-sized region must not be cropped");
+        Assertions.assertEquals(3, pageContents.size(), "Original contents should be untouched");
     }
 
     @Test

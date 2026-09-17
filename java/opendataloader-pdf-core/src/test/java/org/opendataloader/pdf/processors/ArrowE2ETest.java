@@ -88,8 +88,15 @@ class ArrowE2ETest {
         for (ShapeChunk a : arrows) {
             System.out.println("ARROW " + a.getBoundingBox());
         }
-        Assertions.assertEquals(1, arrows.size(), "Exactly one arrow on -83");
-        BoundingBox b = arrows.get(0).getBoundingBox();
+        // The page carries two vertical arrows. The second one is drawn as a chain of
+        // collinear segments, which connector recognition now accepts as well (it used to
+        // be dropped because only single-segment chains were considered).
+        Assertions.assertEquals(2, arrows.size(), "Both arrows on -83 must be recognized");
+        ShapeChunk lowerArrow = arrows.stream()
+                .filter(a -> a.getBoundingBox().getBottomY() < 180)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("lower arrow expected"));
+        BoundingBox b = lowerArrow.getBoundingBox();
         Assertions.assertEquals(158.52, b.getBottomY(), 0.01);
         Assertions.assertEquals(175.32, b.getTopY(), 0.01);
         Assertions.assertEquals(296.48, b.getLeftX(), 0.01);

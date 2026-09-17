@@ -557,7 +557,7 @@ public class JsonWriter {
         double minY = bottomYList.stream().min(Double::compare).orElse(0.0);
         pageGenerator.writeNumberField(JsonName.MARGIN_LEFT, minX);
         pageGenerator.writeNumberField(JsonName.MARGIN_RIGHT, width - maxX);
-        pageGenerator.writeNumberField(JsonName.MARGIN_TOP, height - maxY);
+        pageGenerator.writeNumberField(JsonName.MARGIN_TOP, marginTop(height - maxY));
         writePosArray(pageGenerator, JsonName.HEADER_POS, headerPos);
         writePosArray(pageGenerator, JsonName.FOOTER_POS, footerPos);
         pageGenerator.writeArrayFieldStart(JsonName.ITEMS);
@@ -648,6 +648,41 @@ public class JsonWriter {
         return ObjectMapperHolder.getObjectMapper().writeValueAsString(placeholder);
     }
 
+    /**
+     * Fallback vertical gap (in points) used when a {@code margin_top} value cannot be
+     * computed because one of the two coordinates is not a finite number.
+     */
+    private static final double DEFAULT_MARGIN_TOP = 5.0;
+
+    /**
+     * Computes a {@code margin_top} value as the distance between the bottom edge of the
+     * previous element and the top edge of the current one, falling back to
+     * {@link #DEFAULT_MARGIN_TOP} when that distance is not a finite number.
+     *
+     * <p>Chunks extracted from malformed pages can carry NaN coordinates (for example an
+     * image drawn with a degenerate CTM). Subtracting such a value yields NaN, which cannot
+     * be written as a JSON number and would otherwise abort the serialization of the whole
+     * page.</p>
+     *
+     * @param previousBottomY bottom edge of the previously written element
+     * @param currentTopY     top edge of the element being written
+     * @return the vertical gap in points, or {@link #DEFAULT_MARGIN_TOP} when it is not finite
+     */
+    private static double marginTop(double previousBottomY, double currentTopY) {
+        return marginTop(previousBottomY - currentTopY);
+    }
+
+    /**
+     * Returns an already computed {@code margin_top} value unchanged, falling back to
+     * {@link #DEFAULT_MARGIN_TOP} when it is not a finite number.
+     *
+     * @param margin the computed vertical gap in points
+     * @return the given margin, or {@link #DEFAULT_MARGIN_TOP} when it is not finite
+     */
+    private static double marginTop(double margin) {
+        return Double.isFinite(margin) ? margin : DEFAULT_MARGIN_TOP;
+    }
+
     private static void generateJsonPageContentData(String url, int pageNumber, boolean includeHeaderFooter, double height, List<IObject> pageContents, JsonGenerator jsonGenerator) throws IOException {
         final double[] prevBottomY = {height};
         int textId = 1;
@@ -676,7 +711,7 @@ public class JsonWriter {
                         paragraphMap.put(JsonName.Y1, height - block.getBottomY());
                         paragraphMap.put(JsonName.WIDTH, block.getWidth());
                         paragraphMap.put(JsonName.HEIGHT, block.getHeight());
-                        paragraphMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - block.getTopY());
+                        paragraphMap.put(JsonName.MARGIN_TOP, marginTop(lineBottomY[0] - block.getTopY()));
                         List<Map<String, Object>> lineList = new ArrayList<>();
                         block.getLines().forEach(line -> {
                             Map<String, Object> textMap = new HashMap<>();
@@ -688,7 +723,7 @@ public class JsonWriter {
                             textMap.put(JsonName.Y1, height - line.getBottomY());
                             textMap.put(JsonName.WIDTH, line.getWidth());
                             textMap.put(JsonName.HEIGHT, line.getHeight());
-                            textMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
+                            textMap.put(JsonName.MARGIN_TOP, marginTop(lineBottomY[0] - line.getTopY()));
                             String lineText = getText(line.getTextChunks());
                             textMap.put(JsonName.CONTENT, Arrays.asList(lineText));
                             lineList.add(textMap);
@@ -719,7 +754,7 @@ public class JsonWriter {
                     paragraphMap.put(JsonName.Y1, height - listItem.getBottomY());
                     paragraphMap.put(JsonName.WIDTH, listItem.getWidth());
                     paragraphMap.put(JsonName.HEIGHT, listItem.getHeight());
-                    paragraphMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - listItem.getTopY());
+                    paragraphMap.put(JsonName.MARGIN_TOP, marginTop(lineBottomY[0] - listItem.getTopY()));
                     List<Map<String, Object>> lineList = new ArrayList<>();
                     listItem.getLines().forEach(line -> {
                         Map<String, Object> textMap = new HashMap<>();
@@ -731,7 +766,7 @@ public class JsonWriter {
                         textMap.put(JsonName.Y1, height - line.getBottomY());
                         textMap.put(JsonName.WIDTH, line.getWidth());
                         textMap.put(JsonName.HEIGHT, line.getHeight());
-                        textMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
+                        textMap.put(JsonName.MARGIN_TOP, marginTop(lineBottomY[0] - line.getTopY()));
                         String lineText = getText(line.getTextChunks());
                         textMap.put(JsonName.CONTENT, Arrays.asList(lineText));
                         lineList.add(textMap);
@@ -762,7 +797,7 @@ public class JsonWriter {
                         paragraphMap.put(JsonName.Y1, height - block.getBottomY());
                         paragraphMap.put(JsonName.WIDTH, block.getWidth());
                         paragraphMap.put(JsonName.HEIGHT, block.getHeight());
-                        paragraphMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - block.getTopY());
+                        paragraphMap.put(JsonName.MARGIN_TOP, marginTop(lineBottomY[0] - block.getTopY()));
                         List<Map<String, Object>> lineList = new ArrayList<>();
                         block.getLines().forEach(line -> {
                             Map<String, Object> textMap = new HashMap<>();
@@ -774,7 +809,7 @@ public class JsonWriter {
                             textMap.put(JsonName.Y1, height - line.getBottomY());
                             textMap.put(JsonName.WIDTH, line.getWidth());
                             textMap.put(JsonName.HEIGHT, line.getHeight());
-                            textMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
+                            textMap.put(JsonName.MARGIN_TOP, marginTop(lineBottomY[0] - line.getTopY()));
                             String lineText = getText(line.getTextChunks());
                             textMap.put(JsonName.CONTENT, Arrays.asList(lineText));
                             lineList.add(textMap);
@@ -808,7 +843,7 @@ public class JsonWriter {
                             paragraphMap.put(JsonName.Y1, height - line.getBottomY());
                             paragraphMap.put(JsonName.WIDTH, line.getWidth());
                             paragraphMap.put(JsonName.HEIGHT, line.getHeight());
-                            paragraphMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
+                            paragraphMap.put(JsonName.MARGIN_TOP, marginTop(lineBottomY[0] - line.getTopY()));
                             Map<String, Object> tocItemMap = new HashMap<>();
                             tocItemMap.put(JsonName.ITEM_TYPE, "text");
                             tocItemMap.put(JsonName.FONT_UNDERLINE_SIZE, line.getFontSize());
@@ -818,7 +853,7 @@ public class JsonWriter {
                             tocItemMap.put(JsonName.Y1, height - line.getBottomY());
                             tocItemMap.put(JsonName.WIDTH, line.getWidth());
                             tocItemMap.put(JsonName.HEIGHT, line.getHeight());
-                            tocItemMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - line.getTopY());
+                            tocItemMap.put(JsonName.MARGIN_TOP, marginTop(lineBottomY[0] - line.getTopY()));
                             String lineText = getText(line.getTextChunks());
                             tocItemMap.put(JsonName.CONTENT, Arrays.asList(lineText));
                             paragraphMap.put(JsonName.CONTENT, Arrays.asList(tocItemMap));
@@ -845,7 +880,7 @@ public class JsonWriter {
                 textLineMap.put(JsonName.X1, textChunk.getRightX());
                 textLineMap.put(JsonName.Y0, height - textChunk.getTopY());
                 textLineMap.put(JsonName.Y1, height - textChunk.getBottomY());
-                textLineMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - textChunk.getTopY());
+                textLineMap.put(JsonName.MARGIN_TOP, marginTop(prevBottomY[0] - textChunk.getTopY()));
                 textLineMap.put(JsonName.CONTENT, Arrays.asList(textChunk.getValue()));
                 paragraphContentList.add(textLineMap);
                 paragraphMap.put(JsonName.CONTENT, paragraphContentList);
@@ -860,7 +895,7 @@ public class JsonWriter {
                 paragraphMap.put(JsonName.Y1, height - textChunk.getBottomY());
                 paragraphMap.put(JsonName.WIDTH, textChunk.getWidth());
                 paragraphMap.put(JsonName.HEIGHT, textChunk.getHeight());
-                paragraphMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - textChunk.getTopY());
+                paragraphMap.put(JsonName.MARGIN_TOP, marginTop(prevBottomY[0] - textChunk.getTopY()));
                 jsonGenerator.writeObject(paragraphMap);
             }
             if (content instanceof CustomSemanticParagraph) {
@@ -879,7 +914,7 @@ public class JsonWriter {
                     textLineMap.put(JsonName.X1, textLine.getRightX());
                     textLineMap.put(JsonName.Y0, height - textLine.getTopY());
                     textLineMap.put(JsonName.Y1, height - textLine.getBottomY());
-                    textLineMap.put(JsonName.MARGIN_TOP, lineBottomY[0] - textLine.getTopY());
+                    textLineMap.put(JsonName.MARGIN_TOP, marginTop(lineBottomY[0] - textLine.getTopY()));
                     String lineText = getText(textLine.getTextChunks());
                     textLineMap.put(JsonName.CONTENT, Arrays.asList(lineText));
                     paragraphContentList.add(textLineMap);
@@ -897,7 +932,7 @@ public class JsonWriter {
                 paragraphMap.put(JsonName.Y1, height - customSemanticParagraph.getBottomY());
                 paragraphMap.put(JsonName.WIDTH, customSemanticParagraph.getWidth());
                 paragraphMap.put(JsonName.HEIGHT, customSemanticParagraph.getHeight());
-                paragraphMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - customSemanticParagraph.getTopY());
+                paragraphMap.put(JsonName.MARGIN_TOP, marginTop(prevBottomY[0] - customSemanticParagraph.getTopY()));
                 jsonGenerator.writeObject(paragraphMap);
             }
             if (content instanceof ImageChunk) {
@@ -918,7 +953,7 @@ public class JsonWriter {
                 String absolutePath = String.format(MarkdownSyntax.IMAGE_FILE_NAME_FORMAT, absoluteImagesDirectory,
                     File.separator, imageChunk.getIndex(), imageFormat);
                 imageMap.put(JsonName.CONTENT, Arrays.asList(absolutePath));
-                imageMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - imageChunk.getTopY());
+                imageMap.put(JsonName.MARGIN_TOP, marginTop(prevBottomY[0] - imageChunk.getTopY()));
                 jsonGenerator.writeObject(imageMap);
             }
             if (content instanceof PageItem) {
@@ -934,7 +969,7 @@ public class JsonWriter {
                     tableMap.put(JsonName.X1, pageItem.getX1());
                     tableMap.put(JsonName.Y0, pageItem.getY0());
                     tableMap.put(JsonName.Y1, pageItem.getY1());
-                    tableMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - pageItem.getTopY());
+                    tableMap.put(JsonName.MARGIN_TOP, marginTop(prevBottomY[0] - pageItem.getTopY()));
                     tableMap.put(JsonName.IS_THIRD_PARTY, true);
                     List<List<Map<String, Object>>> rowList = new ArrayList<>();
                     List<List<TableSingleItem>> tableContent = (List<List<TableSingleItem>>) pageItem.getContent();
@@ -971,7 +1006,7 @@ public class JsonWriter {
                 tableMap.put(JsonName.X1, tableBorder.getRightX());
                 tableMap.put(JsonName.Y0, height - tableBorder.getTopY());
                 tableMap.put(JsonName.Y1, height - tableBorder.getBottomY());
-                tableMap.put(JsonName.MARGIN_TOP, prevBottomY[0] - tableBorder.getTopY());
+                tableMap.put(JsonName.MARGIN_TOP, marginTop(prevBottomY[0] - tableBorder.getTopY()));
                 tableMap.put(JsonName.IS_THIRD_PARTY, false);
                 List<List<Map<String, Object>>> rowList = new ArrayList<>();
                 int numberOfColumns = ((TableBorder) content).getNumberOfColumns();

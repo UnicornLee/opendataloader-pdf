@@ -747,7 +747,8 @@ public class DocumentProcessor {
                     if (groupedShapeChunks != null && !groupedShapeChunks.isEmpty()) {
                         BarChartProcessor.processBarChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
                         PieChartProcessor.processPieChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
-                        FlowchartProcessor.processFlowchartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
+                        FlowchartProcessor.processFlowchartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber,
+                            pageWidths[pageNumber], pageHeights[pageNumber]);
                     }
                     if (paddleEnabled) {
                         long count = countFormulaScanCandidates(pageContents);

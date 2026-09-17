@@ -93,6 +93,12 @@ public class ShapeRecognizer {
     private static final int MAX_LINES_PER_COLOR_FOR_CHAIN_RECOGNITION = 5000;
     /** Margin used when deciding a single line segment connects two existing shapes. */
     private static final double CONNECTOR_MARGIN = 8.0;
+    /**
+     * Maximum thickness (pt) of a chain's union box for the chain to count as a
+     * single straight line (see {@link #isStraightChain}). Thin strokes are around
+     * 0.5-2 pt wide, and a vertical/horizontal run of them stays within this box.
+     */
+    private static final double STRAIGHT_CHAIN_TOLERANCE = 3.0;
     /** Maximum width (pt) across the shaft direction a filled region may have to be
      *  considered an arrowhead. Boxes and other node shapes are typically wider.
      *  Also used by the caller to pre-filter PDFBox fill drawings (see
@@ -732,6 +738,13 @@ public class ShapeRecognizer {
                 if (chain.size() < MIN_POLYLINE_SEGMENTS) {
                     continue;
                 }
+                if (isStraightChain(chain)) {
+                    // Collinear segments form a straight connector line that the content
+                    // stream (or marked-content splitting) broke into pieces - not a
+                    // polyline. Connector recognition below turns it into an arrow so the
+                    // arrowhead and the bridge between the two node boxes are preserved.
+                    continue;
+                }
                 double[] color = chain.get(0).getStrokeColor();
                 BoundingBox union = new BoundingBox(pageNumber);
                 List<BoundingBox> parts = new ArrayList<>(chain.size());
@@ -769,16 +782,31 @@ public class ShapeRecognizer {
             }
             List<List<LineChunk>> chains = buildChains(sameColorLines);
             for (List<LineChunk> chain : chains) {
-                if (chain.size() != 1) {
+                // A single segment is always a connector candidate (it may be slanted).
+                // Long chains only qualify when they are collinear, i.e. a straight line
+                // that was split into several pieces; anything else is a real polyline.
+                if (chain.size() != 1 && !isStraightChain(chain)) {
                     continue;
                 }
-                LineChunk line = chain.get(0);
-                if (!isConnectorLine(line, existingShapes)) {
+                BoundingBox shaft = chainBoundingBox(chain);
+                if (shaft == null || shaft.isEmpty()) {
                     continue;
                 }
-                BoundingBox bbox = findArrowBBox(line, filledArtBoxes, fillBoxes, existingShapes);
+                if (!isConnectorLine(shaft, existingShapes)) {
+                    continue;
+                }
+                BoundingBox bbox = findArrowBBox(shaft, filledArtBoxes, fillBoxes, existingShapes);
+                List<BoundingBox> parts;
+                if (chain.size() == 1) {
+                    parts = Collections.singletonList(bbox);
+                } else {
+                    parts = new ArrayList<>(chain.size());
+                    for (LineChunk line : chain) {
+                        parts.add(line.getBoundingBox());
+                    }
+                }
                 connectors.add(new ShapeChunk(new BoundingBox(bbox), ShapeChunk.TYPE_ARROW,
-                        line.getStrokeColor(), 1, Collections.singletonList(bbox)));
+                        chain.get(0).getStrokeColor(), chain.size(), parts));
             }
         }
         return connectors;
@@ -796,9 +824,8 @@ public class ShapeRecognizer {
      * larger marked-content container and is lost from the artifacts), the raw
      * content-stream fill boxes are used as a fallback candidate source.</p>
      */
-    private static BoundingBox findArrowBBox(LineChunk line, List<BoundingBox> filledArtBoxes,
+    private static BoundingBox findArrowBBox(BoundingBox shaft, List<BoundingBox> filledArtBoxes,
                                              List<BoundingBox> fillBoxes, List<ShapeChunk> existingShapes) {
-        BoundingBox shaft = line.getBoundingBox();
         if (shaft == null || shaft.isEmpty()) {
             return new BoundingBox(shaft);
         }
@@ -917,23 +944,77 @@ public class ShapeRecognizer {
                 && a.getBottomY() <= b.getTopY() && a.getTopY() >= b.getBottomY();
     }
 
-    private static boolean isConnectorLine(LineChunk line, List<ShapeChunk> existingShapes) {
-        BoundingBox shaft = line.getBoundingBox();
-        ShapeChunk startShape = findShapeNearPoint(line.getStartX(), line.getStartY(), existingShapes);
-        ShapeChunk endShape = findShapeNearPoint(line.getEndX(), line.getEndY(), existingShapes);
+    private static boolean isConnectorLine(BoundingBox shaft, List<ShapeChunk> existingShapes) {
+        if (shaft == null || shaft.isEmpty()) {
+            return false;
+        }
+        // The shaft is a straight run of segments, so its two ends are the extreme
+        // points along its dominant axis.
+        double startX;
+        double startY;
+        double endX;
+        double endY;
+        if (shaft.getHeight() >= shaft.getWidth()) {
+            startX = 0.5 * (shaft.getLeftX() + shaft.getRightX());
+            startY = shaft.getBottomY();
+            endX = startX;
+            endY = shaft.getTopY();
+        } else {
+            startX = shaft.getLeftX();
+            startY = 0.5 * (shaft.getBottomY() + shaft.getTopY());
+            endX = shaft.getRightX();
+            endY = startY;
+        }
+        ShapeChunk startShape = findShapeNearPoint(startX, startY, existingShapes);
+        ShapeChunk endShape = findShapeNearPoint(endX, endY, existingShapes);
         if (startShape == null || endShape == null || startShape == endShape) {
             return false;
         }
-        // A single line whose bbox lies fully inside another shape's bbox is an internal
+        // A line whose bbox lies fully inside another shape's bbox is an internal
         // structural line of that shape (e.g. a table row separator running between two
         // opposite table borders), not a connector between two distinct shapes. The
         // two endpoints merely happen to land within CONNECTOR_MARGIN of *different*
         // shapes (the left table edge vs the right outline polyline), but the line
         // itself does not bridge anything — it is contained by a single spanning shape.
-        if (shaft != null && !shaft.isEmpty() && isContainedInAnyShape(shaft, existingShapes)) {
+        return !isContainedInAnyShape(shaft, existingShapes);
+    }
+
+    /**
+     * Returns the union bounding box of a chain, or {@code null} when it is empty.
+     */
+    private static BoundingBox chainBoundingBox(List<LineChunk> chain) {
+        BoundingBox union = null;
+        for (LineChunk line : chain) {
+            BoundingBox box = line.getBoundingBox();
+            if (box == null || box.isEmpty()) {
+                continue;
+            }
+            if (union == null) {
+                union = new BoundingBox(box);
+            } else {
+                union.union(box);
+            }
+        }
+        return union;
+    }
+
+    /**
+     * Returns true when the chain is a set of collinear segments: a single straight
+     * line that the content stream (or marked-content splitting) broke into pieces.
+     *
+     * <p>The test looks at the union box of the chain — a straight horizontal run is
+     * thin vertically and vice versa. A slanted run (e.g. a real polyline or a
+     * diagonal connector drawn as several segments) has a union box that is wide and
+     * tall at the same time and is therefore not classified as straight here.</p>
+     */
+    private static boolean isStraightChain(List<LineChunk> chain) {
+        BoundingBox union = chainBoundingBox(chain);
+        if (union == null || union.isEmpty()) {
             return false;
         }
-        return true;
+        boolean thinVertically = union.getWidth() <= STRAIGHT_CHAIN_TOLERANCE;
+        boolean thinHorizontally = union.getHeight() <= STRAIGHT_CHAIN_TOLERANCE;
+        return thinVertically != thinHorizontally;
     }
 
     /**
