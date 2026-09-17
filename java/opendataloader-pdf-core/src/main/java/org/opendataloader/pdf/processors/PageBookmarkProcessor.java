@@ -26,6 +26,7 @@ import org.verapdf.wcag.algorithms.entities.SemanticHeading;
 import org.verapdf.wcag.algorithms.entities.content.TextLine;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -570,6 +571,102 @@ public class PageBookmarkProcessor {
             result.add(createBookmark(c));
         }
         return result;
+    }
+
+    /**
+     * Catalog-aware sibling-range extraction: the slice bounds still come from the catalog
+     * anchors, but the level templates are re-derived from that slice with the very same
+     * pipeline the page tree uses ({@code selectTemplateForLevel} / {@code childAnchorIndices}
+     * / {@code extractLevel}) instead of a hard-coded template whitelist. Documents numbering
+     * their headings as {@code 一、} / {@code （一）} / {@code 1、} therefore also get their
+     * sub-bookmarks, while the local consecutive-numbering rule, the font-size ranking and the
+     * period-end consistency filter keep body paragraphs out of the catalog.
+     *
+     * @param data              per-page JSON data array
+     * @param catalogStartPage  0-based inclusive start of the catalog page range, or -1
+     * @param catalogEndPage    0-based inclusive end of the catalog page range, or -1
+     * @param anchorPage        1-based page_num of the catalog anchor (T)
+     * @param anchorRelatedId   related_id of the catalog anchor (T)
+     * @param nextPage          1-based page_num of the next catalog sibling (S); -1 if none
+     * @param nextRelatedId     related_id of the next catalog sibling (S)
+     * @param level             depth at which the children are emitted (2 or 3)
+     * @param ancestorTemplates template names already used by the catalog ancestors; candidates
+     *                          carrying them are not re-selected as this level's template
+     * @return freshly built child bookmarks of the anchor, possibly empty
+     */
+    public static List<Bookmark> extractChildrenByCatalogRange(
+            List<Map<String, Object>> data,
+            int catalogStartPage, int catalogEndPage,
+            int anchorPage, int anchorRelatedId,
+            int nextPage, int nextRelatedId,
+            int level,
+            Collection<String> ancestorTemplates) {
+        if (data == null || data.isEmpty() || level < 2 || level > 3) {
+            return Collections.emptyList();
+        }
+        List<Candidate> all = collectJsonCandidates(data, catalogStartPage, catalogEndPage);
+        if (all.isEmpty()) {
+            return Collections.emptyList();
+        }
+        all.sort(Comparator
+            .comparingInt((Candidate c) -> c.pageIndex)
+            .thenComparing((Candidate c) -> -c.topY));
+
+        List<Candidate> slice = new ArrayList<>();
+        for (Candidate c : all) {
+            int cPage = c.pageIndex + 1;
+            if (cPage == anchorPage && c.relatedId == anchorRelatedId) {
+                continue;
+            }
+            if (isWithinSiblingRange(cPage, c.relatedId,
+                    anchorPage, anchorRelatedId, nextPage, nextRelatedId)) {
+                slice.add(c);
+            }
+        }
+        if (slice.isEmpty()) {
+            return Collections.emptyList();
+        }
+        LOGGER.log(java.util.logging.Level.INFO,
+            "[PageBookmark] catalog slice level={0} bounds=({1},{2})-({3},{4}) candidates={5}",
+            new Object[]{level, anchorPage, anchorRelatedId, nextPage, nextRelatedId, slice.size()});
+        return extractLevel(slice, 0, slice.size() - 1, level, templatesNamed(ancestorTemplates));
+    }
+
+    /**
+     * Template name (e.g. {@code 第#节}, {@code #、}, {@code （#）}) recognised at the beginning
+     * of the given text, or {@code null} when the text carries no numbering prefix. The catalog
+     * completion path uses it to describe its own anchors with the very same pattern table as
+     * the page pipeline.
+     *
+     * @param text bookmark text, possibly null
+     * @return the template name, or null when the text is not numbered
+     */
+    static String templateNameOf(String text) {
+        if (text == null) {
+            return null;
+        }
+        ConstantPattern pattern = matchPrefix(text.trim());
+        return pattern == null ? null : pattern.template;
+    }
+
+    /**
+     * Expands template names into the concrete {@link TemplateKey}s (template + number system)
+     * the selection pipeline works with.
+     *
+     * @param templateNames template names, possibly null/empty
+     * @return the matching template keys
+     */
+    private static Set<TemplateKey> templatesNamed(Collection<String> templateNames) {
+        Set<TemplateKey> keys = new HashSet<>();
+        if (templateNames == null || templateNames.isEmpty()) {
+            return keys;
+        }
+        for (ConstantPattern pattern : PATTERNS) {
+            if (templateNames.contains(pattern.template)) {
+                keys.add(new TemplateKey(pattern.template, pattern.numberSystem));
+            }
+        }
+        return keys;
     }
 
     /**
