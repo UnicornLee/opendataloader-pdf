@@ -266,11 +266,15 @@ public class CatalogBookmarkProcessor {
             if (topChildren == null || topChildren.isEmpty()) {
                 Bookmark nextSibling = (i + 1 < catalogBookmarks.size())
                     ? catalogBookmarks.get(i + 1) : null;
-                List<Bookmark> built = PageBookmarkProcessor.extractChildrenByRange(
+                // A missing sibling means "open ended": -1, not 0 (page 0 would collapse the
+                // slice to an empty range instead of extending it to the end of the document).
+                int nextPage = nextSibling == null ? -1 : anchorPage(nextSibling);
+                int nextRelatedId = nextSibling == null ? -1 : anchorRelatedId(nextSibling);
+                List<Bookmark> built = PageBookmarkProcessor.extractChildrenByCatalogRange(
                     data, catalogStartPage, catalogEndPage,
                     anchorPage(catalogTop), anchorRelatedId(catalogTop),
-                    anchorPage(nextSibling), anchorRelatedId(nextSibling),
-                    2);
+                    nextPage, nextRelatedId,
+                    2, ancestorTemplateNames(catalogTop, null));
                 if (!built.isEmpty()) {
                     if (topChildren == null) {
                         topChildren = new ArrayList<>();
@@ -285,11 +289,16 @@ public class CatalogBookmarkProcessor {
         // L3 pass: for every catalog L2 (existing or just-complemented) that
         // still has no children, derive L3 from the candidate pool bounded by
         // the next sibling L2 within the same parent.
-        for (Bookmark catalogTop : catalogBookmarks) {
+        for (int topIndex = 0; topIndex < catalogBookmarks.size(); topIndex++) {
+            Bookmark catalogTop = catalogBookmarks.get(topIndex);
             List<Bookmark> catalogChildren = catalogTop.getChildren();
             if (catalogChildren == null || catalogChildren.isEmpty()) {
                 continue;
             }
+            // Upper bound inherited from the parent: the next top-level catalog entry
+            // (open-ended only for the very last one).
+            Bookmark nextTop = (topIndex + 1 < catalogBookmarks.size())
+                ? catalogBookmarks.get(topIndex + 1) : null;
             for (int j = 0; j < catalogChildren.size(); j++) {
                 Bookmark catalogChild = catalogChildren.get(j);
                 List<Bookmark> grandChildren = catalogChild.getChildren();
@@ -298,11 +307,17 @@ public class CatalogBookmarkProcessor {
                 }
                 Bookmark nextSibling = (j + 1 < catalogChildren.size())
                     ? catalogChildren.get(j + 1) : null;
-                List<Bookmark> built = PageBookmarkProcessor.extractChildrenByRange(
+                // The last sibling has no L2 bound of its own, but it must still stop at the
+                // parent's bound: an open-ended slice here would run to the end of the
+                // document and pull unrelated entries into this L2 node's subtree.
+                Bookmark upperBound = nextSibling != null ? nextSibling : nextTop;
+                int nextPage = upperBound == null ? -1 : anchorPage(upperBound);
+                int nextRelatedId = upperBound == null ? -1 : anchorRelatedId(upperBound);
+                List<Bookmark> built = PageBookmarkProcessor.extractChildrenByCatalogRange(
                     data, catalogStartPage, catalogEndPage,
                     anchorPage(catalogChild), anchorRelatedId(catalogChild),
-                    anchorPage(nextSibling), anchorRelatedId(nextSibling),
-                    3);
+                    nextPage, nextRelatedId,
+                    3, ancestorTemplateNames(catalogTop, catalogChild));
                 if (!built.isEmpty()) {
                     if (grandChildren == null) {
                         grandChildren = new ArrayList<>();
@@ -342,6 +357,30 @@ public class CatalogBookmarkProcessor {
                 indexBookmarkDeep(index, child);
             }
         }
+    }
+
+    /**
+     * Template names already used by the catalog ancestors of the range being completed.
+     * They are handed to {@link PageBookmarkProcessor#extractChildrenByCatalogRange} so the
+     * level template of the slice is not re-selected from the parent's own numbering style.
+     *
+     * @param ancestor the catalog entry one level above the completed range, may be null
+     * @param anchor   the catalog entry that owns the range, may be null
+     * @return the template names of both entries, skipping those without a numbering prefix
+     */
+    private static List<String> ancestorTemplateNames(Bookmark ancestor, Bookmark anchor) {
+        List<String> names = new ArrayList<>(2);
+        String ancestorTemplate = PageBookmarkProcessor.templateNameOf(
+            ancestor == null ? null : ancestor.getText());
+        if (ancestorTemplate != null) {
+            names.add(ancestorTemplate);
+        }
+        String anchorTemplate = PageBookmarkProcessor.templateNameOf(
+            anchor == null ? null : anchor.getText());
+        if (anchorTemplate != null) {
+            names.add(anchorTemplate);
+        }
+        return names;
     }
 
     private static int anchorPage(Bookmark bookmark) {
