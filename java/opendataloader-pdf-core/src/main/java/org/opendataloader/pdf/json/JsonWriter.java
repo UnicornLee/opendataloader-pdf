@@ -71,8 +71,10 @@ import org.verapdf.wcag.algorithms.semanticalgorithms.containers.StaticContainer
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.zip.CRC32;
 import java.awt.image.BufferedImage;
 import javax.imageio.ImageIO;
 import org.apache.pdfbox.Loader;
@@ -2408,11 +2410,11 @@ public class JsonWriter {
             return null;
         }
         if (rendered == null) {
-            LOGGER.log(Level.WARNING, "Empty clip range for formula screenshot on page {0}",
+        LOGGER.log(Level.WARNING, "Empty clip range for formula screenshot on page {0}",
                 pageNumber + 1);
             return null;
         }
-        ImageIO.write(rendered, "PNG", screenshot);
+        writePngWithDpi(rendered, screenshot, 300);
 
         if (!ossEnabled) {
             return screenshot.getAbsolutePath();
@@ -2484,11 +2486,11 @@ public class JsonWriter {
             return null;
         }
         if (rendered == null) {
-            LOGGER.log(Level.WARNING, "Empty clip range for ocr screenshot on page {0}",
+        LOGGER.log(Level.WARNING, "Empty clip range for ocr screenshot on page {0}",
                 pageNumber + 1);
             return null;
         }
-        ImageIO.write(rendered, "PNG", screenshot);
+        writePngWithDpi(rendered, screenshot, 300);
 
         if (!ossEnabled) {
             return screenshot.getAbsolutePath();
@@ -2520,25 +2522,59 @@ public class JsonWriter {
     }
 
     /**
-     * Renders a page to a {@link BufferedImage} at 200 DPI. When {@code clipYPdf} is non-null,
-     * the page's {@code cropBox} is temporarily narrowed to the requested y-band so the
-     * renderer outputs exactly that PDF region — no {@code getSubimage} on top of a full-page
-     * render, so the pixel grid is exactly {@code cropBox.width × DPI / 72} wide and
-     * {@code bandHeight × DPI / 72} tall, with no subpixel drift from rounding the y-start.
-     *
-     * <p>{@code clipYPdf} is in top-left PDF coordinates ({@code [top, bottom]}); x is always
-     * preserved in full (i.e. {@code x = 0}, width = current cropBox width).</p>
+     * Final on-disk resolution for OCR / formula / stream-table screenshots. Matches the
+     * 2479x3508 size downstream consumers (and the {@code image_width} / {@code image_height}
+     * values in {@code _ocr.json}) expect. Kept in sync with
+     * {@link org.opendataloader.pdf.poppler.PopplerRenderer#DEFAULT_DPI}.
+     */
+    private static final int RENDER_DPI = 300;
+
+    /**
+     * Renders a page to a {@link BufferedImage} at {@link #RENDER_DPI}. Prefers
+     * {@link org.opendataloader.pdf.poppler.PopplerRenderer} (which auto-installs Poppler's
+     * {@code pdftocairo} on first use if missing) and falls back to PDFBox when Poppler
+     * is unavailable or raises an error during render. Both branches honour {@code clipYPdf}
+     * in top-left PDF coordinates ({@code [top, bottom]}).
      *
      * @return the rendered image, or {@code null} when the clip range collapses to zero
      *         height (header and footer bands overlapping or fully covering the page).
      */
     private static BufferedImage renderPage(File pdfFile, int pageNumber, double[] clipYPdf) throws IOException {
+        if (clipYPdf != null && (clipYPdf[1] - clipYPdf[0]) <= 0) {
+            // Header and footer bands fully cover the page; no point rendering.
+            return null;
+        }
+        // Poppler first: better CJK glyph rasterization (Cairo backend) and
+        // ~10x faster per page than PDFBox. isAvailable() is O(1) on second call
+        // because the probe is cached.
+        if (org.opendataloader.pdf.poppler.PopplerRenderer.isAvailable()) {
+            try {
+                return org.opendataloader.pdf.poppler.PopplerRenderer.render(pdfFile, pageNumber, clipYPdf);
+            } catch (Throwable t) {
+                LOGGER.log(Level.WARNING,
+                    "Poppler render failed for page " + (pageNumber + 1)
+                        + " (falling back to PDFBox): " + t.getMessage());
+            }
+        }
+        return renderPageWithPdfBox(pdfFile, pageNumber, clipYPdf);
+    }
+
+    /**
+     * Original PDFBox-only rendering path, kept as the fallback when Poppler is missing
+     * or errors out. When {@code clipYPdf} is non-null, the page's {@code cropBox} is
+     * temporarily narrowed to the requested y-band so the renderer outputs exactly that
+     * PDF region &mdash; no {@code getSubimage} on top of a full-page render, so the pixel
+     * grid is exactly {@code cropBox.width &times; DPI / 72} wide and
+     * {@code bandHeight &times; DPI / 72} tall, with no subpixel drift from rounding the
+     * y-start.
+     */
+    private static BufferedImage renderPageWithPdfBox(File pdfFile, int pageNumber, double[] clipYPdf) throws IOException {
         try (org.apache.pdfbox.pdmodel.PDDocument sourceDoc = Loader.loadPDF(pdfFile)) {
             PDFRenderer renderer = new PDFRenderer(sourceDoc);
             org.apache.pdfbox.pdmodel.PDPage page = sourceDoc.getPage(pageNumber);
 
             if (clipYPdf == null) {
-                return renderer.renderImageWithDPI(pageNumber, 300.0f);
+                return renderer.renderImageWithDPI(pageNumber, RENDER_DPI);
             }
 
             // PDFBox uses bottom-left origin while clipYPdf is top-left, so flip y. The width
@@ -2552,13 +2588,111 @@ public class JsonWriter {
             }
             page.setCropBox(new PDRectangle(0.0f, pdfY, originalCropBox.getWidth(), pdfH));
             try {
-                return renderer.renderImageWithDPI(pageNumber, 300.0f);
+                return renderer.renderImageWithDPI(pageNumber, RENDER_DPI);
             } finally {
                 // PDFBox reads cropBox fresh on every render call, but restoring keeps the
                 // PDDocument consistent for any code that might look at it later.
                 page.setCropBox(originalCropBox);
             }
         }
+    }
+
+    /**
+     * Writes {@code image} to {@code outputFile} as a PNG with an embedded {@code pHYs}
+     * chunk declaring the rendered pixel density ({@code dpi}). Without this chunk, downstream
+     * viewers and OCR systems default to 96 DPI (screen standard) regardless of the actual
+     * pixel dimensions, which causes a 300 DPI render to be displayed / processed as if it
+     * were coarser than it really is.
+     *
+     * <p>If the {@code pHYs} injection fails for any reason, falls back to plain
+     * {@link ImageIO#write} so the screenshot is still produced and the OCR pipeline is
+     * not blocked by a metadata-only problem.</p>
+     */
+    private static void writePngWithDpi(BufferedImage image, File outputFile, int dpi) throws IOException {
+        ByteArrayOutputStream pngBuffer = new ByteArrayOutputStream();
+        if (!ImageIO.write(image, "PNG", pngBuffer)) {
+            throw new IOException("ImageIO refused to write PNG");
+        }
+        byte[] withDpi;
+        try {
+            withDpi = injectPngPhysChunk(pngBuffer.toByteArray(), dpi);
+        } catch (RuntimeException ex) {
+            LOGGER.log(Level.WARNING,
+                "Failed to inject PNG pHYs chunk (dpi=" + dpi + "); falling back to plain ImageIO.write: "
+                    + ex.getMessage());
+            withDpi = null;
+        }
+        if (withDpi == null) {
+            ImageIO.write(image, "PNG", outputFile);
+            return;
+        }
+        try (FileOutputStream fos = new FileOutputStream(outputFile)) {
+            fos.write(withDpi);
+        }
+    }
+
+    /**
+     * Returns {@code pngBytes} with a {@code pHYs} chunk inserted immediately after the
+     * mandatory {@code IHDR} chunk (the canonical location per the PNG specification), so
+     * viewers and OCR engines see the declared pixel density. The {@code pHYs} data is
+     * 9 bytes: 4 bytes {@code pixelsPerMeterX}, 4 bytes {@code pixelsPerMeterY},
+     * 1 byte unit specifier ({@code 1} = meter).
+     *
+     * <p>Returns {@code null} when the input is not a recognizable PNG produced by
+     * {@link ImageIO#write} (no IHDR as first chunk). Callers should fall back to a plain
+     * write in that case.</p>
+     */
+    private static byte[] injectPngPhysChunk(byte[] pngBytes, int dpi) {
+        // PNG signature is 8 bytes; IHDR is 4 (length) + 4 (type) + 13 (data) + 4 (CRC) = 25 bytes.
+        if (pngBytes.length < 8 + 25) {
+            return null;
+        }
+        // PNG signature: 89 50 4E 47 0D 0A 1A 0A
+        if ((pngBytes[0] & 0xFF) != 0x89 || pngBytes[1] != 'P' || pngBytes[2] != 'N' || pngBytes[3] != 'G'
+                || pngBytes[4] != 0x0D || pngBytes[5] != 0x0A || pngBytes[6] != 0x1A || pngBytes[7] != 0x0A) {
+            return null;
+        }
+        // First chunk must be IHDR (length 13, type "IHDR").
+        if (pngBytes[8] != 0 || pngBytes[9] != 0 || pngBytes[10] != 0 || pngBytes[11] != 13
+                || pngBytes[12] != 'I' || pngBytes[13] != 'H' || pngBytes[14] != 'D' || pngBytes[15] != 'R') {
+            return null;
+        }
+        int pixelsPerMeter = (int) Math.round(dpi * 1000.0 / 25.4); // 1 in = 25.4 mm = 0.0254 m
+        // pHYs chunk payload: 9 bytes
+        byte[] physData = new byte[9];
+        physData[0] = (byte) ((pixelsPerMeter >> 24) & 0xFF);
+        physData[1] = (byte) ((pixelsPerMeter >> 16) & 0xFF);
+        physData[2] = (byte) ((pixelsPerMeter >> 8) & 0xFF);
+        physData[3] = (byte) (pixelsPerMeter & 0xFF);
+        physData[4] = physData[0];
+        physData[5] = physData[1];
+        physData[6] = physData[2];
+        physData[7] = physData[3];
+        physData[8] = 1; // unit = meter
+
+        byte[] physType = {'p', 'H', 'Y', 's'};
+        CRC32 crc = new CRC32();
+        crc.update(physType);
+        crc.update(physData);
+        long crcVal = crc.getValue();
+        byte[] crcBytes = new byte[4];
+        crcBytes[0] = (byte) ((crcVal >> 24) & 0xFF);
+        crcBytes[1] = (byte) ((crcVal >> 16) & 0xFF);
+        crcBytes[2] = (byte) ((crcVal >> 8) & 0xFF);
+        crcBytes[3] = (byte) (crcVal & 0xFF);
+        byte[] physLength = {0, 0, 0, 9};
+
+        // pHYs chunk: 4 (length) + 4 (type) + 9 (data) + 4 (CRC) = 21 bytes
+        int chunkSize = 21;
+        int insertPos = 8 + 4 + 4 + 13 + 4; // signature + IHDR length + IHDR type + IHDR data + IHDR CRC
+        byte[] result = new byte[pngBytes.length + chunkSize];
+        System.arraycopy(pngBytes, 0, result, 0, insertPos);
+        System.arraycopy(physLength, 0, result, insertPos, 4);
+        System.arraycopy(physType, 0, result, insertPos + 4, 4);
+        System.arraycopy(physData, 0, result, insertPos + 8, 9);
+        System.arraycopy(crcBytes, 0, result, insertPos + 17, 4);
+        System.arraycopy(pngBytes, insertPos, result, insertPos + chunkSize, pngBytes.length - insertPos);
+        return result;
     }
 
     /**

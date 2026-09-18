@@ -52,7 +52,7 @@ oss:
     domain_name: https://announcement-pdf-bucket.obs.cn-north-1.myhuaweicloud.com/
 
 paddle:
-    url: http://192.168.1.193:8088/layout-parsing
+    url: http://192.168.1.233:8088/layout-parsing
 
 pdf:
     # Per-message worker-thread cap for the parse pipeline (see PdfProperties.threads)
