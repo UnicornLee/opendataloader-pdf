@@ -177,7 +177,8 @@ public final class PopplerAutoInstaller {
 
     /**
      * Returns the directory the portable install gets extracted to. Public for
-     * {@link PopplerRenderer#findInPath} which looks for the binary here too.
+     * {@link PopplerRenderer}, whose binary probe looks for pdftocairo here as
+     * well (see {@link PopplerRenderer#retryProbe()}).
      */
     public static Path getPortableInstallDir() {
         return PORTABLE_BASE_DIR.resolve("poppler-" + WINDOWS_PORTABLE_VERSION);
