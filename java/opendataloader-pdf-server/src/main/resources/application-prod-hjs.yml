@@ -27,8 +27,8 @@ basic:
 
 # pulsar监听
 pulsar:
-    servers: pulsar://node01.public.pulsar.prod:6650,node02.public.pulsar.prod:6650,node03.public.pulsar.prod:6650
-    token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwdWxzYXItdXNlciJ9.dCSlOU2r55_Lr8ABbHQgjTONjv7Lq_ZuqpNCa9iJJMg
+    servers: pulsar://node01.public.pulsar.bj4.prod:6650,node02.public.pulsar.bj4.prod:6650,node03.public.pulsar.bj4.prod:6650
+    token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwdWxzYXItdXNlciJ9.g58Ks_uxpAmxt2s7KU7S19gtrn9IgM9UaK3HFSro1W0
     receive_topic_name: capital/pdf_parse/announcement_parse
     send_topic_name: capital/pdf_parse/announcement_parse_result
     count: 7
