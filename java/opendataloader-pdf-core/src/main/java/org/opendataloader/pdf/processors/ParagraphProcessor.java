@@ -50,6 +50,12 @@ public class ParagraphProcessor {
      */
     private static final double MAX_LINE_SPACING_RATIO = 3.0;
 
+    /**
+     * Tolerance (pt) for judging that a line fills the whole text column, i.e. that its right
+     * edge reaches the column right edge (see {@link #isHangingIndentContinuation}).
+     */
+    private static final double HANGING_INDENT_RIGHT_TOLERANCE = 5.0;
+
     public static List<IObject> processParagraphs(List<IObject> contents, double width) {
         DocumentProcessor.setIndexesForContentsList(contents);
         List<TextBlock> blocks = new ArrayList<>();
@@ -354,6 +360,12 @@ public class ParagraphProcessor {
                 newBlocks.add(nextBlock);
                 hasJudge = true;
                 return hasJudge;
+            } else if (isHangingIndentContinuation(previousBlock, nextBlock, rightX, margin)) {
+                previousBlock.add(nextBlock.getLines());
+                previousBlock.setTextAlignment(TextAlignment.LEFT);
+                previousBlock.setHasEndLine(false);
+                hasJudge = true;
+                return hasJudge;
             } else if (Math.abs(prevFontSize - nextFontSize) >= 2) {
                 newBlocks.add(nextBlock);
                 hasJudge = true;
@@ -417,6 +429,51 @@ public class ParagraphProcessor {
             }
         }
         return false;
+    }
+
+    /**
+     * Returns true when {@code nextBlock} is the continuation line of a numbered heading laid
+     * out with a <em>hanging indent</em>: the previous line fills the whole text column and the
+     * next line is indented by roughly the width of the leading label (e.g. {@code "9.  "}).
+     *
+     * <p>The existing opening-indent rule only covers the mirrored case — a first line indented
+     * relative to the lines that follow it. A hanging-indent pair matches none of the other
+     * rules either: its two lines are neither left-, right- nor center-aligned (the indentation
+     * exceeds the alignment tolerance), so without this test the continuation is emitted as a
+     * separate paragraph.</p>
+     *
+     * <p>The "previous line fills the column" requirement is what keeps real paragraph breaks
+     * out: a block that starts a new paragraph is normally preceded by a short last line, whose
+     * right edge sits well inside the column.</p>
+     *
+     * @param previousBlock block whose last line is the filled line
+     * @param nextBlock     candidate continuation block
+     * @param rightX        right edge of the text column
+     * @param margin        vertical gap between the two lines
+     * @return true when the next block continues the previous one
+     */
+    private static boolean isHangingIndentContinuation(TextBlock previousBlock, TextBlock nextBlock,
+                                                       double rightX, double margin) {
+        TextLine previousLine = previousBlock.getLastLine();
+        TextLine nextLine = nextBlock.getFirstLine();
+        if (previousLine == null || nextLine == null) {
+            return false;
+        }
+        // A filled line ends on the column right edge; otherwise it is the last line of a
+        // paragraph (e.g. a short heading) and the next block opens a new one.
+        if (Math.abs(previousLine.getRightX() - rightX) >= HANGING_INDENT_RIGHT_TOLERANCE) {
+            return false;
+        }
+        double indent = nextLine.getLeftX() - previousLine.getLeftX();
+        if (indent <= 0 || indent > MAX_PARAGRAPH_BEGINNING_INDENT) {
+            return false;
+        }
+        // A labeled line ("10. ...", "一、...") opens its own entry, never a continuation.
+        if (BulletedParagraphUtils.isLabeledLine(nextLine)) {
+            return false;
+        }
+        double fontSize = previousLine.getFontSize();
+        return fontSize > 0 && margin <= MAX_LINE_SPACING_RATIO * fontSize;
     }
 
     private static List<TextBlock> detectParagraphsWithLeftAlignments(List<TextBlock> textBlocks, boolean checkStyle, double leftX, double rightX, double width, List<IObject> separators) {

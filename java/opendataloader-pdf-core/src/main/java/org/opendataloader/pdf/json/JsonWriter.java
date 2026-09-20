@@ -1095,6 +1095,21 @@ public class JsonWriter {
                                             // Images and embedded nested-table HTML always stand alone
                                             // (see containsEmbeddedBlock).
                                             boolean newLine = containsEmbeddedBlock(group) || nextNewLine;
+                                            // Boundary rule: when neither the character ending the previous
+                                            // line nor the character starting this line belongs to a Chinese/
+                                            // English text context (letters, CJK ideographs, full-width
+                                            // punctuation), the two are very unlikely to be a wrapped
+                                            // continuation of the same sentence, so start a new entry instead
+                                            // of appending.
+                                            if (!newLine && !currentCellTextLines.isEmpty()) {
+                                                char firstChar = currentText.charAt(0);
+                                                String lastLine = currentCellTextLines.get(currentCellTextLines.size() - 1);
+                                                char lastChar = lastLine.charAt(lastLine.length() - 1);
+                                                if (!isChineseOrEnglishContext(firstChar)
+                                                    && !isChineseOrEnglishContext(lastChar)) {
+                                                    newLine = true;
+                                                }
+                                            }
                                             nextNewLine = cell.getRightX() - getGroupMaxRightX(group) > MAX_CELL_LINE_RIGHT_GAP;
                                             if (newLine) {
                                                 if (!currentCellTextLines.contains(currentText)) {
@@ -1358,6 +1373,39 @@ public class JsonWriter {
             }
         }
         return sb.toString();
+    }
+
+    /**
+     * Whether a character belongs to a Chinese/English text context, i.e. a character that
+     * can plausibly take part in a sentence broken across two visual lines:
+     * <ul>
+     *   <li>Latin letters: {@code [A-Za-z]};</li>
+     *   <li>CJK Unified Ideographs: {@code U+4E00}-{@code U+9FFF};</li>
+     *   <li>CJK Symbols and Punctuation: {@code U+3000}-{@code U+303F}
+     *       (e.g. {@code 、。〈〉《》「」【】});</li>
+     *   <li>Halfwidth and Fullwidth Forms: {@code U+FF00}-{@code U+FFEF}
+     *       (e.g. {@code ，．！？：；（）￥}).</li>
+     *   <li>General Punctuation that Chinese/English typography uses inline:
+     *       {@code U+2010}-{@code U+201F} (hyphens, dashes and curly quotation marks, e.g.
+     *       {@code ‐ – — ― ‘ ’ “ ”}) and {@code U+2024}-{@code U+2027} (one/two dot
+     *       leaders and horizontal ellipsis, e.g. {@code …}).</li>
+     * </ul>
+     * Digits, ASCII punctuation and any other symbol return {@code false}.
+     *
+     * <p>Used by the cell line-merge boundary rule: when both the trailing character of the
+     * previous line and the leading character of the current line fail this test, the two
+     * lines are treated as separate entries.</p>
+     *
+     * @param c the character to test
+     * @return {@code true} for a Chinese/English context character (see above)
+     */
+    private static boolean isChineseOrEnglishContext(char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+            || (c >= '\u4E00' && c <= '\u9FFF')
+            || (c >= '\u3000' && c <= '\u303F')
+            || (c >= '\uFF00' && c <= '\uFFEF')
+            || (c >= '\u2010' && c <= '\u201F')
+            || (c >= '\u2024' && c <= '\u2027');
     }
 
     /**
