@@ -429,6 +429,61 @@ class ShapeRecognizerTest {
         Assertions.assertEquals(2, groups.size());
     }
 
+    @Test
+    void groupShapesByArrowHeadersWithoutHeadYieldsNothing() {
+        ShapeChunk box = shape(0, 100, 100, 200, 200);
+
+        List<List<IObject>> groups = ShapeRecognizer.groupShapesByArrowHeaders(
+                Collections.singletonList(box), null);
+
+        Assertions.assertTrue(groups.isEmpty(), "Pages without an arrowhead keep the shape grouping");
+        Assertions.assertFalse(ShapeRecognizer.containsArrowHeader(Collections.singletonList(box)));
+    }
+
+    @Test
+    void groupShapesByArrowHeadersGrowsThroughRawLines() {
+        // The head only touches the connector line; the node box sits 50 pt below the
+        // line's other end, so the box can only be reached by growing through the line.
+        ShapeChunk head = arrowHeader(0, 100, 300, 106, 306);
+        ShapeChunk box = shape(0, 90, 200, 200, 249);
+        LineChunk connector = new LineChunk(0, 103, 306, 103, 250, 0.5, new double[]{0.0, 0.0, 0.0});
+
+        List<List<IObject>> withLine = ShapeRecognizer.groupShapesByArrowHeaders(
+                Arrays.asList(head, box), Collections.singletonList(connector));
+        Assertions.assertEquals(1, withLine.size());
+        Assertions.assertTrue(withLine.get(0).contains(head));
+        Assertions.assertTrue(withLine.get(0).contains(connector), "The connector bridges head and box");
+        Assertions.assertTrue(withLine.get(0).contains(box));
+
+        List<List<IObject>> withoutLine = ShapeRecognizer.groupShapesByArrowHeaders(
+                Arrays.asList(head, box), null);
+        Assertions.assertEquals(1, withoutLine.size());
+        Assertions.assertFalse(withoutLine.get(0).contains(box),
+                "Without the connector the far away box is not part of the region");
+    }
+
+    @Test
+    void groupShapesByArrowHeadersMergesOverlappingRegions() {
+        ShapeChunk leftHead = arrowHeader(0, 100, 300, 106, 306);
+        ShapeChunk rightHead = arrowHeader(0, 104, 300, 110, 306);
+        ShapeChunk farHead = arrowHeader(0, 300, 300, 306, 306);
+
+        List<List<IObject>> merged = ShapeRecognizer.groupShapesByArrowHeaders(
+                Arrays.asList(leftHead, rightHead, farHead), null);
+
+        Assertions.assertEquals(2, merged.size());
+        Assertions.assertEquals(2, merged.get(0).size(), "Overlapping arrow regions are merged");
+        Assertions.assertEquals(1, merged.get(1).size());
+    }
+
+    private static ShapeChunk arrowHeader(int page, double left, double bottom, double right, double top) {
+        return new ShapeChunk(
+                new BoundingBox(page, left, bottom, right, top),
+                ShapeChunk.TYPE_ARROW_HEADER,
+                new double[]{0.0, 0.0, 0.0},
+                1);
+    }
+
     private static ShapeChunk shape(int page, double left, double bottom, double right, double top) {
         return new ShapeChunk(
                 new BoundingBox(page, left, bottom, right, top),

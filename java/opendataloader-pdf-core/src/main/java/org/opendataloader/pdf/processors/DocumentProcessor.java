@@ -56,6 +56,7 @@ import org.verapdf.gf.model.impl.sa.GFSAPDFDocument;
 import org.verapdf.parser.PDFFlavour;
 import org.verapdf.pd.PDDocument;
 import org.verapdf.tools.StaticResources;
+import org.verapdf.wcag.algorithms.entities.IDocument;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.SemanticTextNode;
 import org.verapdf.wcag.algorithms.entities.content.*;
@@ -744,11 +745,27 @@ public class DocumentProcessor {
                         .collect(Collectors.toList());
                     // Group ShapeChunks in pageContents by intersection.
                     List<List<IObject>> groupedShapeChunks = ShapeRecognizer.groupShapes(shapeChunks);
+                    boolean arrowDriven = ShapeRecognizer.containsArrowHeader(shapeChunks);
                     if (groupedShapeChunks != null && !groupedShapeChunks.isEmpty()) {
                         BarChartProcessor.processBarChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
                         PieChartProcessor.processPieChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
-                        FlowchartProcessor.processFlowchartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber,
-                            pageWidths[pageNumber], pageHeights[pageNumber]);
+                    }
+                    // When the page has arrowheads, the diagram regions are grown from them
+                    // instead: the arrows already connect the parts of the diagram, which the
+                    // bbox-overlap grouping above routinely misses (a connector that starts or
+                    // ends on a plain line bridges nothing as far as shape grouping is
+                    // concerned). Pages without any arrowhead keep the grouping above.
+                    List<List<IObject>> flowchartGroups = groupedShapeChunks;
+                    if (arrowDriven) {
+                        List<List<IObject>> arrowGroups = ShapeRecognizer.groupShapesByArrowHeaders(
+                            shapeChunks, collectRawLineChunks(pageNumber));
+                        if (!arrowGroups.isEmpty()) {
+                            flowchartGroups = arrowGroups;
+                        }
+                    }
+                    if (flowchartGroups != null && !flowchartGroups.isEmpty()) {
+                        FlowchartProcessor.processFlowchartGroups(pageContents, flowchartGroups, imagesUtils, pageNumber,
+                            pageWidths[pageNumber], pageHeights[pageNumber], arrowDriven);
                     }
                     if (paddleEnabled) {
                         long count = countFormulaScanCandidates(pageContents);
@@ -1449,6 +1466,43 @@ public class DocumentProcessor {
         return pageContents.stream()
             .filter(c -> c instanceof LineArtChunk && c.getHeight() <= 3 && c.getWidth() <= 300)
             .count();
+    }
+
+    /**
+     * Collects the page's raw line geometry (thin line chunks and the line chunks of
+     * line-art containers, which includes the bbox-only ones).
+     *
+     * <p>Plain {@link LineChunk}s are dropped from {@code pageContents} earlier in the
+     * pipeline, but the arrow-driven diagram growth needs them: they are what connects
+     * an arrowhead to the node it points at. Reading them back from the page artifacts
+     * keeps the removal of the plain line layer intact.</p>
+     *
+     * @param pageNumber 0-based page number
+     * @return the raw lines of the page; never null
+     */
+    private static List<IObject> collectRawLineChunks(int pageNumber) {
+        IDocument document = StaticContainers.getDocument();
+        if (document == null) {
+            return Collections.emptyList();
+        }
+        List<IChunk> artifacts = document.getArtifacts(pageNumber);
+        if (artifacts == null || artifacts.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<IObject> lines = new ArrayList<>();
+        for (IChunk chunk : artifacts) {
+            if (chunk instanceof LineChunk) {
+                lines.add(chunk);
+            } else if (chunk instanceof LineArtChunk) {
+                List<LineChunk> children = ((LineArtChunk) chunk).getLineChunks();
+                if (children == null || children.isEmpty()) {
+                    lines.add(chunk);
+                } else {
+                    lines.addAll(children);
+                }
+            }
+        }
+        return lines;
     }
 
     private static boolean shouldUseOcrFallback(List<IObject> pageContents, double pageWidth, double pageHeight) {

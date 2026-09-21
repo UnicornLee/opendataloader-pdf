@@ -17,7 +17,7 @@ public class DebugSample {
         config.getFilterConfig().setHalfWidthToFullWidth(true);
         Map<String, Object> customOptions = new HashMap<>();
         customOptions.put("paddleUrl", "http://192.168.1.97:8088/layout-parsing");
-        customOptions.put("pulsarReceiveTopicName", "hk_announcement_parse_all");
+//        customOptions.put("pulsarReceiveTopicName", "hk_announcement_parse_all");
         customOptions.put("businessId", 123456789);
         customOptions.put("extend", new HashMap<String, Object>(){});
         customOptions.put("basicParseStreamTable", true);
@@ -47,7 +47,7 @@ public class DebugSample {
         // 边框存在重复线条的表格
 //        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\200706271781617929794015618-1.pdf", config);
 //        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\201804301783315258232046605.pdf", config);
-        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\20260507AN202606291826520711.pdf", config);
+        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\202302281677505819604328.pdf", config);
         System.out.println("JSON URL / local path: " + result.getJsonUrlOrPath());
         System.out.println("OCR JSON local path: " + result.getOcrJsonLocalPath());
         /*RebuildBookmarksResult result = OpenDataLoaderPDF.rebuildBookmarks("D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\eddf5bd0-cfce-49cb-a33c-742eec08181d.json", config);

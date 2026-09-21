@@ -29,6 +29,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -114,6 +115,24 @@ public class ShapeRecognizer {
      *  fraction of a point; without this, a 0.0001 rounding error on the aligned
      *  edge made the head look as if it extended both ends and got rejected. */
     private static final double ARROWHEAD_EXTENSION_EPSILON = 0.5;
+    /**
+     * Minimum area (pt²) of a filled region for it to be reported as an arrowhead
+     * ({@link ShapeChunk#TYPE_ARROW_HEADER}). Small fills at the end of a line are also
+     * produced by table corners and rounded cell joints (measured 1.44 x 1.44 pt = 2.1 pt²),
+     * and treating those as heads makes the diagram region grow from a table corner and
+     * swallow the whole table.
+     */
+    private static final double MIN_ARROWHEAD_AREA = 4.0;
+    /** Minimum side (pt) of a filled region for it to be reported as an arrowhead. */
+    private static final double MIN_ARROWHEAD_DIMENSION = 2.0;
+    /**
+     * Share of a head candidate's area that may be covered by an already recognized solid
+     * shape (rectangle / bar chart) before the candidate is discarded as a piece of that
+     * shape. Table headers are the typical case: a filled header band at the end of a row
+     * separator line satisfies every arrowhead size guard (measured 120 x 12 pt and
+     * 49 x 14 pt) and would otherwise make the diagram region grow across the whole table.
+     */
+    private static final double MAX_ARROWHEAD_SHAPE_COVERAGE = 0.9;
     /** Bar chart: width variation tolerance between bars. */
     private static final double BAR_WIDTH_VARIATION = 0.35;
     /**
@@ -764,6 +783,13 @@ public class ShapeRecognizer {
      * already recognized shapes. These are typically discarded by
      * {@link #recognizePolylines} because a chain of length 1 does not meet the
      * polyline threshold, but they are essential for diagrams and flowcharts.
+     *
+     * <p>Every straight chain that ends in a filled arrowhead also yields an
+     * {@link ShapeChunk#TYPE_ARROW_HEADER} shape, i.e. the head on its own. That
+     * happens independently of {@link #isConnectorLine}: a flow diagram whose
+     * connectors start or end on plain lines (a bracket around a row of boxes,
+     * for instance) has no valid shaft end points but still has heads, and the
+     * heads are what the flowchart detection grows its region from.</p>
      */
     private static List<ShapeChunk> recognizeConnectorLines(int pageNumber, List<LineChunk> thinLines,
                                                              List<ShapeChunk> existingShapes,
@@ -775,6 +801,14 @@ public class ShapeRecognizer {
 
         Map<String, List<LineChunk>> byColor = groupByColor(thinLines);
         List<ShapeChunk> connectors = new ArrayList<>();
+
+        // Both candidate sources are filtered once for all chains: the head is now resolved
+        // for every chain (not only for the ones that end up accepted as a connector), so
+        // repeating the O(candidates x shapes) filtering per chain would be wasteful.
+        List<BoundingBox> arrowFills = fillBoxes == null ? null
+                : filterShapeCoincidentFills(fillBoxes, existingShapes);
+        List<BoundingBox> headerArtBoxes = filterCandidatesInsideShapes(filledArtBoxes, existingShapes);
+        List<BoundingBox> headerFills = filterCandidatesInsideShapes(arrowFills, existingShapes);
 
         for (List<LineChunk> sameColorLines : byColor.values()) {
             if (!shouldBuildChains(sameColorLines, pageNumber, "connector")) {
@@ -792,10 +826,17 @@ public class ShapeRecognizer {
                 if (shaft == null || shaft.isEmpty()) {
                     continue;
                 }
+                BoundingBox head = findArrowhead(shaft, filledArtBoxes, arrowFills);
+                BoundingBox headOnly = arrowheadOnly(findArrowhead(shaft, headerArtBoxes, headerFills), shaft);
+                if (isUsableArrowhead(headOnly)) {
+                    double[] headColor = chain.get(0).getStrokeColor();
+                    connectors.add(new ShapeChunk(new BoundingBox(headOnly), ShapeChunk.TYPE_ARROW_HEADER,
+                            headColor, 1, Collections.singletonList(new BoundingBox(headOnly))));
+                }
                 if (!isConnectorLine(shaft, existingShapes)) {
                     continue;
                 }
-                BoundingBox bbox = findArrowBBox(shaft, filledArtBoxes, fillBoxes, existingShapes);
+                BoundingBox bbox = head == null ? new BoundingBox(shaft) : unionOf(shaft, head);
                 List<BoundingBox> parts;
                 if (chain.size() == 1) {
                     parts = Collections.singletonList(bbox);
@@ -812,33 +853,120 @@ public class ShapeRecognizer {
         return connectors;
     }
 
+    private static BoundingBox unionOf(BoundingBox first, BoundingBox second) {
+        BoundingBox union = new BoundingBox(first);
+        union.union(second);
+        return union;
+    }
+
     /**
-     * Computes the bounding box of an arrow given its shaft (a thin connector line)
-     * and the page's filled (bbox-only) regions. The arrowhead triangle in a PDF is
-     * usually rendered as a filled polygon that produces a {@link LineArtChunk} with
-     * no line segments. When a small such region overlaps the shaft and extends past
-     * exactly one of its ends, the returned box covers the shaft plus that arrowhead;
-     * otherwise the plain shaft box is returned.
+     * Reduces an arrowhead candidate to the actual head, i.e. the part of the candidate
+     * that lies beyond the end of the shaft.
+     *
+     * <p>Most diagrams draw the whole arrow as a single filled polygon (shaft plus head,
+     * e.g. a 3 x 100 pt "block arrow"), so the candidate found by {@link #pickArrowhead}
+     * covers the shaft as well. Only the slice beyond the shaft's end is the head; the
+     * shaft itself is a line chunk on the page and stays where it is.</p>
+     */
+    private static BoundingBox arrowheadOnly(BoundingBox head, BoundingBox shaft) {
+        if (head == null || shaft == null || shaft.isEmpty()) {
+            return head;
+        }
+        BoundingBox slice = new BoundingBox(head);
+        if (shaft.getHeight() >= shaft.getWidth()) {
+            if (head.getTopY() > shaft.getTopY() + ARROWHEAD_EXTENSION_EPSILON) {
+                slice.setBottomY(Math.max(head.getBottomY(), shaft.getTopY()));
+            } else if (head.getBottomY() < shaft.getBottomY() - ARROWHEAD_EXTENSION_EPSILON) {
+                slice.setTopY(Math.min(head.getTopY(), shaft.getBottomY()));
+            }
+        } else {
+            if (head.getRightX() > shaft.getRightX() + ARROWHEAD_EXTENSION_EPSILON) {
+                slice.setLeftX(Math.max(head.getLeftX(), shaft.getRightX()));
+            } else if (head.getLeftX() < shaft.getLeftX() - ARROWHEAD_EXTENSION_EPSILON) {
+                slice.setRightX(Math.min(head.getRightX(), shaft.getLeftX()));
+            }
+        }
+        return slice;
+    }
+
+    /**
+     * Returns true when the slice qualifies as an arrowhead: big enough not to be a
+     * table corner or a cell joint, see {@link #MIN_ARROWHEAD_AREA}.
+     */
+    private static boolean isUsableArrowhead(BoundingBox head) {
+        if (head == null || head.isEmpty()) {
+            return false;
+        }
+        double width = head.getWidth();
+        double height = head.getHeight();
+        return width * height >= MIN_ARROWHEAD_AREA
+                && Math.min(width, height) >= MIN_ARROWHEAD_DIMENSION;
+    }
+
+    /**
+     * Returns the arrowhead of the given shaft (a thin connector line), or null when
+     * the shaft has no head. The arrowhead triangle in a PDF is usually rendered as a
+     * filled polygon that produces a {@link LineArtChunk} with no line segments. When
+     * a small such region overlaps the shaft and extends past exactly one of its ends,
+     * it is the head.
      *
      * <p>If no arrowhead is found in the artifact layer (e.g. it was merged into a
      * larger marked-content container and is lost from the artifacts), the raw
      * content-stream fill boxes are used as a fallback candidate source.</p>
      */
-    private static BoundingBox findArrowBBox(BoundingBox shaft, List<BoundingBox> filledArtBoxes,
-                                             List<BoundingBox> fillBoxes, List<ShapeChunk> existingShapes) {
+    private static BoundingBox findArrowhead(BoundingBox shaft, List<BoundingBox> filledArtBoxes,
+                                             List<BoundingBox> fillBoxes) {
         if (shaft == null || shaft.isEmpty()) {
-            return new BoundingBox(shaft);
+            return null;
         }
         BoundingBox head = pickArrowhead(shaft, filledArtBoxes);
         if (head == null && fillBoxes != null && !fillBoxes.isEmpty()) {
-            head = pickArrowhead(shaft, filterShapeCoincidentFills(fillBoxes, existingShapes));
+            head = pickArrowhead(shaft, fillBoxes);
         }
-        if (head == null) {
-            return new BoundingBox(shaft);
+        return head;
+    }
+
+    /**
+     * Drops the candidate fills that lie (almost) entirely inside an already recognized
+     * solid shape (rectangle / bar chart).
+     *
+     * <p>Such a candidate is a piece of that shape — the filled header band of a table is
+     * the measured case — and can never be an arrowhead. {@link #filterShapeCoincidentFills}
+     * does not cover it: that filter compares the areas of the two boxes, which keeps
+     * small pieces of large shapes on purpose (an arrowhead poking into a big node box
+     * must survive).</p>
+     */
+    private static List<BoundingBox> filterCandidatesInsideShapes(List<BoundingBox> candidates,
+                                                                  List<ShapeChunk> existingShapes) {
+        if (candidates == null || candidates.isEmpty()) {
+            return Collections.emptyList();
         }
-        BoundingBox arrow = new BoundingBox(shaft);
-        arrow.union(head);
-        return arrow;
+        List<BoundingBox> filtered = new ArrayList<>(candidates.size());
+        for (BoundingBox candidate : candidates) {
+            if (candidate == null || candidate.isEmpty()) {
+                continue;
+            }
+            double candidateArea = candidate.getWidth() * candidate.getHeight();
+            boolean inside = false;
+            for (ShapeChunk shape : existingShapes) {
+                String type = shape.getShapeType();
+                if (!ShapeChunk.TYPE_RECTANGLE.equals(type) && !ShapeChunk.TYPE_BAR_CHART.equals(type)) {
+                    continue;
+                }
+                BoundingBox shapeBox = shape.getBoundingBox();
+                if (shapeBox == null || shapeBox.isEmpty()) {
+                    continue;
+                }
+                if (overlapArea(candidate, shapeBox) >= MAX_ARROWHEAD_SHAPE_COVERAGE * candidateArea) {
+                    inside = true;
+                    break;
+                }
+            }
+            if (!inside) {
+                filtered.add(candidate);
+            }
+        }
+        return filtered;
     }
 
     /**
@@ -1418,6 +1546,126 @@ public class ShapeRecognizer {
         }
 
         return new ArrayList<>(groups.values());
+    }
+
+    /**
+     * Returns true when at least one of the given items is a
+     * {@link ShapeChunk#TYPE_ARROW_HEADER} shape.
+     */
+    public static boolean containsArrowHeader(List<IObject> items) {
+        if (items == null) {
+            return false;
+        }
+        for (IObject obj : items) {
+            if (obj instanceof ShapeChunk
+                    && ShapeChunk.TYPE_ARROW_HEADER.equals(((ShapeChunk) obj).getShapeType())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Groups the page items into diagram regions grown from the recognized arrowheads.
+     *
+     * <p>Every {@link ShapeChunk#TYPE_ARROW_HEADER} seeds one region. The region then
+     * repeatedly absorbs every item — shapes and raw lines alike — whose bounding box
+     * meets the region's bounding box ({@link #ADJACENCY_GAP} tolerance), so it follows
+     * the connector to the next node and from there on through the rest of the diagram.
+     * Regions of heads that end up meeting each other are merged, so a diagram whose
+     * arrows point at the same group of nodes becomes a single region.</p>
+     *
+     * <p>Unlike {@link #groupShapes(List)}, the growth is not limited to shapes: the
+     * connectors of a flow diagram are routinely plain lines that never become a shape
+     * of their own, and they are exactly what bridges a head to the node it points at.</p>
+     *
+     * @param shapes     the recognized shapes of the page; must contain the arrowheads
+     * @param extraItems the page's raw lines (line chunks / bbox-only line art); may be null
+     * @return one group per merged diagram region, or an empty list when the page has no
+     *         arrowhead at all
+     */
+    public static List<List<IObject>> groupShapesByArrowHeaders(List<IObject> shapes, List<IObject> extraItems) {
+        if (shapes == null || !containsArrowHeader(shapes)) {
+            return Collections.emptyList();
+        }
+        List<IObject> candidates = new ArrayList<>(shapes);
+        if (extraItems != null) {
+            candidates.addAll(extraItems);
+        }
+
+        List<Set<IObject>> regions = new ArrayList<>();
+        List<BoundingBox> regionBoxes = new ArrayList<>();
+        for (IObject seed : shapes) {
+            if (!(seed instanceof ShapeChunk)
+                    || !ShapeChunk.TYPE_ARROW_HEADER.equals(((ShapeChunk) seed).getShapeType())
+                    || seed.getBoundingBox() == null || seed.getBoundingBox().isEmpty()) {
+                continue;
+            }
+            Set<IObject> region = Collections.newSetFromMap(new IdentityHashMap<IObject, Boolean>());
+            region.add(seed);
+            BoundingBox reach = new BoundingBox(seed.getBoundingBox());
+            boolean grew = true;
+            while (grew) {
+                grew = false;
+                for (IObject candidate : candidates) {
+                    if (region.contains(candidate)) {
+                        continue;
+                    }
+                    BoundingBox box = candidate.getBoundingBox();
+                    if (box == null || box.isEmpty() || !meets(reach, box, ADJACENCY_GAP)) {
+                        continue;
+                    }
+                    region.add(candidate);
+                    reach.union(box);
+                    grew = true;
+                }
+            }
+            regions.add(region);
+            regionBoxes.add(reach);
+        }
+        mergeOverlappingRegions(regions, regionBoxes);
+
+        List<List<IObject>> groups = new ArrayList<>(regions.size());
+        for (Set<IObject> region : regions) {
+            groups.add(new ArrayList<>(region));
+        }
+        return groups;
+    }
+
+    /**
+     * Merges the regions whose bounding boxes meet each other, so overlapping diagram
+     * regions end up as one group. Both lists are modified in place and stay in sync.
+     */
+    private static void mergeOverlappingRegions(List<Set<IObject>> regions, List<BoundingBox> boxes) {
+        boolean merged = true;
+        while (merged) {
+            merged = false;
+            for (int i = 0; i < regions.size() && !merged; i++) {
+                for (int j = i + 1; j < regions.size(); j++) {
+                    if (!meets(boxes.get(i), boxes.get(j), ADJACENCY_GAP)) {
+                        continue;
+                    }
+                    regions.get(i).addAll(regions.get(j));
+                    boxes.get(i).union(boxes.get(j));
+                    regions.remove(j);
+                    boxes.remove(j);
+                    merged = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    /**
+     * Returns true when the two boxes overlap, or are separated by no more than
+     * {@code tolerance} on both axes.
+     */
+    private static boolean meets(BoundingBox a, BoundingBox b, double tolerance) {
+        if (a == null || b == null || a.isEmpty() || b.isEmpty()) {
+            return false;
+        }
+        return a.getLeftX() <= b.getRightX() + tolerance && b.getLeftX() <= a.getRightX() + tolerance
+                && a.getBottomY() <= b.getTopY() + tolerance && b.getBottomY() <= a.getTopY() + tolerance;
     }
 
     /**
