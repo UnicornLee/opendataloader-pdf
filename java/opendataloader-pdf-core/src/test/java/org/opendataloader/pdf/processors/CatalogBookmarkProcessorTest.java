@@ -118,6 +118,45 @@ public class CatalogBookmarkProcessorTest {
     }
 
     /**
+     * Builds a single-line "目录/目錄" heading item. A catalog page is only
+     * accepted as the first page of a catalog range when such a heading sits
+     * above its first TOC line, so every TOC fixture starts with one.
+     *
+     * @param headingText heading text, e.g. {@code "目錄"}, {@code "目  录"}
+     */
+    private static Map<String, Object> catalogHeadingItem(int id, String headingText, double y0) {
+        return legacyTextItem(id, headingText, JsonName.SOURCE_TYPE_HEADING, y0);
+    }
+
+    /**
+     * Builds a text item holding several lines, i.e. a multi-line paragraph.
+     * Used to prove that a "目录" mention buried inside such a paragraph is not
+     * a catalog heading.
+     */
+    private static Map<String, Object> multiLineTextItem(int id, List<String> lines, double y0) {
+        Map<String, Object> item = new HashMap<>();
+        item.put(JsonName.ID, id);
+        item.put(JsonName.ITEM_TYPE, "text");
+        item.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_PARAGRAPH);
+        List<Map<String, Object>> content = new ArrayList<>();
+        double lineY = y0;
+        for (String text : lines) {
+            Map<String, Object> line = new HashMap<>();
+            line.put(JsonName.CONTENT, Arrays.asList(text));
+            line.put(JsonName.X0, LEFT_X);
+            line.put(JsonName.Y0, lineY);
+            line.put(JsonName.FONT_UNDERLINE_SIZE, FONT_SIZE);
+            content.add(line);
+            lineY += 20.0;
+        }
+        item.put(JsonName.CONTENT, content);
+        item.put(JsonName.X0, LEFT_X);
+        item.put(JsonName.Y0, y0);
+        item.put(JsonName.FONT_UNDERLINE_SIZE, FONT_SIZE);
+        return item;
+    }
+
+    /**
      * Synthetic document:
      * <ul>
      *   <li>Page 0 (TOC): three TOC lines with printed pages 1, 5, 9.</li>
@@ -131,8 +170,10 @@ public class CatalogBookmarkProcessorTest {
      */
     private static List<Map<String, Object>> legacyDocument() {
         return new ArrayList<>(Arrays.asList(
-                // Page 0: TOC — three TOC lines, ratio=3/3=1.0 ≥ 0.4 and lines=3 ≥ 3.
+                // Page 0: TOC — 目錄 heading + three TOC lines (ratio 3/4 = 0.75 ≥ 0.4,
+                // lines 3 ≥ 3); the heading must sit above the first TOC line.
                 page(0,
+                        catalogHeadingItem(0, "目  錄", 50.0),
                         tocLineItem(1, "第一章 總則 .... 1", 100.0),
                         tocLineItem(2, "第二章 分則 .... 5", 200.0),
                         tocLineItem(3, "第三章 細則 .... 9", 300.0)),
@@ -153,6 +194,7 @@ public class CatalogBookmarkProcessorTest {
     private static List<Map<String, Object>> currentSchemaDocument() {
         return new ArrayList<>(Arrays.asList(
                 page(0,
+                        catalogHeadingItem(0, "目录", 50.0),
                         tocLineItem(1, "第一章 總則 .... 1", 100.0),
                         tocLineItem(2, "第二章 分則 .... 5", 200.0),
                         tocLineItem(3, "第三章 細則 .... 9", 300.0)),
@@ -231,6 +273,7 @@ public class CatalogBookmarkProcessorTest {
         // rather than being silently re-routed to the image's page (2).
         List<Map<String, Object>> data = new ArrayList<>(Arrays.asList(
                 page(0,
+                        catalogHeadingItem(0, "目 錄", 50.0),
                         tocLineItem(1, "第一章 總則 .... 1", 100.0),
                         tocLineItem(2, "第二章 分則 .... 5", 200.0),
                         tocLineItem(3, "第三章 細則 .... 9", 300.0)),
@@ -255,6 +298,245 @@ public class CatalogBookmarkProcessorTest {
 
         assertBookmarkPage(bookmarks.get(1), "第二章 分則", 3);
         assertBookmarkPage(bookmarks.get(2), "第三章 細則", 4);
+    }
+
+    /**
+     * A page full of page-number-terminated lines without a "目录/目錄"
+     * heading must not be a catalog page — this is the price-table /
+     * financial-data-row false positive that used to outscore the real table
+     * of contents (more matched lines ⇒ higher range score).
+     */
+    @Test
+    public void testPageWithoutCatalogHeading_isNotACatalogPage() {
+        List<Map<String, Object>> data = new ArrayList<>(Arrays.asList(
+                // Page 0: real TOC (heading + 2 entries = 2 lines, below the
+                // default minTocLines=3, so it cannot be detected on its own).
+                page(0, catalogHeadingItem(0, "目 錄", 50.0),
+                        tocLineItem(1, "第一章 總則 .... 1", 100.0),
+                        tocLineItem(2, "第二章 分則 .... 5", 200.0)),
+                // Page 1: price table page — 4 rows ending with digits, no heading.
+                page(1,
+                        tocLineItem(3, "九月                        0.218 0.115", 100.0),
+                        tocLineItem(4, "十月                        0.169 0.14", 200.0),
+                        tocLineItem(5, "十一月                      0.165 0.134", 300.0),
+                        tocLineItem(6, "十二月                      0.153 0.126", 400.0))));
+
+        CatalogBookmarkProcessor.CatalogResult result =
+                CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, new Config());
+
+        Assertions.assertEquals(-1, result.getStartPage(),
+                "A heading-less page must not be reported as the catalog page");
+        Assertions.assertEquals(-1, result.getEndPage());
+        Assertions.assertTrue(result.getBookmarks().isEmpty(),
+                "No catalog bookmarks may be extracted from a heading-less page");
+    }
+
+    /**
+     * Simplified and traditional headings are both accepted, and spaces
+     * between the two characters are tolerated ("目 錄", "目  录").
+     */
+    @Test
+    public void testCatalogHeading_simplifiedTraditionalAndSpaces() {
+        String[] headings = {"目录", "目錄", "目 录", "目  錄", "目   录"};
+        for (String heading : headings) {
+            List<Map<String, Object>> data = new ArrayList<>(Arrays.asList(
+                    page(0,
+                            catalogHeadingItem(0, heading, 50.0),
+                            tocLineItem(1, "第一章 總則 .... 1", 100.0),
+                            tocLineItem(2, "第二章 分則 .... 5", 200.0),
+                            tocLineItem(3, "第三章 細則 .... 9", 300.0))));
+            CatalogBookmarkProcessor.CatalogResult result =
+                    CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, new Config());
+            Assertions.assertEquals(0, result.getStartPage(),
+                    "Heading '" + heading + "' should qualify the page as a catalog page");
+        }
+    }
+
+    /**
+     * The heading has to be a paragraph of its own: a "目录" line buried inside
+     * a multi-line paragraph is a running text mention, not a catalog heading.
+     */
+    @Test
+    public void testCatalogHeadingInsideMultiLineParagraph_doesNotQualify() {
+        List<Map<String, Object>> data = new ArrayList<>(Arrays.asList(
+                page(0,
+                        multiLineTextItem(0, Arrays.asList(
+                                "預期時間表. . . . . . . . . i",
+                                "目錄. . . . . . . . . . . iv",
+                                "概要. . . . . . . . . . . 1"), 40.0),
+                        tocLineItem(1, "第一章 總則 .... 1", 200.0),
+                        tocLineItem(2, "第二章 分則 .... 5", 300.0),
+                        tocLineItem(3, "第三章 細則 .... 9", 400.0))));
+
+        CatalogBookmarkProcessor.CatalogResult result =
+                CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, new Config());
+
+        Assertions.assertEquals(-1, result.getStartPage(),
+                "A multi-line paragraph containing 目录 must not qualify as the catalog heading");
+    }
+
+    /**
+     * The heading must precede the TOC entries: the same page without it (or
+     * with the heading placed below them) is not a catalog page.
+     */
+    @Test
+    public void testCatalogHeadingBelowFirstTocLine_doesNotQualify() {
+        List<Map<String, Object>> data = new ArrayList<>(Arrays.asList(
+                page(0,
+                        tocLineItem(1, "第一章 總則 .... 1", 100.0),
+                        tocLineItem(2, "第二章 分則 .... 5", 200.0),
+                        tocLineItem(3, "第三章 細則 .... 9", 300.0),
+                        catalogHeadingItem(0, "目 錄", 400.0))));
+
+        CatalogBookmarkProcessor.CatalogResult result =
+                CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, new Config());
+
+        Assertions.assertEquals(-1, result.getStartPage(),
+                "A heading below the first TOC line must not qualify the page");
+    }
+
+    /**
+     * Only the first page of a range needs the heading: the continuation page
+     * of a two-page table of contents extends an already open range.
+     */
+    @Test
+    public void testContinuationPageWithoutHeading_extendsTheRange() {
+        List<Map<String, Object>> data = new ArrayList<>(Arrays.asList(
+                // Page 0: heading + three entries.
+                page(0,
+                        catalogHeadingItem(0, "目  錄", 50.0),
+                        tocLineItem(1, "第一章 總則 .... 1", 100.0),
+                        tocLineItem(2, "第二章 分則 .... 5", 200.0),
+                        tocLineItem(3, "第三章 細則 .... 9", 300.0)),
+                // Page 1: continuation of the same table of contents, no heading.
+                page(1,
+                        tocLineItem(4, "第四章 附則 .... 13", 100.0),
+                        tocLineItem(5, "第五章 釋義 .... 17", 200.0),
+                        tocLineItem(6, "第六章 生效 .... 21", 300.0))));
+
+        CatalogBookmarkProcessor.CatalogResult result =
+                CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, new Config());
+
+        Assertions.assertEquals(0, result.getStartPage());
+        Assertions.assertEquals(1, result.getEndPage(),
+                "The heading-less continuation page must extend the range, not split it");
+        Assertions.assertEquals(6, result.getBookmarks().size());
+    }
+
+    /**
+     * Reported case: the catalog entry carries a separator ({@code －}) that is
+     * missing from the body heading. Exact and prefix matching both fail, so
+     * the fuzzy fallback has to pair them — the strings share the prefix
+     * {@code 附錄一} and the suffix {@code 購回授權之說明函件}, leaving one
+     * unmatched character on the catalog side.
+     */
+    @Test
+    public void testFuzzyMatch_catalogHasExtraSeparator() {
+        List<Map<String, Object>> data = new ArrayList<>(Arrays.asList(
+                page(0,
+                        catalogHeadingItem(0, "目  錄", 50.0),
+                        tocLineItem(1, "附錄一  －  購回授權之說明函件 .... 3", 100.0),
+                        tocLineItem(2, "第二章 分則 .... 5", 200.0),
+                        tocLineItem(3, "第三章 細則 .... 9", 300.0)),
+                page(1, legacyTextItem(10, "第二章 分則", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(2, legacyTextItem(11, "第三章 細則", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                // Body running heading: same title without the "－" separator.
+                page(3, legacyTextItem(12, "附錄一                  購回授權之說明函件",
+                        JsonName.SOURCE_TYPE_HEADING, 100.0))));
+
+        CatalogBookmarkProcessor.CatalogResult result =
+                CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, new Config());
+
+        Bookmark appendix = result.getBookmarks().get(0);
+        Assertions.assertEquals("附錄一  －  購回授權之說明函件", appendix.getText());
+        Assertions.assertEquals(4, appendix.getPageNum(),
+                "Fuzzy match must resolve the entry to the body heading on page 4");
+        Assertions.assertEquals(12, appendix.getRelatedId(),
+                "Fuzzy match must point at the body item, not at the catalog line");
+    }
+
+    /**
+     * Mirror case: the extra separator sits on the body side
+     * ({@code 第一章總則} vs {@code 第一章 － 總則}).
+     */
+    @Test
+    public void testFuzzyMatch_bodyHasExtraSeparator() {
+        List<Map<String, Object>> data = new ArrayList<>(Arrays.asList(
+                page(0,
+                        catalogHeadingItem(0, "目录", 50.0),
+                        tocLineItem(1, "第一章總則 .... 1", 100.0),
+                        tocLineItem(2, "第二章 分則 .... 5", 200.0),
+                        tocLineItem(3, "第三章 細則 .... 9", 300.0)),
+                page(1, legacyTextItem(10, "第二章 分則", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(2, legacyTextItem(11, "第三章 細則", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(3, legacyTextItem(12, "第一章 － 總則", JsonName.SOURCE_TYPE_HEADING, 100.0))));
+
+        CatalogBookmarkProcessor.CatalogResult result =
+                CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, new Config());
+
+        Bookmark chapter = result.getBookmarks().get(0);
+        Assertions.assertEquals(4, chapter.getPageNum(),
+                "The separator on the body side must still be tolerated");
+        Assertions.assertEquals(12, chapter.getRelatedId());
+    }
+
+    /**
+     * Two unmatched characters are only tolerated for long enough strings:
+     * 8/10 characters pass, 6/8 characters do not.
+     */
+    @Test
+    public void testFuzzyMatch_twoCharacterGapLengthFloors() {
+        // 8 vs 10 characters -> accepted (floors 8 / 10).
+        List<Map<String, Object>> accepted = new ArrayList<>(Arrays.asList(
+                page(0,
+                        catalogHeadingItem(0, "目录", 50.0),
+                        tocLineItem(1, "財務報表附註摘要 .... 1", 100.0),
+                        tocLineItem(2, "第二章 分則 .... 5", 200.0),
+                        tocLineItem(3, "第三章 細則 .... 9", 300.0)),
+                page(1, legacyTextItem(10, "第二章 分則", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(2, legacyTextItem(11, "第三章 細則", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(3, legacyTextItem(12, "財務報表－：附註摘要", JsonName.SOURCE_TYPE_HEADING, 100.0))));
+        Bookmark longMatch = CatalogBookmarkProcessor
+                .extractCatalogBookmarksFromJson(accepted, new Config()).getBookmarks().get(0);
+        Assertions.assertEquals(4, longMatch.getPageNum());
+
+        // 6 vs 8 characters -> rejected (floors would be 8 / 10).
+        List<Map<String, Object>> rejected = new ArrayList<>(Arrays.asList(
+                page(0,
+                        catalogHeadingItem(0, "目录", 50.0),
+                        tocLineItem(1, "財務報表附註 .... 1", 100.0),
+                        tocLineItem(2, "第二章 分則 .... 5", 200.0),
+                        tocLineItem(3, "第三章 細則 .... 9", 300.0)),
+                page(1, legacyTextItem(10, "第二章 分則", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(2, legacyTextItem(11, "第三章 細則", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(3, legacyTextItem(12, "財務報表－：附註", JsonName.SOURCE_TYPE_HEADING, 100.0))));
+        Bookmark shortMatch = CatalogBookmarkProcessor
+                .extractCatalogBookmarksFromJson(rejected, new Config()).getBookmarks().get(0);
+        Assertions.assertEquals(1, shortMatch.getPageNum(),
+                "A two-character gap on 6/8-character titles must not match");
+    }
+
+    /**
+     * One-character gap on very short titles is rejected (floors 4 / 5) so that
+     * a single overlapping character cannot pair unrelated headings.
+     */
+    @Test
+    public void testFuzzyMatch_oneCharacterGapLengthFloors() {
+        List<Map<String, Object>> data = new ArrayList<>(Arrays.asList(
+                page(0,
+                        catalogHeadingItem(0, "目录", 50.0),
+                        tocLineItem(1, "AB .... 1", 100.0),
+                        tocLineItem(2, "第二章 分則 .... 5", 200.0),
+                        tocLineItem(3, "第三章 細則 .... 9", 300.0)),
+                page(1, legacyTextItem(10, "第二章 分則", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(2, legacyTextItem(11, "第三章 細則", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(3, legacyTextItem(12, "A－B", JsonName.SOURCE_TYPE_HEADING, 100.0))));
+
+        Bookmark bookmark = CatalogBookmarkProcessor
+                .extractCatalogBookmarksFromJson(data, new Config()).getBookmarks().get(0);
+
+        Assertions.assertEquals(1, bookmark.getPageNum(),
+                "Titles shorter than 4 characters must not be paired by a one-character gap");
     }
 
     private static Map<String, Object> legacyImageItem(int id, String altText, double y0) {
