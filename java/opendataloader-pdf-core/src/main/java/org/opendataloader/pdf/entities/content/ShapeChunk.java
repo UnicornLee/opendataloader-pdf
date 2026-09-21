@@ -45,6 +45,18 @@ public class ShapeChunk extends InfoChunk {
     public static final String TYPE_POLYLINE = "polyline";
     /** A single line segment that connects two shapes, typically an arrow. */
     public static final String TYPE_ARROW = "arrow";
+    /**
+     * The filled head (triangle) at one end of an arrow, without its shaft.
+     *
+     * <p>Kept as a type of its own so a diagram can be grown from its arrowheads
+     * instead of from its shapes: {@link #TYPE_ARROW} only exists when the shaft
+     * bridges two already recognized shapes, whereas the head is recognized for
+     * every thin line that ends in a small filled region. Flow diagrams whose
+     * connectors start/end on lines that are not shapes (e.g. a bracket drawn
+     * around a row of boxes) therefore only expose themselves through their
+     * heads.</p>
+     */
+    public static final String TYPE_ARROW_HEADER = "arrow_header";
     /** A generic group of same-colored connected pieces. */
     public static final String TYPE_GROUP = "group";
 
