@@ -146,6 +146,42 @@ class FlowchartProcessorTest {
     }
 
     @Test
+    void arrowDrivenClusterIsNotVetoedByTablesInsideIt() {
+        // A row of boxes connected by an arrow — the shape a flow diagram degenerates
+        // into — plus a table that covers most of the region, exactly like the bogus
+        // tables the line preprocessing produces for such diagrams.
+        ShapeChunk box1 = new ShapeChunk(new BoundingBox(0, 100, 400, 180, 440), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk box2 = new ShapeChunk(new BoundingBox(0, 100, 300, 180, 340), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk box3 = new ShapeChunk(new BoundingBox(0, 100, 200, 180, 240), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
+        ShapeChunk arrow = new ShapeChunk(new BoundingBox(0, 140, 240, 142, 300), ShapeChunk.TYPE_ARROW, BLACK, 1);
+        ShapeChunk head = new ShapeChunk(new BoundingBox(0, 138, 238, 144, 244), ShapeChunk.TYPE_ARROW_HEADER, BLACK, 1);
+        TableBorder table = new TableBorder(3, 3);
+        table.setBoundingBox(new BoundingBox(0, 100, 200, 175, 440));
+
+        List<IObject> group = Arrays.asList(box1, box2, box3, arrow, head);
+
+        List<IObject> arrowDrivenContents = new ArrayList<>(group);
+        arrowDrivenContents.add(table);
+        CapturingImagesUtils arrowDrivenImages = new CapturingImagesUtils();
+        FlowchartProcessor.processFlowchartGroups(arrowDrivenContents, Collections.singletonList(group),
+                arrowDrivenImages, 0, 0.0, 0.0, true);
+
+        Assertions.assertEquals(1, arrowDrivenImages.saved.size(),
+                "A region grown from an arrowhead is a diagram even when a table covers it");
+        Assertions.assertEquals(1, arrowDrivenContents.size(), "The table is removed with the diagram");
+
+        // The same region without the arrow driven grouping keeps the veto.
+        List<IObject> contents = new ArrayList<>(group);
+        contents.add(table);
+        CapturingImagesUtils imagesUtils = new CapturingImagesUtils();
+        FlowchartProcessor.processFlowchartGroups(contents, Collections.singletonList(group),
+                imagesUtils, 0, 0.0, 0.0, false);
+
+        Assertions.assertEquals(0, imagesUtils.saved.size(),
+                "Without the arrow driven grouping the table veto still applies");
+    }
+
+    @Test
     void skipsSinglePolylineOrLineChart() {
         List<IObject> pageContents = new ArrayList<>();
         List<List<IObject>> grouped = new ArrayList<>();

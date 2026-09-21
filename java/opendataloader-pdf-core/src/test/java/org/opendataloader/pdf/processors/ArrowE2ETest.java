@@ -13,7 +13,10 @@ import org.opendataloader.pdf.api.Config;
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.entities.content.ShapeChunk;
 import org.verapdf.wcag.algorithms.entities.IDocument;
+import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.content.IChunk;
+import org.verapdf.wcag.algorithms.entities.content.LineArtChunk;
+import org.verapdf.wcag.algorithms.entities.content.LineChunk;
 import org.verapdf.wcag.algorithms.entities.geometry.BoundingBox;
 import org.verapdf.wcag.algorithms.semanticalgorithms.containers.StaticContainers;
 
@@ -65,6 +68,61 @@ class ArrowE2ETest {
 
         // No extra arrows may appear from other page fills.
         Assertions.assertEquals(2, arrows.size(), "No other fills may be misread as arrowheads");
+    }
+
+    @Test
+    void flowDiagramIsGrownFromItsArrowheadOnPage106() throws Exception {
+        // The organisation chart of page 106 is drawn as rows of boxes with a bracket of
+        // percentages. Its only head is a 5 x 4 pt filled triangle that the connector
+        // recognition never turns into an arrow (the shaft does not bridge two shapes),
+        // yet the whole diagram region must be discovered from that head.
+        String pdf = "D:\\Code\\JavaCode\\opendataloader-pdf-parse\\opendataloader-pdf\\docs\\pdf\\20260507AN202606291826520711-106.pdf";
+        DocumentProcessor.preprocessing(pdf, new Config());
+        StaticLayoutContainers.clearContainers();
+        IDocument doc = StaticContainers.getDocument();
+        List<IChunk> artifacts = doc.getArtifacts(0);
+
+        List<IObject> shapes = new ArrayList<>();
+        List<IObject> rawLines = new ArrayList<>();
+        for (IChunk c : artifacts) {
+            if (c instanceof ShapeChunk) {
+                shapes.add(c);
+            } else if (c instanceof LineChunk) {
+                rawLines.add(c);
+            } else if (c instanceof LineArtChunk) {
+                List<LineChunk> children = ((LineArtChunk) c).getLineChunks();
+                if (children == null || children.isEmpty()) {
+                    rawLines.add(c);
+                } else {
+                    rawLines.addAll(children);
+                }
+            }
+        }
+
+        List<ShapeChunk> heads = new ArrayList<>();
+        for (IObject shape : shapes) {
+            if (ShapeChunk.TYPE_ARROW_HEADER.equals(((ShapeChunk) shape).getShapeType())) {
+                heads.add((ShapeChunk) shape);
+            }
+        }
+        Assertions.assertEquals(1, heads.size(), "The page's arrowhead must be recognized");
+        // Only the slice beyond the shaft end is the head, not the whole arrow.
+        BoundingBox head = heads.get(0).getBoundingBox();
+        Assertions.assertEquals(265.53, head.getLeftX(), 0.01);
+        Assertions.assertEquals(475.49, head.getBottomY(), 0.01);
+        Assertions.assertEquals(270.52, head.getRightX(), 0.01);
+        Assertions.assertEquals(479.08, head.getTopY(), 0.01);
+
+        List<List<IObject>> groups = ShapeRecognizer.groupShapesByArrowHeaders(shapes, rawLines);
+        Assertions.assertEquals(1, groups.size(), "The chart is one region grown from its head");
+        BoundingBox region = new BoundingBox(0);
+        for (IObject item : groups.get(0)) {
+            region.union(item.getBoundingBox());
+        }
+        Assertions.assertEquals(86.88, region.getLeftX(), 0.01);
+        Assertions.assertEquals(375.83, region.getBottomY(), 0.01);
+        Assertions.assertEquals(508.39, region.getRightX(), 0.01);
+        Assertions.assertEquals(531.89, region.getTopY(), 0.01);
     }
 
     @Test

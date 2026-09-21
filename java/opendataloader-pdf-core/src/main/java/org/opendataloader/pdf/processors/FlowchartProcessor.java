@@ -154,7 +154,7 @@ public class FlowchartProcessor {
                                               int pageNumber) {
         // Without the page size the page-level guards stay disabled; callers that know the
         // media box should use the overload below.
-        processFlowchartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber, 0.0, 0.0);
+        processFlowchartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber, 0.0, 0.0, false);
     }
 
     /**
@@ -172,6 +172,34 @@ public class FlowchartProcessor {
                                               int pageNumber,
                                               double pageWidth,
                                               double pageHeight) {
+        processFlowchartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber,
+                pageWidth, pageHeight, false);
+    }
+
+    /**
+     * Processes every diagram group of a page, see
+     * {@link #processFlowchartGroups(List, List, ImagesUtils, int)}.
+     *
+     * @param pageWidth   page width (pt); with {@code pageHeight} it enables the
+     *                    page-level guards (page frames and page-sized regions)
+     * @param pageHeight  page height (pt)
+     * @param arrowDriven true when the groups were grown from the page's arrowheads
+     *                    ({@link ShapeRecognizer#groupShapesByArrowHeaders}). Such a region
+     *                    is already known to be a diagram: the arrows connect its parts, so
+     *                    the "looks like a regular table" veto is skipped. Flow diagrams
+     *                    drawn as rows of boxes are routinely turned into a few bogus
+     *                    tables by the line preprocessing, and those tables must neither
+     *                    veto the diagram nor survive the crop. Every other guard (size,
+     *                    aspect ratio, page frame, page-sized region, body text) still
+     *                    applies.
+     */
+    public static void processFlowchartGroups(List<IObject> pageContents,
+                                              List<List<IObject>> groupedShapeChunks,
+                                              ImagesUtils imagesUtils,
+                                              int pageNumber,
+                                              double pageWidth,
+                                              double pageHeight,
+                                              boolean arrowDriven) {
         if (pageContents == null || groupedShapeChunks == null || imagesUtils == null) {
             return;
         }
@@ -215,7 +243,7 @@ public class FlowchartProcessor {
                     if (laterGroup == null || laterGroup.isEmpty()) {
                         continue;
                     }
-                    BoundingBox laterBox = BoundingBoxGroupUtils.unionShapeBoundingBoxes(laterGroup, pageNumber);
+                    BoundingBox laterBox = BoundingBoxGroupUtils.unionBoundingBoxes(laterGroup, pageNumber);
                     if (laterBox == null || !screenshotBox.overlaps(laterBox)) {
                         continue;
                     }
@@ -262,7 +290,7 @@ public class FlowchartProcessor {
             // text would still be cropped into the screenshot while remaining in the text layer.
             BoundingBox finalScreenshotBox = expandHorizontally(mergedCluster.boundingBox,
                     SCREENSHOT_HORIZONTAL_MARGIN, SCREENSHOT_VERTICAL_TOLERANCE);
-            if (isFlowchartCluster(mergedCluster)) {
+            if (isFlowchartCluster(mergedCluster, arrowDriven)) {
                 LOGGER.log(Level.INFO, "Page {0}: detected flowchart cluster with screenshot bbox {1}",
                         new Object[]{pageNumber + 1, finalScreenshotBox});
                 pageContents.removeAll(mergedCluster.collectedContents);
@@ -355,7 +383,10 @@ public class FlowchartProcessor {
 
     private static Cluster collectCluster(List<IObject> pageContents, List<IObject> shapeGroup, int pageNumber,
                                           Set<IObject> proseBlocks) {
-        BoundingBox shapeBox = BoundingBoxGroupUtils.unionShapeBoundingBoxes(shapeGroup, pageNumber);
+        // The group may carry raw line chunks as well as shapes (arrow-driven regions do):
+        // those lines are part of the region and must contribute to its bounding box.
+        // For plain shape groups the result is the same union of shape boxes.
+        BoundingBox shapeBox = BoundingBoxGroupUtils.unionBoundingBoxes(shapeGroup, pageNumber);
         if (shapeBox == null || shapeBox.isEmpty()) {
             return null;
         }
@@ -510,6 +541,21 @@ public class FlowchartProcessor {
     }
 
     private static boolean isFlowchartCluster(Cluster cluster) {
+        return isFlowchartCluster(cluster, false);
+    }
+
+    /**
+     * Decides whether the given cluster is a diagram.
+     *
+     * @param skipTableVeto true for regions grown from the page's arrowheads: an arrow
+     *                      already connects the parts of the region, so the "a table
+     *                      occupies more than {@link #REGULAR_TABLE_AREA_RATIO} of the
+     *                      cluster" veto is not applicable. Rows of boxes in a flow
+     *                      diagram are regularly split into bogus tables by the line
+     *                      preprocessing, and those must not veto the diagram they are
+     *                      part of.
+     */
+    private static boolean isFlowchartCluster(Cluster cluster, boolean skipTableVeto) {
         if (cluster == null || cluster.boundingBox == null || cluster.boundingBox.isEmpty()) {
             return false;
         }
@@ -529,7 +575,7 @@ public class FlowchartProcessor {
         if (Math.max(width / height, height / width) > MAX_ASPECT_RATIO) {
             return false;
         }
-        if (isRegularTable(cluster)) {
+        if (!skipTableVeto && isRegularTable(cluster)) {
             return false;
         }
         if (cluster.shapeCount < MIN_SHAPE_COUNT || cluster.totalComponents < MIN_TOTAL_COMPONENTS) {
@@ -667,9 +713,9 @@ public class FlowchartProcessor {
         final List<IObject> collectedContents;
         final BoundingBox boundingBox;
         /**
-         * Union bounding box of the shape group only (without the collected
-         * neighbours). Diagram labels are recognised relative to this box, see
-         * {@link #isDiagramLabel}.
+         * Union bounding box of the group itself (without the collected neighbours);
+         * for arrow-driven regions the group also holds the raw lines it was grown
+         * through, so this box is larger than the union of its shapes.
          */
         final BoundingBox shapeBox;
 
@@ -701,7 +747,10 @@ public class FlowchartProcessor {
                         rectangleCount++;
                     } else if (ShapeChunk.TYPE_POLYLINE.equals(type)) {
                         polylineCount++;
-                    } else if (ShapeChunk.TYPE_ARROW.equals(type)) {
+                    } else if (ShapeChunk.TYPE_ARROW.equals(type)
+                            || ShapeChunk.TYPE_ARROW_HEADER.equals(type)) {
+                        // A head is a part of an arrow: an arrow-driven group may hold the
+                        // head without the shaft having been accepted as a connector.
                         arrowCount++;
                     }
                 }
