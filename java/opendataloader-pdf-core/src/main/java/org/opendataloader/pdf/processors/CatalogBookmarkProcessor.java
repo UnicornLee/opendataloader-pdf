@@ -54,10 +54,14 @@ import java.nio.file.Path;
  * <ol>
  *   <li><b>Page-range detection</b>: each page is scored by the density of
  *       lines ending with a page number. Lines are matched against Arabic
- *       numerals, Roman numerals, and the PDF's own page labels. Consecutive
- *       pages that pass the threshold are merged into candidate ranges, and
- *       the best range is selected by a combined score of total TOC lines and
- *       page span.</li>
+ *       numerals, Roman numerals, and the PDF's own page labels. A page is
+ *       only accepted as the <em>first</em> page of a candidate range when it
+ *       carries a {@code 目录}/{@code 目錄} heading as a single-line paragraph
+ *       above its first TOC line — otherwise a price table or a financial data
+ *       page (whose rows also end with digits) would outscore the real table of
+ *       contents. Consecutive pages that pass the threshold are merged into
+ *       candidate ranges, and the best range is selected by a combined score of
+ *       total TOC lines and page span.</li>
  *   <li><b>Bookmark extraction</b>: lines inside the selected range are
  *       parsed into title/page-number pairs and assembled into a hierarchical
  *       tree using left indentation and font size.</li>
@@ -125,6 +129,23 @@ public class CatalogBookmarkProcessor {
     // from eating characters that incidentally appear as the first character
     // of a later line.
     private static final String TITLE_CLEANUP = "[\\s.\\u2026]+$";
+    // A catalog page must carry its own "目录"/"目錄" heading (simplified or
+    // traditional) as a single-line paragraph above the first TOC entry;
+    // spaces between the two characters are allowed ("目  錄", "目   录").
+    // Without it a page whose lines merely end with digits (price tables,
+    // financial data rows) would qualify as a catalog page, and the
+    // range-selection score below — which only counts matched lines — would
+    // prefer that page over the real table of contents.
+    private static final Pattern CATALOG_HEADING_PATTERN = Pattern.compile("目\\s*[录錄]");
+    // Similarity fallback for catalog ↔ body title matching (see
+    // isFuzzyTitleMatch): the characters left over in the middle of the two
+    // strings must not add up to more than this on the two sides combined.
+    private static final int MAX_FUZZY_TITLE_GAP = 2;
+    // Minimum total length of the two matched strings, indexed by the gap size
+    // (index 1 → one unmatched character, index 2 → two). The shorter string
+    // gets the lower floor, the longer one the higher floor.
+    private static final int[] FUZZY_MIN_LENGTH_SHORT = {0, 4, 8};
+    private static final int[] FUZZY_MIN_LENGTH_LONG = {0, 5, 10};
     private static final double CONTINUATION_LEFT_X_DELTA = 2.0;
     private static final double CONTINUATION_VERTICAL_GAP = 18.0;
 
@@ -452,7 +473,7 @@ public class CatalogBookmarkProcessor {
      * Scans every page and counts how many lines look like TOC entries.
      */
     private static List<PageTocInfo> analyzePages(List<List<IObject>> contents, Set<String> pageLabels,
-                                                   int minTocLines, double minTocRatio) {
+                                                  int minTocLines, double minTocRatio) {
         List<PageTocInfo> infos = new ArrayList<>(contents.size());
         for (int pageIndex = 0; pageIndex < contents.size(); pageIndex++) {
             List<IObject> pageContents = contents.get(pageIndex);
@@ -471,9 +492,16 @@ public class CatalogBookmarkProcessor {
                     continue;
                 }
                 info.totalLines++;
+                if (CATALOG_HEADING_PATTERN.matcher(value).find()) {
+                    // Each entry of the content pipeline is a single text line,
+                    // so any line is a "single-line paragraph" here; only the
+                    // position relative to the first TOC line matters.
+                    info.headingTopY = Math.max(info.headingTopY, line.getTopY());
+                }
                 TocMatch match = matchTocLine(value.trim(), pageLabels);
                 if (match != null) {
                     info.tocLines.add(new TocLine(match.title, match.rawPage, line));
+                    info.firstTocTopY = Math.max(info.firstTocTopY, line.getTopY());
                 }
             }
             infos.add(info);
@@ -579,21 +607,31 @@ public class CatalogBookmarkProcessor {
 
     /**
      * Groups consecutive TOC pages into candidate ranges.
+     *
+     * <p>A range may only <em>start</em> on a page that carries a
+     * "目录/目錄" heading above its first TOC entry; the following pages of the
+     * same range are not required to repeat the heading (a multi-page table of
+     * contents only prints it once). Pages that fail the check can therefore
+     * extend an existing range but never open a new one.</p>
      */
     private static List<PageRange> detectRanges(List<PageTocInfo> pageInfos) {
         List<PageRange> ranges = new ArrayList<>();
         PageRange current = null;
         for (PageTocInfo info : pageInfos) {
-            if (info.isTocPage()) {
-                if (current == null) {
-                    current = new PageRange(info.pageIndex, info.tocLines.size());
-                } else if (info.pageIndex == current.endPage + 1) {
-                    current.endPage = info.pageIndex;
-                    current.totalTocLines += info.tocLines.size();
-                } else {
-                    ranges.add(current);
-                    current = new PageRange(info.pageIndex, info.tocLines.size());
-                }
+            if (!info.isTocPage()) {
+                continue;
+            }
+            if (current != null && info.pageIndex == current.endPage + 1) {
+                current.endPage = info.pageIndex;
+                current.totalTocLines += info.tocLines.size();
+                continue;
+            }
+            if (current != null) {
+                ranges.add(current);
+                current = null;
+            }
+            if (info.hasCatalogHeadingAboveFirstToc()) {
+                current = new PageRange(info.pageIndex, info.tocLines.size());
             }
         }
         if (current != null) {
@@ -1187,13 +1225,19 @@ public class CatalogBookmarkProcessor {
                 if (!isTextItem(item)) {
                     continue;
                 }
+                boolean singleLineParagraph = isSingleLineJsonItem(item);
                 for (JsonTextLine line : getJsonItemLines(item)) {
                     if (line.text.isEmpty()) {
                         continue;
                     }
                     info.totalLines++;
+                    if (singleLineParagraph
+                            && CATALOG_HEADING_PATTERN.matcher(line.text).find()) {
+                        info.headingTopY = Math.max(info.headingTopY, line.topY);
+                    }
                     if (matchTocLine(line.text, pageLabels) != null) {
                         info.tocLineCount++;
+                        info.firstTocTopY = Math.max(info.firstTocTopY, line.topY);
                     }
                 }
             }
@@ -1205,6 +1249,17 @@ public class CatalogBookmarkProcessor {
     private static boolean isTextItem(Map<String, Object> item) {
         String itemType = (String) item.get(JsonName.ITEM_TYPE);
         return "text".equals(itemType);
+    }
+
+    /**
+     * Returns true when {@code item} holds exactly one text line, i.e. it is a
+     * single-line paragraph. The count is taken from the raw {@code content}
+     * array (empty lines included) so that a heading buried inside a multi-line
+     * paragraph cannot qualify as a catalog heading.
+     */
+    private static boolean isSingleLineJsonItem(Map<String, Object> item) {
+        Object contentObj = item.get(JsonName.CONTENT);
+        return contentObj instanceof List && ((List<?>) contentObj).size() == 1;
     }
 
     /**
@@ -1233,20 +1288,32 @@ public class CatalogBookmarkProcessor {
                 && "text".equals(item.get(JsonName.ITEM_TYPE));
     }
 
+    /**
+     * Groups consecutive TOC pages into candidate ranges.
+     *
+     * <p>A range may only <em>start</em> on a page that carries a
+     * "目录/目錄" heading above its first TOC entry; the following pages of the
+     * same range are not required to repeat the heading. See
+     * {@link #detectRanges(List)} for the content-pipeline twin.</p>
+     */
     private static List<JsonPageRange> detectJsonRanges(List<JsonPageTocInfo> pageInfos) {
         List<JsonPageRange> ranges = new ArrayList<>();
         JsonPageRange current = null;
         for (JsonPageTocInfo info : pageInfos) {
-            if (info.isTocPage()) {
-                if (current == null) {
-                    current = new JsonPageRange(info.pageIndex, info.tocLineCount);
-                } else if (info.pageIndex == current.endPage + 1) {
-                    current.endPage = info.pageIndex;
-                    current.totalTocLines += info.tocLineCount;
-                } else {
-                    ranges.add(current);
-                    current = new JsonPageRange(info.pageIndex, info.tocLineCount);
-                }
+            if (!info.isTocPage()) {
+                continue;
+            }
+            if (current != null && info.pageIndex == current.endPage + 1) {
+                current.endPage = info.pageIndex;
+                current.totalTocLines += info.tocLineCount;
+                continue;
+            }
+            if (current != null) {
+                ranges.add(current);
+                current = null;
+            }
+            if (info.hasCatalogHeadingAboveFirstToc()) {
+                current = new JsonPageRange(info.pageIndex, info.tocLineCount);
             }
         }
         if (current != null) {
@@ -1828,7 +1895,71 @@ public class CatalogBookmarkProcessor {
         if (normalized.startsWith(normalizedTitle)) {
             return MatchQuality.PREFIX;
         }
+        if (isFuzzyTitleMatch(normalizedTitle, normalized)) {
+            return MatchQuality.FUZZY;
+        }
         return null;
+    }
+
+    /**
+     * Similarity fallback used when the exact match and the prefix match both
+     * fail: both strings must start with the same leading part and end with the
+     * same trailing part, and the characters left over between those two parts
+     * must not add up to more than {@link #MAX_FUZZY_TITLE_GAP} on the two
+     * sides combined (whitespace has already been removed by
+     * {@link #normalizeBookmarkText}).
+     *
+     * <p>This covers catalog entries whose separator differs from the body
+     * heading, e.g. the catalog prints {@code 附錄一 － 購回授權之說明函件} while
+     * the running heading only prints {@code 附錄一 購回授權之說明函件}: the two
+     * share the prefix {@code 附錄一} and the suffix {@code 購回授權之說明函件},
+     * leaving a single unmatched character (the {@code －}) on the catalog side.
+     * Short strings are rejected through the {@link #FUZZY_MIN_LENGTH_SHORT} /
+     * {@link #FUZZY_MIN_LENGTH_LONG} floors so that a one-character overlap
+     * cannot pair two unrelated headings.</p>
+     */
+    private static boolean isFuzzyTitleMatch(String title, String itemText) {
+        int minLength = Math.min(title.length(), itemText.length());
+        if (minLength < 2) {
+            return false;
+        }
+        int shortestGap = Integer.MAX_VALUE;
+        for (int prefixLength = 1; prefixLength < minLength; prefixLength++) {
+            if (title.charAt(prefixLength - 1) != itemText.charAt(prefixLength - 1)) {
+                break;
+            }
+            int suffixLength = commonSuffixLength(title, itemText, prefixLength);
+            if (suffixLength == 0) {
+                continue;
+            }
+            int gap = (title.length() - prefixLength - suffixLength)
+                    + (itemText.length() - prefixLength - suffixLength);
+            if (gap > 0 && gap < shortestGap) {
+                shortestGap = gap;
+            }
+        }
+        if (shortestGap > MAX_FUZZY_TITLE_GAP) {
+            return false;
+        }
+        int shorter = Math.min(title.length(), itemText.length());
+        int longer = Math.max(title.length(), itemText.length());
+        return shorter >= FUZZY_MIN_LENGTH_SHORT[shortestGap]
+                && longer >= FUZZY_MIN_LENGTH_LONG[shortestGap];
+    }
+
+    /**
+     * Length of the longest common suffix of {@code a} and {@code b} after the
+     * first {@code prefixLength} characters, never overlapping that prefix.
+     */
+    private static int commonSuffixLength(String a, String b, int prefixLength) {
+        int maxLength = Math.min(a.length(), b.length()) - prefixLength;
+        int suffixLength = 0;
+        while (suffixLength < maxLength
+                && a.charAt(a.length() - 1 - suffixLength)
+                        == b.charAt(b.length() - 1 - suffixLength)) {
+            suffixLength++;
+        }
+        return suffixLength;
     }
 
     private static String normalizeBookmarkText(String text) {
@@ -1839,7 +1970,7 @@ public class CatalogBookmarkProcessor {
     }
 
     private enum MatchQuality {
-        EXACT, PREFIX, CONTAINS
+        EXACT, PREFIX, FUZZY, CONTAINS
     }
 
     private static final class TargetMatch {
@@ -1872,6 +2003,10 @@ public class CatalogBookmarkProcessor {
         final double minTocRatio;
         int totalLines = 0;
         final List<TocLine> tocLines = new ArrayList<>();
+        /** Topmost TOC entry on this page; a catalog heading must be above it. */
+        double firstTocTopY = Double.NEGATIVE_INFINITY;
+        /** Topmost "目录/目錄" line on this page, regardless of its paragraph size. */
+        double headingTopY = Double.NEGATIVE_INFINITY;
 
         PageTocInfo(int pageIndex, int minTocLines, double minTocRatio) {
             this.pageIndex = pageIndex;
@@ -1884,6 +2019,15 @@ public class CatalogBookmarkProcessor {
                 return false;
             }
             return totalLines == 0 || (double) tocLines.size() / totalLines >= minTocRatio;
+        }
+
+        /**
+         * A catalog page must carry a "目录/目錄" heading above its first TOC
+         * entry; both values default to {@code -infinity} so a page without a
+         * heading never qualifies.
+         */
+        boolean hasCatalogHeadingAboveFirstToc() {
+            return headingTopY > firstTocTopY;
         }
     }
 
@@ -1963,6 +2107,10 @@ public class CatalogBookmarkProcessor {
         final double minTocRatio;
         int totalLines = 0;
         int tocLineCount = 0;
+        /** Topmost TOC entry on this page; a catalog heading must be above it. */
+        double firstTocTopY = Double.NEGATIVE_INFINITY;
+        /** Topmost "目录/目錄" single-line paragraph on this page. */
+        double headingTopY = Double.NEGATIVE_INFINITY;
 
         JsonPageTocInfo(int pageIndex, int minTocLines, double minTocRatio) {
             this.pageIndex = pageIndex;
@@ -1975,6 +2123,15 @@ public class CatalogBookmarkProcessor {
                 return false;
             }
             return totalLines == 0 || (double) tocLineCount / totalLines >= minTocRatio;
+        }
+
+        /**
+         * A catalog page must carry a "目录/目錄" heading above its first TOC
+         * entry; both values default to {@code -infinity} so a page without a
+         * heading never qualifies.
+         */
+        boolean hasCatalogHeadingAboveFirstToc() {
+            return headingTopY > firstTocTopY;
         }
     }
 
