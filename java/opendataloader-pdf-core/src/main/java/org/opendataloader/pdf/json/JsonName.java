@@ -106,6 +106,7 @@ public class JsonName {
     public static final String SOURCE_LABEL = "source label";
     public static final String HYBRID = "hybrid";
 
+    public static final String PREVIOUS_TABLE = "previous_table";
     public static final String SOURCE_TYPE = "source_type";
     public static final String SOURCE_TYPE_PARAGRAPH = "paragraph";
     public static final String SOURCE_TYPE_HEADING = "heading";

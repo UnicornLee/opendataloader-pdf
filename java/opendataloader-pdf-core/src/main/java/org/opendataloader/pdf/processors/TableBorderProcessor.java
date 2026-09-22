@@ -17,6 +17,7 @@ package org.opendataloader.pdf.processors;
 
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.opendataloader.pdf.entities.content.ShapeChunk;
+import org.verapdf.wcag.algorithms.entities.SemanticHeading;
 import org.verapdf.wcag.algorithms.entities.content.LineArtChunk;
 import org.verapdf.wcag.algorithms.entities.content.LineChunk;
 import org.verapdf.wcag.algorithms.entities.content.TextChunk;
@@ -34,6 +35,7 @@ import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 public class TableBorderProcessor {
@@ -334,9 +336,37 @@ public class TableBorderProcessor {
         return newContents;
     }
 
+    /**
+     * Links tables that continue on a following page through
+     * {@link TableBorder#setPreviousTable}/{@link TableBorder#setNextTable}.
+     *
+     * <p>Only tables on <strong>different pages</strong> are linked (see
+     * {@link #checkNeighborTables(TableBorder, TableBorder)}): two tables sharing a page are two
+     * separate tables even when they look identical, so a continuation is by definition cross-page.</p>
+     *
+     * <p>Headers, footers, rules and vector shapes never break the chain because they are page
+     * furniture rather than content between two tables. Graphics matter for real documents:
+     * {@link org.opendataloader.pdf.entities.content.ShapeChunk} is produced by the shape
+     * recognizer for nearly every page (polylines, filled rectangles, table decoration), and
+     * <strong>it is not a {@link LineArtChunk}</strong>, so without it in this list every
+     * table-to-table transition of a document was reset before the geometry could be compared
+     * (measured on a 765-page prospectus: 744 tables, 0 comparisons, 0 links). Images
+     * ({@link org.verapdf.wcag.algorithms.entities.content.ImageChunk}) and text do break the
+     * chain, because a figure or a paragraph between two tables means they are separate.</p>
+     *
+     * <p>The same holds for a page-top heading: documents such as prospectuses repeat the section
+     * title at the top of every page ("附錄四 長和組織文件…", drawn between the two rules at the top
+     * of the page), and that title must not hide a table that continues from the previous page.
+     * Only the leading headings of a page are exempted — the first content of the page that is
+     * neither furniture nor a heading ends the exemption, so a heading further down the page still
+     * breaks the chain.</p>
+     *
+     * @param contents the document contents, one list per page, in reading order
+     */
     public static void checkNeighborTables(List<List<IObject>> contents) {
         TableBorder previousTable = null;
         for (List<IObject> iObjects : contents) {
+            boolean isPageTop = true;
             for (IObject content : iObjects) {
                 if (content instanceof TableBorder && !((TableBorder) content).isTextBlock()) {
                     TableBorder currentTable = (TableBorder) content;
@@ -344,17 +374,40 @@ public class TableBorderProcessor {
                         checkNeighborTables(previousTable, currentTable);
                     }
                     previousTable = currentTable;
+                } else if (HeaderFooterProcessor.isHeaderOrFooter(content) ||
+                        content instanceof LineChunk || content instanceof LineArtChunk
+                        || content instanceof ShapeChunk) {
+                    // Page furniture, rules and vector shapes: no content between two tables.
+                } else if (isPageTop && content instanceof SemanticHeading) {
+                    // Page-top heading (section title of the page): no content between two tables.
                 } else {
-                    if (!HeaderFooterProcessor.isHeaderOrFooter(content) &&
-                            !(content instanceof LineChunk) && !(content instanceof LineArtChunk)) {
-                        previousTable = null;
-                    }
+                    isPageTop = false;
+                    previousTable = null;
                 }
             }
         }
     }
 
+    /**
+     * Links {@code currentTable} as the continuation of {@code previousTable} when both describe the
+     * same table split across a page boundary: same number of columns, (nearly) the same table width
+     * and (nearly) the same cell widths in the first row.
+     *
+     * <p>Tables that share a page are never linked. They are separate tables that merely happen to
+     * have the same layout — for example the "释义" blocks of a prospectus, where several glossary
+     * tables of the same width follow each other on one page. Requiring a page change keeps
+     * {@code previous_table} meaningful for downstream consumers (it means "continues from the
+     * previous page").</p>
+     *
+     * @param previousTable the last table seen before {@code currentTable} in reading order
+     * @param currentTable  the table to test
+     */
     private static void checkNeighborTables(TableBorder previousTable, TableBorder currentTable) {
+        if (previousTable.getPageNumber() != null
+                && Objects.equals(previousTable.getPageNumber(), currentTable.getPageNumber())) {
+            // Two tables on the same page are separate tables, not a continuation.
+            return;
+        }
         if (currentTable.getNumberOfColumns() != previousTable.getNumberOfColumns()) {
             return;
         }

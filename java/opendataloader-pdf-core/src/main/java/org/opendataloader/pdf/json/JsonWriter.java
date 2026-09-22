@@ -542,7 +542,7 @@ public class JsonWriter {
         Double[] footerPos = null;
         // Double[] footerPos = pageContents.size() > 1 ? headerFooterPos(pageContents.get(pageContents.size() - 1), height) : null;
         if (isHk) {
-            pageContents = flattenHeaderFooterContents(pageContents);
+//            pageContents = flattenHeaderFooterContents(pageContents);
         } else {
             // headerPos = pageContents.isEmpty() ? null : headerFooterPos(pageContents.get(0), height);
         }
@@ -1010,6 +1010,7 @@ public class JsonWriter {
                 tableMap.put(JsonName.Y1, height - tableBorder.getBottomY());
                 tableMap.put(JsonName.MARGIN_TOP, marginTop(prevBottomY[0] - tableBorder.getTopY()));
                 tableMap.put(JsonName.IS_THIRD_PARTY, false);
+                tableMap.put(JsonName.PREVIOUS_TABLE, tableBorder.getPreviousTable() != null);
                 List<List<Map<String, Object>>> rowList = new ArrayList<>();
                 int numberOfColumns = ((TableBorder) content).getNumberOfColumns();
                 float[] cellRadios = new float[numberOfColumns];
