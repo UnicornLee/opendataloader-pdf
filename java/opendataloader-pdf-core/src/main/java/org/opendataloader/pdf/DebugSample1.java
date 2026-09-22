@@ -16,9 +16,10 @@ public class DebugSample1 {
         config.setThreads(4);
         config.getFilterConfig().setHalfWidthToFullWidth(true);
         Map<String, Object> customOptions = new HashMap<>();
-        customOptions.put("paddleUrl", "http://192.168.1.97:8088/layout-parsing");
-        customOptions.put("basicParseStreamTable", true);
+        //customOptions.put("paddleUrl", "http://192.168.1.97:8088/layout-parsing");
+        customOptions.put("basicParseStreamTable", false);
         customOptions.put("basicFormulaRecognize", false);
+        customOptions.put("pulsarReceiveTopicName", "hk_announcement_parse_all");
         customOptions.put("businessId", 123456789);
         customOptions.put("extend", new HashMap<String, Object>(){});
         /*customOptions.put("basicEnv", "test");
@@ -37,7 +38,7 @@ public class DebugSample1 {
 //                        ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf\\docs\\pdf\\02333_長城汽車_2026-08-13_海外監管公告.pdf", config);
 //            ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf\\docs\\pdf\\02333_長城汽車_2026-08-13_股東特別大會適用的代表委任表格.pdf", config);
 //            ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf\\docs\\pdf\\202609011788226322560075761.pdf", config);
-            ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf\\docs\\pdf\\202302281677505819604328.pdf", config);
+            ProcessingResult result = OpenDataLoaderPDF.processFile("D:\\Code\\JavaCode\\opendataloader-pdf\\docs\\pdf\\200708231781628216164054430.pdf", config);
             System.out.println("JSON URL / local path: " + result.getJsonUrlOrPath());
             System.out.println("OCR JSON local path: " + result.getOcrJsonLocalPath());
             /*RebuildBookmarksResult result = OpenDataLoaderPDF.rebuildBookmarks("D:\\Code\\JavaCode\\opendataloader-pdf\\docs\\pdf\\eddf5bd0-cfce-49cb-a33c-742eec08181d.json", config);
