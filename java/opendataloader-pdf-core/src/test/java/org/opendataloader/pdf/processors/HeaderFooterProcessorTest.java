@@ -16,11 +16,13 @@
 package org.opendataloader.pdf.processors;
 
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
+import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.verapdf.tools.StaticResources;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.SemanticHeaderOrFooter;
+import org.verapdf.wcag.algorithms.entities.SemanticTextNode;
 import org.verapdf.wcag.algorithms.entities.content.TextChunk;
 import org.verapdf.wcag.algorithms.entities.content.TextLine;
 import org.verapdf.wcag.algorithms.entities.enums.SemanticType;
@@ -333,5 +335,100 @@ public class HeaderFooterProcessorTest {
             Assertions.assertTrue(first instanceof SemanticHeaderOrFooter,
                 "Page " + page + ": first element should be header (two-sided pattern must still be detected)");
         }
+    }
+
+    /**
+     * Reproduces the section-title false positive of
+     * {@code 201501131782598903817032205.pdf}: the boilerplate warning printed above the first rule
+     * ("本文件為草擬本…文件封面「警告」一節。") repeats on 192 of the 193 pages and is a genuine
+     * header, while the section title drawn <em>between</em> the two rules at the top of every page
+     * ("附錄四 長和組織文件及開曼群島公司法及稅務概要") only repeats inside its own chapter
+     * (longest run in that document: 28 of 193 pages = 14.5%).
+     *
+     * <p>Before the repetition coverage guard, the section title was stripped from the output JSON
+     * on 184 of the 190 pages carrying one, while the pages whose neighbours carry a different
+     * title kept theirs. Both matching styles are part of the reproduction: the 1-page style
+     * matches neighbouring pages of a chapter, the 2-page style matches (p, p+2) inside the
+     * chapters that are at least three pages long.</p>
+     */
+    @Test
+    public void testChapterTitleBetweenTopRulesIsNotAHeader() {
+        initContainers();
+        // The header contents are merged into paragraphs, whose text is only readable when
+        // line breaks are enabled (StaticContainers.isKeepLineBreaks() is a ThreadLocal that the
+        // production path sets, not this test helper).
+        StaticContainers.setKeepLineBreaks(true);
+        double pageHeight = 841.92;
+        // Ranks of the chapters: 3 pages / 3 pages / 2 pages -- each well below half of the document.
+        String[] sectionTitles = {"概要", "概要", "概要", "風險因素", "風險因素", "風險因素",
+            "附錄一 本集團資料", "附錄一 本集團資料"};
+        String[] bodyTexts = {"正文段落一", "正文段落二", "正文段落三", "正文段落四",
+            "正文段落五", "正文段落六", "正文段落七", "正文段落八"};
+        int totalPages = sectionTitles.length;
+
+        List<List<IObject>> contents = new ArrayList<>();
+        for (int page = 0; page < totalPages; page++) {
+            List<IObject> pageContents = new ArrayList<>();
+            // Genuine header: two boilerplate lines above the first rule, identical on every page.
+            pageContents.add(textLine(page, 85.04, pageHeight - 21.0, 510.24, pageHeight - 12.0, 9.0,
+                "本文件為草擬本，其所載資料並不完整，亦可能會出現變動"));
+            pageContents.add(textLine(page, 85.04, pageHeight - 31.0, 510.24, pageHeight - 22.0, 9.0,
+                "文件封面「警告」一節。"));
+            // Section title between the two rules: identical only within its own chapter.
+            pageContents.add(textLine(page, 85.04, pageHeight - 50.0, 320.0, pageHeight - 40.4, 12.0,
+                sectionTitles[page]));
+            // Body text of the page (distinct on every page, so it never matches a header/footer).
+            pageContents.add(textLine(page, 85.04, pageHeight - 115.0, 510.24, pageHeight - 100.0, 11.0,
+                bodyTexts[page]));
+            contents.add(pageContents);
+        }
+
+        HeaderFooterProcessor.processHeadersAndFooters(contents, false);
+
+        for (int page = 0; page < totalPages; page++) {
+            List<IObject> pageContent = contents.get(page);
+            IObject first = pageContent.get(0);
+            Assertions.assertTrue(first instanceof SemanticHeaderOrFooter,
+                "Page " + page + ": the boilerplate warning lines must still be a header");
+            SemanticHeaderOrFooter header = (SemanticHeaderOrFooter) first;
+            String headerText = headerFooterText(header);
+            Assertions.assertTrue(headerText.contains("本文件為草擬本"),
+                "Page " + page + ": the first warning line belongs to the header, got: " + headerText);
+            Assertions.assertTrue(headerText.contains("文件封面"),
+                "Page " + page + ": the second warning line belongs to the header, got: " + headerText);
+
+            boolean foundTitle = false;
+            for (IObject obj : pageContent) {
+                if (!(obj instanceof SemanticHeaderOrFooter) && obj instanceof CustomSemanticParagraph
+                        && sectionTitles[page].equals(((CustomSemanticParagraph) obj).getValue())) {
+                    foundTitle = true;
+                    break;
+                }
+            }
+            Assertions.assertTrue(foundTitle,
+                "Page " + page + ": the section title \"" + sectionTitles[page]
+                    + "\" should stay in the body as its own paragraph instead of being absorbed "
+                    + "into the header or merged into the following paragraph");
+            Assertions.assertFalse(headerText.contains(sectionTitles[page]),
+                "Page " + page + ": the section title must not be part of the header");
+        }
+    }
+
+    private String headerFooterText(SemanticHeaderOrFooter headerOrFooter) {
+        StringBuilder text = new StringBuilder();
+        for (IObject content : headerOrFooter.getContents()) {
+            if (content instanceof SemanticTextNode) {
+                text.append(((SemanticTextNode) content).getValue());
+            } else if (content instanceof TextLine) {
+                text.append(((TextLine) content).getValue());
+            }
+        }
+        return text.toString();
+    }
+
+    private TextLine textLine(int pageNumber, double leftX, double bottomY, double rightX, double topY,
+                              double fontSize, String value) {
+        return new TextLine(new TextChunk(new BoundingBox(pageNumber, leftX, bottomY, rightX, topY),
+            value, fontSize, bottomY));
     }
 }

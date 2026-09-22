@@ -16,9 +16,11 @@
 package org.opendataloader.pdf.processors;
 
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
+import org.opendataloader.pdf.entities.content.ShapeChunk;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.verapdf.wcag.algorithms.entities.IObject;
+import org.verapdf.wcag.algorithms.entities.SemanticHeading;
 import org.verapdf.wcag.algorithms.entities.SemanticParagraph;
 import org.verapdf.wcag.algorithms.entities.content.ImageChunk;
 import org.verapdf.wcag.algorithms.entities.content.TextChunk;
@@ -148,6 +150,139 @@ public class TableBorderProcessorTest {
         Assertions.assertEquals(1, contents.get(1).size());
         Assertions.assertTrue(contents.get(1).get(0) instanceof TableBorder);
         Assertions.assertEquals(1l, ((TableBorder) contents.get(1).get(0)).getPreviousTableId());
+    }
+
+    /**
+     * A heading at the top of a page is the page's section title (prospectuses print it between
+     * the two rules at the top of every page), so it must not hide a table that continues from
+     * the previous page.
+     */
+    @Test
+    public void testPageTopHeadingDoesNotBreakNeighborTableChain() {
+        TableBorder firstTable = createTable(0, 10.0, 10.0, 110.0, 70.0, 2, 2, 1L);
+        TableBorder secondTable = createTable(1, 10.0, 10.0, 110.0, 70.0, 2, 2, 2L);
+
+        SemanticHeading sectionTitle = new SemanticHeading();
+        sectionTitle.setBoundingBox(new BoundingBox(1, 10.0, 760.0, 320.0, 770.0));
+
+        List<IObject> pageContents1 = new ArrayList<>();
+        pageContents1.add(firstTable);
+        List<IObject> pageContents2 = new ArrayList<>();
+        pageContents2.add(sectionTitle);
+        pageContents2.add(secondTable);
+        List<List<IObject>> contents = new ArrayList<>();
+        contents.add(pageContents1);
+        contents.add(pageContents2);
+
+        TableBorderProcessor.checkNeighborTables(contents);
+
+        Assertions.assertEquals(2L, firstTable.getNextTableId());
+        Assertions.assertEquals(1L, secondTable.getPreviousTableId());
+    }
+
+    /**
+     * The exemption covers only the leading headings of a page: a heading that comes after real
+     * content still breaks the chain.
+     */
+    @Test
+    public void testHeadingAfterPageContentStillBreaksNeighborTableChain() {
+        TableBorder firstTable = createTable(0, 10.0, 10.0, 110.0, 70.0, 2, 2, 1L);
+        TableBorder secondTable = createTable(1, 10.0, 10.0, 110.0, 70.0, 2, 2, 2L);
+
+        SemanticHeading sectionTitle = new SemanticHeading();
+        sectionTitle.setBoundingBox(new BoundingBox(1, 10.0, 760.0, 320.0, 770.0));
+
+        List<IObject> pageContents1 = new ArrayList<>();
+        pageContents1.add(firstTable);
+        List<IObject> pageContents2 = new ArrayList<>();
+        pageContents2.add(createTextChunk(1, 10.0, 300.0, 110.0, 320.0, "body text"));
+        pageContents2.add(sectionTitle);
+        pageContents2.add(secondTable);
+        List<List<IObject>> contents = new ArrayList<>();
+        contents.add(pageContents1);
+        contents.add(pageContents2);
+
+        TableBorderProcessor.checkNeighborTables(contents);
+
+        Assertions.assertNull(firstTable.getNextTableId());
+        Assertions.assertNull(secondTable.getPreviousTableId());
+    }
+
+    /**
+     * Vector shapes are page furniture, not content between two tables: {@link ShapeChunk} is
+     * produced by the shape recognizer on nearly every page (polylines, filled rectangles, table
+     * decoration) and is not a {@link org.verapdf.wcag.algorithms.entities.content.LineArtChunk},
+     * so it must not hide a table that continues on the next page.
+     */
+    @Test
+    public void testShapeChunkDoesNotBreakNeighborTableChain() {
+        TableBorder firstTable = createTable(0, 10.0, 10.0, 110.0, 70.0, 2, 2, 1L);
+        TableBorder secondTable = createTable(1, 10.0, 10.0, 110.0, 70.0, 2, 2, 2L);
+
+        ShapeChunk decoration = new ShapeChunk(new BoundingBox(1, 10.0, 90.0, 110.0, 100.0),
+            ShapeChunk.TYPE_POLYLINE, new double[]{0.0, 0.0, 0.0}, 2);
+
+        List<IObject> pageContents1 = new ArrayList<>();
+        pageContents1.add(firstTable);
+        List<IObject> pageContents2 = new ArrayList<>();
+        pageContents2.add(decoration);
+        pageContents2.add(secondTable);
+        List<List<IObject>> contents = new ArrayList<>();
+        contents.add(pageContents1);
+        contents.add(pageContents2);
+
+        TableBorderProcessor.checkNeighborTables(contents);
+
+        Assertions.assertEquals(2L, firstTable.getNextTableId());
+        Assertions.assertEquals(1L, secondTable.getPreviousTableId());
+    }
+
+    /**
+     * Positive control for the exemption above: an image between two tables means they are
+     * separate tables, so {@link ImageChunk} still breaks the chain (deliberately not ignored).
+     */
+    @Test
+    public void testImageChunkBreaksNeighborTableChain() {
+        TableBorder firstTable = createTable(0, 10.0, 10.0, 110.0, 70.0, 2, 2, 1L);
+        TableBorder secondTable = createTable(1, 10.0, 10.0, 110.0, 70.0, 2, 2, 2L);
+
+        ImageChunk figure = new ImageChunk(new BoundingBox(1, 10.0, 90.0, 110.0, 100.0));
+
+        List<IObject> pageContents1 = new ArrayList<>();
+        pageContents1.add(firstTable);
+        List<IObject> pageContents2 = new ArrayList<>();
+        pageContents2.add(figure);
+        pageContents2.add(secondTable);
+        List<List<IObject>> contents = new ArrayList<>();
+        contents.add(pageContents1);
+        contents.add(pageContents2);
+
+        TableBorderProcessor.checkNeighborTables(contents);
+
+        Assertions.assertNull(firstTable.getNextTableId());
+        Assertions.assertNull(secondTable.getPreviousTableId());
+    }
+
+    /**
+     * Two tables that share a page are separate tables even when their layout is identical
+     * (e.g. several same-width glossary tables following each other on one page), so a
+     * continuation is only ever linked across a page boundary.
+     */
+    @Test
+    public void testTablesOnTheSamePageAreNotLinked() {
+        TableBorder firstTable = createTable(0, 10.0, 10.0, 110.0, 70.0, 2, 2, 1L);
+        TableBorder secondTable = createTable(0, 10.0, 90.0, 110.0, 150.0, 2, 2, 2L);
+
+        List<IObject> pageContents = new ArrayList<>();
+        pageContents.add(firstTable);
+        pageContents.add(secondTable);
+        List<List<IObject>> contents = new ArrayList<>();
+        contents.add(pageContents);
+
+        TableBorderProcessor.checkNeighborTables(contents);
+
+        Assertions.assertNull(firstTable.getNextTableId());
+        Assertions.assertNull(secondTable.getPreviousTableId());
     }
 
     @Test
