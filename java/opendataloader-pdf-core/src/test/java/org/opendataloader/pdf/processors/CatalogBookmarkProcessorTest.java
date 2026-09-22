@@ -44,6 +44,8 @@ import java.util.Map;
 public class CatalogBookmarkProcessorTest {
 
     private static final double LEFT_X = 70.0;
+    /** Left indentation of a catalog entry nested under a section heading. */
+    private static final double INDENTED_X = LEFT_X + 20.0;
     private static final double FONT_SIZE = 12.0;
 
     @BeforeEach
@@ -68,6 +70,16 @@ public class CatalogBookmarkProcessorTest {
      *                   {@link JsonName#SOURCE_TYPE_PARAGRAPH}.
      */
     private static Map<String, Object> legacyTextItem(int id, String text, String sourceType, double y0) {
+        return legacyTextItemAt(id, text, sourceType, y0, LEFT_X);
+    }
+
+    /**
+     * Same as {@link #legacyTextItem(int, String, String, double)} but with an
+     * explicit left indentation, so tests can build the indented sub-entries of
+     * a catalog section.
+     */
+    private static Map<String, Object> legacyTextItemAt(int id, String text, String sourceType,
+                                                        double y0, double leftX) {
         Map<String, Object> item = new HashMap<>();
         item.put(JsonName.ID, id);
         item.put(JsonName.ITEM_TYPE, "text");
@@ -76,11 +88,11 @@ public class CatalogBookmarkProcessorTest {
         }
         Map<String, Object> line = new HashMap<>();
         line.put(JsonName.CONTENT, Arrays.asList(text));
-        line.put(JsonName.X0, LEFT_X);
+        line.put(JsonName.X0, leftX);
         line.put(JsonName.Y0, y0);
         line.put(JsonName.FONT_UNDERLINE_SIZE, FONT_SIZE);
         item.put(JsonName.CONTENT, Arrays.asList(line));
-        item.put(JsonName.X0, LEFT_X);
+        item.put(JsonName.X0, leftX);
         item.put(JsonName.Y0, y0);
         item.put(JsonName.FONT_UNDERLINE_SIZE, FONT_SIZE);
         return item;
@@ -92,22 +104,18 @@ public class CatalogBookmarkProcessorTest {
      * and the page is recognised as a TOC page.
      */
     private static Map<String, Object> tocLineItem(int id, String tocText, double y0) {
+        return tocLineItemAt(id, tocText, y0, LEFT_X);
+    }
+
+    /**
+     * Same as {@link #tocLineItem(int, String, double)} but with an explicit
+     * left indentation, so tests can build catalog entries that are nested
+     * under an unnumbered section heading.
+     */
+    private static Map<String, Object> tocLineItemAt(int id, String tocText, double y0, double leftX) {
         // Same shape as a body item, but the line text uses the TOC pattern
         // "Title .... pageNum" — matchTocLine parses the trailing number.
-        Map<String, Object> item = new HashMap<>();
-        item.put(JsonName.ID, id);
-        item.put(JsonName.ITEM_TYPE, "text");
-        item.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_PARAGRAPH);
-        Map<String, Object> line = new HashMap<>();
-        line.put(JsonName.CONTENT, Arrays.asList(tocText));
-        line.put(JsonName.X0, LEFT_X);
-        line.put(JsonName.Y0, y0);
-        line.put(JsonName.FONT_UNDERLINE_SIZE, FONT_SIZE);
-        item.put(JsonName.CONTENT, Arrays.asList(line));
-        item.put(JsonName.X0, LEFT_X);
-        item.put(JsonName.Y0, y0);
-        item.put(JsonName.FONT_UNDERLINE_SIZE, FONT_SIZE);
-        return item;
+        return legacyTextItemAt(id, tocText, JsonName.SOURCE_TYPE_PARAGRAPH, y0, leftX);
     }
 
     private static Map<String, Object> page(int pageIndex, Map<String, Object>... items) {
@@ -537,6 +545,136 @@ public class CatalogBookmarkProcessorTest {
 
         Assertions.assertEquals(1, bookmark.getPageNum(),
                 "Titles shorter than 4 characters must not be paired by a one-character gap");
+    }
+
+    /**
+     * Reported case: a catalog entry without a printed page number
+     * ({@code 董事會函件}) standing on its own line above its indented
+     * sub-entries. Before the fix the line was treated as a wrapped-title
+     * candidate, failed the continuation test and was dropped, so the
+     * sub-entries lost their parent (and the prefix-less run reconciliation
+     * flattened every entry onto the same level).
+     *
+     * <p>The fixture also carries two cross-references that start with the
+     * words of a later entry, one of them one page before the printed page
+     * number and one exactly on a page that is already behind the reading
+     * order, which pins the two ordering constraints:</p>
+     * <ul>
+     *   <li>{@code 暫停辦理股份過戶登記手續} must not resolve to the page-5
+     *       cross-reference (printed page 6 ⇒ an occurrence at or after it
+     *       exists);</li>
+     *   <li>{@code 推薦建議} must not resolve to the page-7 cross-reference:
+     *       it sits before the page ({@code 8}) already resolved for the
+     *       preceding entry, and an occurrence at or after page 8 exists.</li>
+     * </ul>
+     */
+    @Test
+    public void testPageNumberlessHeading_isPromotedAndKeepsSubLevels() {
+        List<Map<String, Object>> data = new ArrayList<>(Arrays.asList(
+                page(0,
+                        catalogHeadingItem(0, "目  錄", 50.0),
+                        tocLineItem(1, "釋義 .... 1", 100.0),
+                        tocLineItem(2, "預期時間表 .... 3", 150.0),
+                        // Unnumbered section heading: no trailing page number.
+                        legacyTextItemAt(3, "董事會函件", JsonName.SOURCE_TYPE_PARAGRAPH, 200.0, LEFT_X),
+                        tocLineItemAt(4, "緒言 .... 4", 250.0, INDENTED_X),
+                        tocLineItemAt(5, "建議發行紅股 .... 4", 300.0, INDENTED_X),
+                        tocLineItemAt(6, "暫停辦理股份過戶登記手續 .... 6", 350.0, INDENTED_X),
+                        tocLineItemAt(7, "推薦建議 .... 7", 400.0, INDENTED_X)),
+                page(1, legacyTextItem(20, "封面", null, 100.0)),
+                page(2, legacyTextItem(21, "釋義", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(3, legacyTextItem(22, "正文", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(4, legacyTextItem(23, "預期時間表", JsonName.SOURCE_TYPE_HEADING, 100.0),
+                        legacyTextItem(24, "暫停辦理股份過戶登記手續 於二零零七年九月十日（星期一）",
+                                JsonName.SOURCE_TYPE_PARAGRAPH, 200.0)),
+                page(5, legacyTextItem(25, "董事會函件", JsonName.SOURCE_TYPE_HEADING, 100.0),
+                        legacyTextItem(26, "緒言", JsonName.SOURCE_TYPE_HEADING, 200.0),
+                        legacyTextItem(27, "建議發行紅股", JsonName.SOURCE_TYPE_HEADING, 300.0)),
+                page(6, legacyTextItem(28, "推薦建議 董事會認為建議發行紅股符合股東利益",
+                        JsonName.SOURCE_TYPE_PARAGRAPH, 100.0)),
+                page(7, legacyTextItem(29, "暫停辦理股份過戶登記手續",
+                        JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(8, legacyTextItem(30, "推薦建議", JsonName.SOURCE_TYPE_HEADING, 100.0))));
+
+        CatalogBookmarkProcessor.CatalogResult result =
+                CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, new Config());
+
+        List<Bookmark> bookmarks = result.getBookmarks();
+        Assertions.assertEquals(3, bookmarks.size(),
+                "The page-numberless heading must not break the top-level structure");
+
+        assertBookmarkPage(bookmarks.get(0), "釋義", 3);
+        assertBookmarkPage(bookmarks.get(1), "預期時間表", 5);
+
+        Bookmark section = bookmarks.get(2);
+        Assertions.assertEquals("董事會函件", section.getText(),
+                "The page-numberless heading must become a catalog entry of its own");
+        Assertions.assertEquals(4, (int) section.getOriginalPageNum(),
+                "It must inherit the printed page number of the entry below it (緒言 ⇒ 4)");
+        Assertions.assertEquals(6, (int) section.getPageNum(),
+                "The inherited page number must resolve to the body heading's physical page");
+
+        List<Bookmark> children = section.getChildren();
+        Assertions.assertEquals(4, children.size(),
+                "The indented entries must stay children of the promoted heading");
+        assertBookmarkPage(children.get(0), "緒言", 6);
+        assertBookmarkPage(children.get(1), "建議發行紅股", 6);
+        assertBookmarkPage(children.get(2), "暫停辦理股份過戶登記手續", 8);
+        assertBookmarkPage(children.get(3), "推薦建議", 9);
+    }
+
+    /**
+     * A right-aligned line that is not a catalog entry — the {@code 頁次}
+     * column header above the first entry — must never be promoted: the entry
+     * below it is not indented deeper, and the line does not sit at the
+     * shallowest catalog indentation of its page.
+     */
+    @Test
+    public void testRightAlignedColumnHeader_isNotPromoted() {
+        List<Map<String, Object>> data = new ArrayList<>(Arrays.asList(
+                page(0,
+                        catalogHeadingItem(0, "目  錄", 50.0),
+                        // Right-aligned "頁次" header, no page number of its own.
+                        legacyTextItemAt(1, "頁次", JsonName.SOURCE_TYPE_PARAGRAPH, 90.0, 400.0),
+                        tocLineItem(2, "第一章 總則 .... 1", 140.0),
+                        tocLineItem(3, "第二章 分則 .... 5", 190.0),
+                        tocLineItem(4, "第三章 細則 .... 9", 240.0)),
+                page(1, legacyTextItem(10, "第一章 總則", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(2, legacyTextItem(11, "第二章 分則", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(3, legacyTextItem(12, "第三章 細則", JsonName.SOURCE_TYPE_HEADING, 100.0))));
+
+        List<Bookmark> bookmarks = CatalogBookmarkProcessor
+                .extractCatalogBookmarksFromJson(data, new Config()).getBookmarks();
+
+        Assertions.assertEquals(3, bookmarks.size(),
+                "The right-aligned column header must not become a bookmark");
+        for (Bookmark bookmark : bookmarks) {
+            Assertions.assertNotEquals("頁次", bookmark.getText());
+        }
+    }
+
+    /**
+     * Only a single-line run can be a page-numberless heading: a multi-line
+     * paragraph that happens to sit above indented entries is still treated as
+     * a (discarded) wrapped-title candidate.
+     */
+    @Test
+    public void testMultiLineRunAboveIndentedEntries_isNotPromoted() {
+        List<Map<String, Object>> data = new ArrayList<>(Arrays.asList(
+                page(0,
+                        catalogHeadingItem(0, "目  錄", 50.0),
+                        multiLineTextItem(1, Arrays.asList("董事會", "函件"), 90.0),
+                        tocLineItemAt(2, "緒言 .... 4", 200.0, INDENTED_X),
+                        tocLineItemAt(3, "第一章 總則 .... 5", 250.0, INDENTED_X),
+                        tocLineItemAt(4, "第二章 分則 .... 9", 300.0, INDENTED_X))));
+
+        CatalogBookmarkProcessor.CatalogResult result =
+                CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, new Config());
+
+        Assertions.assertEquals(3, result.getBookmarks().size());
+        for (Bookmark bookmark : result.getBookmarks()) {
+            Assertions.assertNotEquals("董事會 函件", bookmark.getText());
+        }
     }
 
     private static Map<String, Object> legacyImageItem(int id, String altText, double y0) {

@@ -685,8 +685,10 @@ public class CatalogBookmarkProcessor {
                 .thenComparing((LineInfo l) -> -l.line.getTopY()));
 
         List<Candidate> candidates = new ArrayList<>();
+        Map<Integer, Double> minTocLeftXByPage = collectMinTocLeftXByPage(allLines);
         StringBuilder pendingTitle = new StringBuilder();
         LineInfo pendingLine = null;
+        int pendingLineCount = 0;
 
         for (LineInfo info : allLines) {
             if (info.isToc) {
@@ -694,9 +696,19 @@ public class CatalogBookmarkProcessor {
                 if (pendingTitle.length() > 0 && pendingLine != null
                         && isContinuation(pendingLine, info)) {
                     title = pendingTitle.toString() + title;
+                } else if (isPageNumberlessHeading(pendingLineCount, pendingLine, info,
+                        minTocLeftXByPage)) {
+                    // See the JSON twin: a page-numberless catalog heading is
+                    // promoted to a bookmark so that its sub-entries are not
+                    // left without a parent.
+                    candidates.add(buildPageNumberlessHeading(pendingTitle.toString(),
+                            pendingLine.line.getLeftX(), pendingLine.line.getTopY(),
+                            pendingLine.pageIndex, 0, pendingLine.line.getFontSize(),
+                            info.rawPage, pageLabels, totalPages));
                 }
                 pendingTitle.setLength(0);
                 pendingLine = null;
+                pendingLineCount = 0;
 
                 if (isCatalogSelfReference(title)) {
                     Bookmark bookmark = new Bookmark();
@@ -729,6 +741,7 @@ public class CatalogBookmarkProcessor {
                 } else {
                     pendingTitle.append(" ").append(info.title);
                 }
+                pendingLineCount++;
             }
         }
 
@@ -1000,11 +1013,20 @@ public class CatalogBookmarkProcessor {
         }
 
         // 2. Reconcile consecutive runs of the same prefix type.
+        //
+        //    Entries without any numbering prefix (prefixType == null) are not
+        //    a "prefix type" of their own: lumping them into one run used to
+        //    collapse every prefix-less entry onto that run's mode level, so a
+        //    catalog whose indented entries outnumber its top-level ones (e.g.
+        //    one unnumbered section heading with seven indented sub-entries)
+        //    lost the whole indentation hierarchy. Each prefix-less entry is
+        //    therefore a run of its own and keeps its leftX-derived level.
         int runStart = 0;
         for (int i = 1; i <= n; i++) {
-            BookmarkPrefixClassifier.PrefixType prev = i <= n ? candidates.get(runStart).prefixType : null;
+            BookmarkPrefixClassifier.PrefixType prev = candidates.get(runStart).prefixType;
             BookmarkPrefixClassifier.PrefixType curr = i < n ? candidates.get(i).prefixType : null;
-            if (i == n || !Objects.equals(prev, curr)) {
+            boolean prefixlessBoundary = prev == null || curr == null;
+            if (i == n || prefixlessBoundary || !Objects.equals(prev, curr)) {
                 int runEnd = i - 1;
                 int modeLevel = modeLevel(levels, runStart, runEnd);
                 for (int j = runStart; j <= runEnd; j++) {
@@ -1352,8 +1374,10 @@ public class CatalogBookmarkProcessor {
             .thenComparing((JsonLineInfo l) -> -l.topY));
 
         List<Candidate> candidates = new ArrayList<>();
+        Map<Integer, Double> minTocLeftXByPage = collectJsonMinTocLeftXByPage(allLines);
         StringBuilder pendingTitle = new StringBuilder();
         JsonLineInfo pendingLine = null;
+        int pendingLineCount = 0;
 
         for (JsonLineInfo info : allLines) {
             if (info.isToc) {
@@ -1361,9 +1385,22 @@ public class CatalogBookmarkProcessor {
                 if (pendingTitle.length() > 0 && pendingLine != null
                         && isJsonContinuation(pendingLine, info)) {
                     title = pendingTitle.toString() + title;
+                } else if (isJsonPageNumberlessHeading(pendingLineCount, pendingLine, info,
+                        minTocLeftXByPage)) {
+                    // The pending line is not a wrapped title but a catalog entry
+                    // whose page number was never printed (e.g. a section heading
+                    // such as "董事會函件" above its own sub-entries). It is
+                    // promoted to a bookmark that inherits the page number of the
+                    // entry right below it, so its sub-entries keep their
+                    // indentation-derived level instead of being orphaned.
+                    candidates.add(buildPageNumberlessHeading(pendingTitle.toString(),
+                            pendingLine.leftX, pendingLine.topY, pendingLine.pageIndex,
+                            pendingLine.relatedId, pendingLine.fontSize,
+                            info.rawPage, pageLabels, totalPages));
                 }
                 pendingTitle.setLength(0);
                 pendingLine = null;
+                pendingLineCount = 0;
 
                 if (isCatalogSelfReference(title)) {
                     Bookmark bookmark = new Bookmark();
@@ -1398,6 +1435,7 @@ public class CatalogBookmarkProcessor {
                 } else {
                     pendingTitle.append(" ").append(info.title);
                 }
+                pendingLineCount++;
             }
         }
 
@@ -1453,6 +1491,140 @@ public class CatalogBookmarkProcessor {
             && fontDelta <= 0.5
             && verticalGap >= 0
             && verticalGap <= CONTINUATION_VERTICAL_GAP + fontSize;
+    }
+
+    /**
+     * Minimum left indentation of the TOC entries of every catalog page. It is
+     * the reference for "this line sits at top level", used by
+     * {@link #isJsonPageNumberlessHeading(int, JsonLineInfo, JsonLineInfo, Map)}.
+     *
+     * @param allLines collected catalog-range lines
+     * @return page index to minimum TOC left X
+     */
+    private static Map<Integer, Double> collectJsonMinTocLeftXByPage(List<JsonLineInfo> allLines) {
+        Map<Integer, Double> minLeftX = new HashMap<>();
+        for (JsonLineInfo line : allLines) {
+            if (!line.isToc) {
+                continue;
+            }
+            Double current = minLeftX.get(line.pageIndex);
+            if (current == null || line.leftX < current) {
+                minLeftX.put(line.pageIndex, line.leftX);
+            }
+        }
+        return minLeftX;
+    }
+
+    /**
+     * Content-pipeline twin of
+     * {@link #collectJsonMinTocLeftXByPage(List)}.
+     */
+    private static Map<Integer, Double> collectMinTocLeftXByPage(List<LineInfo> allLines) {
+        Map<Integer, Double> minLeftX = new HashMap<>();
+        for (LineInfo line : allLines) {
+            if (!line.isToc) {
+                continue;
+            }
+            double leftX = line.line.getLeftX();
+            Double current = minLeftX.get(line.pageIndex);
+            if (current == null || leftX < current) {
+                minLeftX.put(line.pageIndex, leftX);
+            }
+        }
+        return minLeftX;
+    }
+
+    /**
+     * Decides whether a run of non-TOC lines that could <em>not</em> be merged
+     * into the following TOC entry is itself a catalog entry whose page number
+     * was simply not printed — e.g. the section heading
+     * {@code 董事會函件} standing alone above its own indented sub-entries.
+     *
+     * <p>Both strings of the run keep their old meaning: a run that <em>is</em>
+     * a continuation is merged into the following entry, everything else used
+     * to be dropped. Three conditions have to hold before a drop becomes a
+     * promotion:</p>
+     * <ol>
+     *   <li>the run consists of a single line (a wrapped multi-line run is not
+     *       a heading);</li>
+     *   <li>the following TOC entry is indented deeper than the run, i.e. the
+     *       run actually owns the entries below it — this rejects a
+     *       shallower/right-aligned line such as the {@code 頁次} column
+     *       header;</li>
+     *   <li>the run sits at the shallowest TOC indentation of its page, so a
+     *       right-aligned line can never qualify even when the entry below it
+     *       happens to be indented deeper.</li>
+     * </ol>
+     *
+     * @param pendingLineCount number of non-TOC lines accumulated in the run
+     * @param pendingLine      first line of the run, may be null
+     * @param toc              the TOC entry that terminates the run
+     * @param minTocLeftXByPage per-page minimum TOC indentation
+     * @return true when the run must be promoted to a catalog entry
+     */
+    private static boolean isJsonPageNumberlessHeading(int pendingLineCount, JsonLineInfo pendingLine,
+                                                       JsonLineInfo toc,
+                                                       Map<Integer, Double> minTocLeftXByPage) {
+        if (pendingLine == null || pendingLineCount != 1) {
+            return false;
+        }
+        double tolerance = CONTINUATION_LEFT_X_DELTA + toc.fontSize * 0.5;
+        if (toc.leftX <= pendingLine.leftX + tolerance) {
+            return false;
+        }
+        Double pageMinLeftX = minTocLeftXByPage.get(pendingLine.pageIndex);
+        return pageMinLeftX != null && pendingLine.leftX <= pageMinLeftX + tolerance;
+    }
+
+    /**
+     * Content-pipeline twin of
+     * {@link #isJsonPageNumberlessHeading(int, JsonLineInfo, JsonLineInfo, Map)}.
+     */
+    private static boolean isPageNumberlessHeading(int pendingLineCount, LineInfo pendingLine,
+                                                   LineInfo toc,
+                                                   Map<Integer, Double> minTocLeftXByPage) {
+        if (pendingLine == null || pendingLineCount != 1) {
+            return false;
+        }
+        double tolerance = CONTINUATION_LEFT_X_DELTA + toc.line.getFontSize() * 0.5;
+        if (toc.line.getLeftX() <= pendingLine.line.getLeftX() + tolerance) {
+            return false;
+        }
+        Double pageMinLeftX = minTocLeftXByPage.get(pendingLine.pageIndex);
+        return pageMinLeftX != null && pendingLine.line.getLeftX() <= pageMinLeftX + tolerance;
+    }
+
+    /**
+     * Builds the bookmark of a page-numberless catalog heading. The printed page
+     * number is inherited from the entry right below the heading (the heading
+     * itself has none), so
+     * {@link #resolveCatalogBookmarkTarget(Bookmark, List, int, int, int)} can
+     * still resolve the real physical page from the body heading.
+     *
+     * @param title      heading text
+     * @param leftX      heading indentation, drives the level clustering
+     * @param topY       heading position, keeps reading order
+     * @param pageIndex  catalog page index of the heading
+     * @param relatedId  JSON item id of the heading line on the catalog page
+     * @param fontSize   heading font size
+     * @param rawPage    printed page number of the following TOC entry
+     * @param pageLabels document page labels
+     * @param totalPages total page count
+     * @return the candidate to append to the candidate list
+     */
+    private static Candidate buildPageNumberlessHeading(String title, double leftX, double topY,
+                                                        int pageIndex, int relatedId, double fontSize,
+                                                        String rawPage, Set<String> pageLabels,
+                                                        int totalPages) {
+        Bookmark bookmark = new Bookmark();
+        bookmark.setText(title);
+        bookmark.setOriginalPageNum(parseOriginalPageNum(rawPage));
+        bookmark.setPageNum(resolvePageIndex(rawPage, pageLabels, totalPages) + 1);
+        bookmark.setFontSize((float) fontSize);
+        bookmark.setSingleLine(true);
+        bookmark.setRelatedId(relatedId);
+        bookmark.setChildren(new ArrayList<>());
+        return new Candidate(bookmark, leftX, topY, pageIndex, relatedId);
     }
 
     private static String getJsonItemFullText(Map<String, Object> item) {
@@ -1557,43 +1729,100 @@ public class CatalogBookmarkProcessor {
      * bookmark title and is closest to the printed page number. When the title
      * appears multiple times, the occurrence closest to the printed page is chosen;
      * if two occurrences are equally close, the earlier page wins.</p>
+     *
+     * <p>Two ordering constraints are applied on top of that distance rule, and
+     * each of them only takes effect when it can be satisfied:</p>
+     * <ol>
+     *   <li>the printed page number is a lower bound — an occurrence <em>before</em>
+     *       it is discarded whenever an occurrence at or after it exists. A TOC
+     *       entry pointing at the body page {@code 6} must not resolve to body
+     *       page {@code 5} merely because a cross-reference on that page starts
+     *       with the same words;</li>
+     *   <li>catalog entries are read in order, so the page of an entry is never
+     *       allowed to move backwards: occurrences before the page resolved for
+     *       the preceding entry (or for the parent entry) are discarded when an
+     *       occurrence at or after it exists.</li>
+     * </ol>
+     *
+     * <p>The tree is walked in reading order (depth-first, pre-order) so that
+     * constraint 2 can carry the highest page resolved so far.</p>
+     *
+     * @param bookmarks         catalog bookmark list of one level, mutated in place
+     * @param data              per-page JSON data with items
+     * @param catalogStartPage  0-based inclusive start of the catalog page range, or -1
+     * @param catalogEndPage    0-based inclusive end of the catalog page range, or -1
+     * @param floorPage         physical page (1-based) that this list may not go
+     *                          below; 0 when nothing has been resolved yet
+     * @return the highest physical page (1-based) resolved inside {@code bookmarks};
+     *         0 when nothing resolved
      */
-    private static void resolveCatalogBookmarkTargets(List<Bookmark> bookmarks,
-                                                      List<Map<String, Object>> data,
-                                                      int catalogStartPage,
-                                                      int catalogEndPage) {
-        if (bookmarks == null || bookmarks.isEmpty() || data == null || data.isEmpty()) {
-            return;
-        }
+    private static int resolveCatalogBookmarkTargets(List<Bookmark> bookmarks,
+                                                     List<Map<String, Object>> data,
+                                                     int catalogStartPage,
+                                                     int catalogEndPage,
+                                                     int floorPage) {
+        int highestResolvedPage = 0;
         for (Bookmark bookmark : bookmarks) {
-            resolveCatalogBookmarkTarget(bookmark, data, catalogStartPage, catalogEndPage);
+            int resolved = resolveCatalogBookmarkTarget(bookmark, data, catalogStartPage,
+                catalogEndPage, Math.max(floorPage, highestResolvedPage));
+            if (resolved > highestResolvedPage) {
+                highestResolvedPage = resolved;
+            }
             List<Bookmark> children = bookmark.getChildren();
             if (children != null && !children.isEmpty()) {
-                resolveCatalogBookmarkTargets(children, data, catalogStartPage, catalogEndPage);
+                int childHighest = resolveCatalogBookmarkTargets(children, data, catalogStartPage,
+                    catalogEndPage, Math.max(floorPage, highestResolvedPage));
+                if (childHighest > highestResolvedPage) {
+                    highestResolvedPage = childHighest;
+                }
             }
         }
+        return highestResolvedPage;
     }
 
-    private static void resolveCatalogBookmarkTarget(Bookmark bookmark,
+    /**
+     * Entry point of {@link #resolveCatalogBookmarkTargets(List, List, int, int, int)}
+     * that starts without any lower bound.
+     */
+    private static void resolveCatalogBookmarkTargets(List<Bookmark> bookmarks,
                                                      List<Map<String, Object>> data,
                                                      int catalogStartPage,
                                                      int catalogEndPage) {
+        if (bookmarks == null || bookmarks.isEmpty() || data == null || data.isEmpty()) {
+            return;
+        }
+        resolveCatalogBookmarkTargets(bookmarks, data, catalogStartPage, catalogEndPage, 0);
+    }
+
+    /**
+     * Resolves one bookmark; see
+     * {@link #resolveCatalogBookmarkTargets(List, List, int, int, int)} for the
+     * selection rules.
+     *
+     * @return the resolved physical page (1-based), or 0 when the bookmark could
+     *         not be resolved to any body paragraph
+     */
+    private static int resolveCatalogBookmarkTarget(Bookmark bookmark,
+                                                     List<Map<String, Object>> data,
+                                                     int catalogStartPage,
+                                                     int catalogEndPage,
+                                                     int floorPage) {
         String title = bookmark.getText();
         Integer catalogHint = bookmark.getOriginalPageNum();
         if (title == null || title.trim().isEmpty() || catalogHint == null || catalogHint <= 0) {
-            return;
+            return 0;
         }
 
         if (isCatalogSelfReference(title)) {
-            return;
+            return 0;
         }
 
         String normalizedTitle = normalizeBookmarkText(title);
         if (normalizedTitle.isEmpty()) {
-            return;
+            return 0;
         }
 
-        TargetMatch bestMatch = null;
+        List<TargetMatch> matches = new ArrayList<>();
         for (int pageIndex = 0; pageIndex < data.size(); pageIndex++) {
             if (catalogStartPage >= 0 && catalogEndPage >= catalogStartPage
                     && pageIndex >= catalogStartPage && pageIndex <= catalogEndPage) {
@@ -1615,22 +1844,79 @@ public class CatalogBookmarkProcessor {
                 }
                 int physicalPage = pageIndex + 1;
                 int distance = Math.abs(physicalPage - catalogHint);
-                if (bestMatch == null
-                        || distance < bestMatch.distance
-                        || (distance == bestMatch.distance && pageIndex < bestMatch.pageIndex)
-                        || (distance == bestMatch.distance && pageIndex == bestMatch.pageIndex
-                                && quality.ordinal() < bestMatch.quality.ordinal())) {
-                    Object idObj = item.get(JsonName.ID);
-                    int relatedId = idObj instanceof Number ? ((Number) idObj).intValue() : 0;
-                    bestMatch = new TargetMatch(pageIndex, relatedId, distance, quality);
-                }
+                Object idObj = item.get(JsonName.ID);
+                int relatedId = idObj instanceof Number ? ((Number) idObj).intValue() : 0;
+                matches.add(new TargetMatch(pageIndex, relatedId, distance, quality));
             }
         }
-
-        if (bestMatch != null) {
-            bookmark.setPageNum(bestMatch.pageIndex + 1);
-            bookmark.setRelatedId(bestMatch.relatedId);
+        if (matches.isEmpty()) {
+            return 0;
         }
+
+        // Constraint 1: the printed page number is a lower bound.
+        List<TargetMatch> preferred = matchesAtOrAfter(matches, catalogHint);
+        if (preferred.isEmpty()) {
+            preferred = matches;
+        }
+        // Constraint 2: catalog entries never resolve backwards.
+        List<TargetMatch> inOrder = matchesAtOrAfter(preferred, floorPage);
+        if (!inOrder.isEmpty()) {
+            preferred = inOrder;
+        }
+
+        TargetMatch bestMatch = null;
+        for (TargetMatch match : preferred) {
+            if (bestMatch == null || isBetterMatch(match, bestMatch)) {
+                bestMatch = match;
+            }
+        }
+        if (bestMatch == null) {
+            return 0;
+        }
+
+        bookmark.setPageNum(bestMatch.pageIndex + 1);
+        bookmark.setRelatedId(bestMatch.relatedId);
+
+        if (floorPage > 0 && bestMatch.pageIndex + 1 < floorPage) {
+            LOGGER.log(Level.INFO, String.format(
+                "[CatalogBookmark] catalog entry '%s' resolved to page %d, earlier than the "
+                    + "preceding entry's page %d (no matching paragraph at or after page %d)",
+                title, bestMatch.pageIndex + 1, floorPage, floorPage));
+        }
+        return bestMatch.pageIndex + 1;
+    }
+
+    /**
+     * Keeps the matches whose physical page (1-based) is at or after
+     * {@code lowerBoundPage}. A non-positive bound keeps everything, so the
+     * caller can use this as an optional filter.
+     */
+    private static List<TargetMatch> matchesAtOrAfter(List<TargetMatch> matches, int lowerBoundPage) {
+        if (lowerBoundPage <= 1) {
+            return new ArrayList<>(matches);
+        }
+        List<TargetMatch> kept = new ArrayList<>(matches.size());
+        for (TargetMatch match : matches) {
+            if (match.pageIndex + 1 >= lowerBoundPage) {
+                kept.add(match);
+            }
+        }
+        return kept;
+    }
+
+    /**
+     * Same ordering as the historical inline comparison: smallest distance from
+     * the printed page number first, then the earlier physical page, then the
+     * better match quality.
+     */
+    private static boolean isBetterMatch(TargetMatch candidate, TargetMatch current) {
+        if (candidate.distance != current.distance) {
+            return candidate.distance < current.distance;
+        }
+        if (candidate.pageIndex != current.pageIndex) {
+            return candidate.pageIndex < current.pageIndex;
+        }
+        return candidate.quality.ordinal() < current.quality.ordinal();
     }
 
     /**
