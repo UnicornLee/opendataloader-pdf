@@ -94,6 +94,17 @@ public class PageBookmarkProcessor {
     private static final int MAX_ENTRY_TEXT_LENGTH = 200;
 
     /**
+     * Shape of a "data row": a numeric value followed by whitespace and another
+     * numeric value ("1.   盧鷹 13,525,400 3.8644 淨資產整體折股", "14 11 135
+     * 352"). Table rows are frequently numbered, so their first cell satisfies a
+     * numbering prefix, but a real heading never carries two numeric values
+     * separated by whitespace ("43、 1 年内到期的非流动负债" survives because
+     * "年" is not numeric; "2.00港元" survives because there is no whitespace).
+     */
+    private static final java.util.regex.Pattern DATA_ROW_PATTERN =
+        java.util.regex.Pattern.compile("\\d[\\d,.]*\\s+[\\d,.]*\\d");
+
+    /**
      * Minimum horizontal offset (in points) by which the first line of a page's
      * opening multi-line paragraph must start further right than its second line
      * for the paragraph to be considered first-line indented, i.e. body copy
@@ -114,6 +125,13 @@ public class PageBookmarkProcessor {
      * samples are skipped to avoid unstable 80/20 splits over too few items.
      */
     private static final int MIN_CANDIDATES_FOR_PERIOD_FILTER = 3;
+
+    /**
+     * Fraction of a chain's entries that must sit in same-page adjacent pairs
+     * (or form a same-page consecutive id run) before the chain is treated as
+     * table-of-contents residue; see {@link #tocResidueThreshold(int)}.
+     */
+    private static final double TOC_RESIDUE_DENSITY = 0.5;
 
     /** Chinese full-stop / period "\u3002". */
     private static final char CHINESE_PERIOD = '。';
@@ -1473,9 +1491,14 @@ public class PageBookmarkProcessor {
     /**
      * Cleans a list of candidates of the same template within a parent range
      * by grouping them into maximal runs of consecutive values, chaining runs
-     * whose value ranges abut (previous.max + 1 == next.min), and selecting
+     * whose value ranges abut (chain.max + 1 == group.min), and selecting
      * the chain whose value range is the widest. On ties, the chain whose
      * first candidate is on the earliest page wins (closest to the parent).
+     *
+     * <p>Runs are merged until no chain can absorb any remaining run, so the
+     * merge is independent of the order in which the runs are visited; a run
+     * left stranded behind an interleaved stray value still joins the chain it
+     * abuts (see Step 4).</p>
      *
      * <p>Unlike {@link #cleanCandidates}, which spans the whole document, the
      * sequence is validated locally to the parent range; the start-at-1 and
@@ -1556,28 +1579,41 @@ public class PageBookmarkProcessor {
             return Integer.compare(a.get(0).pageIndex, b.get(0).pageIndex);
         });
 
-        // Step 4: Build chains. A group extends the previous chain when its
-        // first value is exactly previous_chain.last + 1. This handles the case
-        // where a stray value sits between two value-contiguous runs in
-        // reading order: the contiguous runs still merge into one chain while
-        // the stray forms its own chain (or stays separate).
+        // Step 4: Build chains. A group extends a chain when its first value is
+        // exactly chain.last + 1. This handles the case where a stray value sits
+        // between two value-contiguous runs in reading order: the contiguous
+        // runs still merge into one chain while the stray forms its own chain
+        // (or stays separate).
+        //
+        // The merge must run to a fixpoint, re-scanning the remaining groups
+        // after every merge. A single forward pass over the groups (ordered by
+        // start value) lets a stray group steal the cursor: e.g. a footnote
+        // numbered "1" sitting between "6." and "7." of one heading sequence
+        // leaves [1..6] and [7..8] unable to merge, and Step 4.8 then discards
+        // the stranded [7..8] run even though the two runs do abut.
         List<List<List<Candidate>>> chains = new ArrayList<>();
-        List<List<Candidate>> currentChain = null;
-        int currentChainMax = 0;
-        boolean currentChainInitialized = false;
-        for (List<Candidate> group : groups) {
-            int groupMin = group.get(0).value;
-            int groupMax = group.get(group.size() - 1).value;
-            if (currentChainInitialized && currentChainMax + 1 == groupMin) {
-                currentChain.add(group);
-                currentChainMax = groupMax;
-            } else {
-                currentChain = new ArrayList<>();
-                currentChain.add(group);
-                currentChainMax = groupMax;
-                currentChainInitialized = true;
-                chains.add(currentChain);
+        List<List<Candidate>> pending = new ArrayList<>(groups);
+        while (!pending.isEmpty()) {
+            List<List<Candidate>> chain = new ArrayList<>();
+            int chainMax = 0;
+            boolean seeded = false;
+            boolean merged = true;
+            while (merged) {
+                merged = false;
+                for (int i = 0; i < pending.size(); i++) {
+                    List<Candidate> group = pending.get(i);
+                    int groupMin = group.get(0).value;
+                    if (!seeded || chainMax + 1 == groupMin) {
+                        chain.add(group);
+                        chainMax = group.get(group.size() - 1).value;
+                        seeded = true;
+                        pending.remove(i);
+                        merged = true;
+                        break;
+                    }
+                }
             }
+            chains.add(chain);
         }
 
         // Step 4.5: Discard chains that look like table-of-contents residue.
@@ -1671,10 +1707,11 @@ public class PageBookmarkProcessor {
      * {@link Candidate#relatedId} values are consecutive. Items emitted
      * adjacently on the same page are consecutive in reading order, which is
      * exactly how a table of contents lists its entries. For small chains
-     * (2-5 entries) a single adjacent pair is enough; for larger chains at
-     * least two pairs, or a run of three consecutive ids on one page, are
-     * required so that legitimate multi-level headings with a single
-     * coincidental adjacency are not dropped.</p>
+     * (2-5 entries) a single adjacent pair is enough; for larger chains the
+     * threshold scales with the chain size (see
+     * {@link #tocResidueThreshold(int)}), because a real table of contents
+     * packs its entries together while a legitimate heading chain only
+     * accumulates coincidental adjacency.</p>
      */
     private static boolean isTocLikeGroup(List<Candidate> chain) {
         if (chain.isEmpty()) {
@@ -1702,7 +1739,28 @@ public class PageBookmarkProcessor {
         if (size <= 5) {
             return pairCount >= 1;
         }
-        return pairCount >= 2 || maxConsecutiveRelatedIdRun(chain) >= 3;
+        int threshold = tocResidueThreshold(size);
+        return pairCount >= threshold || maxConsecutiveRelatedIdRun(chain) >= threshold;
+    }
+
+    /**
+     * Adjacent-pair (and same-page id-run) count a chain of {@code size} entries
+     * must reach before it is treated as table-of-contents residue.
+     *
+     * <p>A real table of contents packs its entries together: nearly every entry
+     * sits next to its neighbour on the same page, so the adjacency count grows
+     * with the chain. A legitimate heading chain only accumulates coincidental
+     * adjacency, so the threshold scales with the chain instead of staying
+     * absolute — an absolute "two pairs" discarded whole legitimate chains once
+     * chain merging started to produce longer runs (e.g. two adjacent pairs
+     * inside a 39-entry accounting-policy chain dropped the entire template and
+     * the level selection fell back to a narrower sub-sequence).</p>
+     *
+     * @param size chain size; the caller guarantees {@code size > 5}
+     * @return the minimum adjacency count that marks the chain as TOC residue
+     */
+    private static int tocResidueThreshold(int size) {
+        return Math.max(2, (int) Math.ceil(size * TOC_RESIDUE_DENSITY));
     }
 
     private static boolean isSamePageAdjacent(Candidate a, Candidate b) {
@@ -1985,6 +2043,9 @@ public class PageBookmarkProcessor {
                 // Build the full paragraph text by joining every line with the
                 // smart-space rule (ASCII letter+letter or digit+digit).
                 String fullText = SmartTextJoiner.joinPieces(allLines).trim();
+                if (isDataRowText(fullText)) {
+                    continue;
+                }
                 // SemanticTextNode and its subclasses expose font size; CustomSemanticParagraph
                 // and SemanticHeading both descend from it, so this cast is safe for both.
                 double fontSize = content instanceof org.verapdf.wcag.algorithms.entities.SemanticTextNode
@@ -2068,6 +2129,9 @@ public class PageBookmarkProcessor {
                     continue;
                 }
                 String fullText = SmartTextJoiner.joinPieces(allLines).trim();
+                if (isDataRowText(fullText)) {
+                    continue;
+                }
                 Object idObj = item.get(JsonName.ID);
                 int relatedId = idObj instanceof Number ? ((Number) idObj).intValue() : 0;
                 double fontSize = getJsonItemFontSize(item);
@@ -2448,6 +2512,24 @@ public class PageBookmarkProcessor {
         // ("1.5" is a decimal, not a bookmark).
         return !isDot || suffixIndex + 1 >= text.length()
             || !Character.isDigit(text.charAt(suffixIndex + 1));
+    }
+
+    /**
+     * Returns true when the text looks like a table data row rather than a
+     * heading: a numeric value followed by whitespace and another numeric value
+     * (see {@link #DATA_ROW_PATTERN}). Numbered table rows ("1.   盧鷹 13,525,400
+     * 3.8644 …", "14 11 135 352") satisfy a numbering prefix and would otherwise
+     * leak into the bookmark chains.
+     *
+     * <p>Headings that merely mention numbers survive: "43、 1 年内到期的非流动负债"
+     * (the token after the whitespace is not numeric), "2.00港元" (no whitespace)
+     * and "2019 年股票期权…" (same).</p>
+     *
+     * @param text the full joined text of the candidate, may be null
+     * @return true when the text should not become a bookmark candidate
+     */
+    private static boolean isDataRowText(String text) {
+        return text != null && DATA_ROW_PATTERN.matcher(text).find();
     }
 
     private static List<List<Candidate>> splitByValueOne(List<Candidate> sorted) {

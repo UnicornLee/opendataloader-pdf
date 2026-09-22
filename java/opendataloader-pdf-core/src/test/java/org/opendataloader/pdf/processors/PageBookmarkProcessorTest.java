@@ -23,6 +23,7 @@ import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.custom.entities.Bookmark;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
 import org.opendataloader.pdf.json.JsonName;
+import org.opendataloader.pdf.utils.SmartTextJoiner;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.SemanticHeading;
 import org.verapdf.wcag.algorithms.entities.content.TextBlock;
@@ -650,13 +651,17 @@ public class PageBookmarkProcessorTest {
 
         // Digit + digit: a single space is inserted. ("（一）" is a recognised
         // bookmark prefix; the line ends with a digit so digit+digit applies
-        // across the break.)
+        // across the break.) The joined text ("（一）42 12") has the shape of a
+        // numbered table row, so it is excluded from the candidate set by the
+        // data-row rule — the joiner behaviour itself is asserted directly.
         List<List<IObject>> digitThenDigit = singlePage(
                 createMultiLineParagraph(
                         Arrays.asList("（一）42", "12"),
                         0, 50, 900, 14.0f));
-        Bookmark digitThenDigitBm = PageBookmarkProcessor.extractPageBookmarks(digitThenDigit).get(0);
-        Assertions.assertEquals("（一）42 12", digitThenDigitBm.getText(),
+        Assertions.assertTrue(PageBookmarkProcessor.extractPageBookmarks(digitThenDigit).isEmpty(),
+                "（一）42 12 has the shape of a numbered table row and must not become a bookmark");
+        Assertions.assertEquals("（一）42 12",
+                SmartTextJoiner.joinPieces(Arrays.asList("（一）42", "12")),
                 "Digit+digit across lines should insert one space");
 
         // Letter + digit: no space (different categories).
@@ -801,6 +806,46 @@ public class PageBookmarkProcessorTest {
                 ">5 entry chain with a same-page run of three must be dropped");
     }
 
+    /**
+     * The TOC-residue threshold scales with the chain size, so a long heading
+     * chain with a couple of coincidental same-page adjacencies must survive.
+     *
+     * <p>Regression: once chain merging produced longer runs, an 8-entry chain
+     * carrying two adjacent pairs was discarded wholesale and the level
+     * selection fell back to a narrower sub-sequence (see
+     * {@code 202304271682510470028924.pdf}, where the 39-entry accounting-policy
+     * chain was dropped and its five real headings disappeared).</p>
+     */
+    @Test
+    public void testTocFilter_twoAdjacentPairs_inLongChain_isKept() {
+        List<Map<String, Object>> data = chapterWithChildren(
+                Arrays.asList("一、概述", "二、背景", "三、方法", "四、结论",
+                        "五、附录", "六、索引", "七、说明", "八、其他"),
+                new int[]{1, 2, 5, 6, 9, 11, 13, 15});
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
+        Assertions.assertEquals(1, bookmarks.size());
+        Assertions.assertEquals(8, bookmarks.get(0).getChildren().size(),
+                "Two adjacent pairs inside an 8-entry chain are below the scaled density threshold");
+    }
+
+    /**
+     * Same scaling for the same-page consecutive-id-run rule: a run of three
+     * inside a long chain is coincidental adjacency, not a table of contents.
+     */
+    @Test
+    public void testTocFilter_runOfThree_inLongChain_isKept() {
+        List<Map<String, Object>> data = chapterWithChildren(
+                Arrays.asList("一、概述", "二、背景", "三、方法", "四、结论",
+                        "五、附录", "六、索引", "七、说明", "八、其他"),
+                new int[]{1, 2, 3, 6, 8, 10, 12, 14});
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
+        Assertions.assertEquals(1, bookmarks.size());
+        Assertions.assertEquals(8, bookmarks.get(0).getChildren().size(),
+                "A run of three inside an 8-entry chain is below the scaled density threshold");
+    }
+
     @Test
     public void testTocFilter_largeChainSingleAdjacentPair_isKept() {
         List<Map<String, Object>> data = chapterWithChildren(
@@ -822,6 +867,65 @@ public class PageBookmarkProcessorTest {
         List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
         Assertions.assertEquals(1, bookmarks.size());
         Assertions.assertEquals(6, bookmarks.get(0).getChildren().size());
+    }
+
+    /**
+     * A stray group sitting between two value-contiguous runs must not stop the
+     * runs from merging.
+     *
+     * <p>Regression for {@code 202609081788871773509077070.pdf}: a 9pt footnote
+     * numbered "1" sits between "6." and "7." of the Appendix-1 heading
+     * sequence. With the old single forward pass over the groups, the stray
+     * value=1 group stole the chain cursor and left {@code [1..6]} and
+     * {@code [7..8]} as separate chains; Step 4.8 then discarded the stranded
+     * {@code [7..8]} run, so two real headings never reached the output.</p>
+     *
+     * <p>Scenario: level-2 values 1,2,3, then a stray 1, then 4,5. The stray
+     * forms its own chain of width 1 (it loses Step 5), while the two runs must
+     * merge into {@code [1..5]} and emit all five headings.</p>
+     */
+    @Test
+    public void testStrayGroupBetweenAbuttingRuns_isMerged() {
+        List<Map<String, Object>> data = chapterWithChildren(
+                Arrays.asList("一、概述", "二、背景", "三、方法", "一、脚注", "四、结论", "五、附录"),
+                new int[]{1, 3, 5, 7, 9, 11});
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
+        Assertions.assertEquals(1, bookmarks.size());
+        List<Bookmark> children = bookmarks.get(0).getChildren();
+        Assertions.assertEquals(5, children.size(),
+                "The abutting runs [1..3] and [4..5] must merge despite the stray value=1 group");
+        Assertions.assertEquals("一、概述", children.get(0).getText());
+        Assertions.assertEquals("二、背景", children.get(1).getText());
+        Assertions.assertEquals("三、方法", children.get(2).getText());
+        Assertions.assertEquals("四、结论", children.get(3).getText());
+        Assertions.assertEquals("五、附录", children.get(4).getText());
+    }
+
+    /**
+     * Numbered table rows ("data rows") must not become bookmark candidates.
+     *
+     * <p>A table row whose first cell carries the document's numbering prefix
+     * ("4、 12 345 678") would otherwise join the heading chain and surface as a
+     * bookmark; a heading that merely mentions a number ("3、 1 年内到期的非流动负债")
+     * must survive, because the token after the whitespace is not numeric.</p>
+     */
+    @Test
+    public void testDataRowCandidates_areExcluded() {
+        List<Map<String, Object>> data = chapterWithChildren(
+                Arrays.asList("1、货币资金", "2、交易性金融资产", "3、 1 年内到期的非流动负债",
+                        "4、 12 345 678", "5、其他流动资产"),
+                new int[]{1, 3, 5, 7, 9});
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
+        Assertions.assertEquals(1, bookmarks.size());
+        List<Bookmark> children = bookmarks.get(0).getChildren();
+        Assertions.assertEquals(3, children.size(),
+                "The data row must be excluded; the surviving chain is 1..3");
+        Assertions.assertEquals("1、货币资金", children.get(0).getText());
+        Assertions.assertEquals("2、交易性金融资产", children.get(1).getText());
+        Assertions.assertEquals("3、 1 年内到期的非流动负债", children.get(2).getText(),
+                "A heading that mentions a number must not be treated as a data row");
     }
 
     private static Map<String, Object> jsonChapter() {
