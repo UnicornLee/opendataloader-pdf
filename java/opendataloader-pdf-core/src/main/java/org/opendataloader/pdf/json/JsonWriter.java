@@ -1607,7 +1607,7 @@ public class JsonWriter {
     private static String renderTextChunkValue(TextChunk chunk) {
         String val = chunk.getValue();
         if ("".equals(val.trim())) {
-            String spaceStr = getSpaceStr(chunk);
+            String spaceStr = getSpaceStr(chunk, false);
             return spaceStr.isEmpty() ? " " : spaceStr;
         }
         if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
@@ -1643,8 +1643,8 @@ public class JsonWriter {
                     haveChinese =  isChinese(firstCh) || haveChinese;
                 }
             }
-            if ("".equals(val.trim()) && haveChinese) {
-                text += getSpaceStr(chunk);
+            if ("".equals(val.trim())) {
+                text += getSpaceStr(chunk, haveChinese);
             } else if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
                 text += GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
             } else {
@@ -1800,10 +1800,14 @@ public class JsonWriter {
     }
 
     @NotNull
-    private static String getSpaceStr(TextChunk chunk) {
+    private static String getSpaceStr(TextChunk chunk, boolean haveChinese) {
         double ratio = (chunk.getRightX() - chunk.getLeftX()) / chunk.getFontSize();
         if (ratio < 0.4) {
-            return "";
+            if (haveChinese) {
+                return " ";
+            } else {
+                return "";
+            }
         } else if (ratio < 1) {
             return " ";
         } else {
