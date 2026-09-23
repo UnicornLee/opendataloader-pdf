@@ -903,6 +903,65 @@ public class PageBookmarkProcessorTest {
     }
 
     /**
+     * Value-abutting runs may only be merged when the run to append sits later
+     * in the document ("只能向后连，不能向前连").
+     *
+     * <p>Reported case: {@code docs/pdf/202512101785225970868005474.pdf}. The
+     * level-2 slice of 股本 opened at page 473 and ran to the end of the file,
+     * so it collected the appendix-local list {@code 1..34} (page 671) and the
+     * {@code 35..38} sub-sections of another appendix (page 570). Because
+     * {@code 34 + 1 == 35} the two runs were glued into one chain, and the
+     * emitted anchors are re-sorted into reading order — which surfaced
+     * {@code 35/36/37/38} as the <em>leading</em> children of 股本.</p>
+     *
+     * <p>Scenario: 五、、六、 (page 1) followed by 一、…四、 (page 2). The
+     * {@code [1..4]} chain must win on its own and the {@code [5..6]} run —
+     * which cannot seed a chain because it does not start at 1 — must not be
+     * imported into it.</p>
+     */
+    @Test
+    public void testAbuttingRunsInReverseReadingOrder_areNotMerged() {
+        List<Map<String, Object>> data = new ArrayList<>();
+        Map<String, Object> chapterPage = new HashMap<>();
+        List<Map<String, Object>> chapterItems = new ArrayList<>();
+        Map<String, Object> chapter = new HashMap<>();
+        chapter.put(JsonName.ID, 1);
+        chapter.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_HEADING);
+        chapter.put(JsonName.CONTENT, Arrays.asList("第1章 绪论"));
+        chapter.put(JsonName.FONT_UNDERLINE_SIZE, 20.0);
+        chapter.put(JsonName.X0, 50.0);
+        chapter.put(JsonName.Y0, 100.0);
+        chapterItems.add(chapter);
+        chapterPage.put(JsonName.ITEMS, chapterItems);
+        data.add(chapterPage);
+
+        // Page 1: the run that opens the document (values 5 and 6).
+        Map<String, Object> earlyPage = new HashMap<>();
+        earlyPage.put(JsonName.ITEMS, new ArrayList<>(Arrays.asList(
+                jsonItem(30, "五、附录", 100.0),
+                jsonItem(32, "六、索引", 200.0))));
+        data.add(earlyPage);
+
+        // Page 2: the run whose values abut 6 — but it only starts here.
+        Map<String, Object> latePage = new HashMap<>();
+        latePage.put(JsonName.ITEMS, new ArrayList<>(Arrays.asList(
+                jsonItem(40, "一、概述", 100.0),
+                jsonItem(42, "二、背景", 200.0),
+                jsonItem(44, "三、方法", 300.0),
+                jsonItem(46, "四、结论", 400.0))));
+        data.add(latePage);
+
+        List<Bookmark> bookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(data, -1, -1);
+        Assertions.assertEquals(1, bookmarks.size());
+        List<Bookmark> children = bookmarks.get(0).getChildren();
+        Assertions.assertEquals(4, children.size(),
+                "The [5..6] run sits earlier in the document and must not be prepended "
+                        + "to the [1..4] chain it abuts");
+        Assertions.assertEquals("一、概述", children.get(0).getText());
+        Assertions.assertEquals("四、结论", children.get(3).getText());
+    }
+
+    /**
      * Numbered table rows ("data rows") must not become bookmark candidates.
      *
      * <p>A table row whose first cell carries the document's numbering prefix

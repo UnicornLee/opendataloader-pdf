@@ -677,6 +677,141 @@ public class CatalogBookmarkProcessorTest {
         }
     }
 
+    /**
+     * Appendix-style page references ({@code "…. I-1"}, {@code "…. EGM-1"})
+     * must count as catalog entries.
+     *
+     * <p>Reported case: {@code docs/pdf/202512101785225970868005474.pdf}. The
+     * catalog spans two pages; the second one lists 11 appendices with
+     * appendix-local references plus 3 Arabic entries. Matching only the Arabic
+     * ones left a page-level TOC ratio of 3/14 ≈ 0.21, below the 0.4 threshold,
+     * so the range stopped on the first page — 附錄一~九 and 股東特別大會通告
+     * never became bookmarks, and 股本 (the entry above them) looked like the
+     * last catalog entry, which in turn made its child slice open-ended.</p>
+     *
+     * <p>The fixture keeps the ratio below the threshold unless the appendix
+     * lines match (3 of 6 lines on the second page), and the appendix entries
+     * cannot be resolved arithmetically — their {@code original_page_num} stays
+     * 0 and the physical page comes from title matching in document order.</p>
+     */
+    @Test
+    public void testAppendixPageReference_extendsCatalogRange() {
+        List<Map<String, Object>> data = new ArrayList<>(Arrays.asList(
+                // Page 0: heading + three Arabic entries.
+                page(0,
+                        catalogHeadingItem(0, "目  錄", 50.0),
+                        tocLineItem(1, "第一章 總則 .... 1", 100.0),
+                        tocLineItem(2, "第二章 分則 .... 3", 200.0),
+                        tocLineItem(3, "第三章 細則 .... 5", 300.0)),
+                // Page 1: heading + three appendix entries + a two-line paragraph.
+                // Only the appendix references make the ratio (3/6 = 0.5) pass;
+                // without them the page has no TOC line at all.
+                page(1,
+                        catalogHeadingItem(4, "目  錄", 40.0),
+                        tocLineItem(5, "附錄一 － 會計師報告 .... I-1", 100.0),
+                        tocLineItem(6, "附錄二 － 財務資料 .... II-1", 200.0),
+                        tocLineItem(7, "股東特別大會通告 .... EGM-1", 300.0),
+                        multiLineTextItem(8, Arrays.asList("（續）", "承前頁"), 400.0)),
+                // Body: one physical page per entry.
+                page(2, legacyTextItem(20, "第一章 總則", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(3, legacyTextItem(21, "第二章 分則", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(4, legacyTextItem(22, "第三章 細則", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(5, legacyTextItem(23, "附錄一 － 會計師報告", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(6, legacyTextItem(24, "附錄二 － 財務資料", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(7, legacyTextItem(25, "股東特別大會通告", JsonName.SOURCE_TYPE_HEADING, 100.0))));
+
+        CatalogBookmarkProcessor.CatalogResult result =
+                CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, new Config());
+
+        Assertions.assertEquals(0, result.getStartPage());
+        Assertions.assertEquals(1, result.getEndPage(),
+                "The appendix-only continuation page must extend the catalog range");
+
+        List<Bookmark> bookmarks = result.getBookmarks();
+        Assertions.assertEquals(6, bookmarks.size(),
+                "All three appendix-style entries must become bookmarks too");
+
+        Bookmark appendix = bookmarks.get(3);
+        Assertions.assertEquals("附錄一 － 會計師報告", appendix.getText());
+        Assertions.assertEquals(0, (int) appendix.getOriginalPageNum(),
+                "An appendix-local reference is not an arithmetic page number");
+        Assertions.assertEquals(6, appendix.getPageNum(),
+                "It must resolve by title to the appendix's first body page");
+        Assertions.assertEquals(23, (int) appendix.getRelatedId(),
+                "The related id must point at the body heading, not at the catalog line");
+
+        Assertions.assertEquals(7, bookmarks.get(4).getPageNum());
+        Assertions.assertEquals(8, bookmarks.get(5).getPageNum());
+    }
+
+    /**
+     * A bare token shaped like an appendix reference must not turn arbitrary
+     * body lines into catalog entries: the prefix has to be separated from a
+     * non-empty title by whitespace or a dot leader.
+     */
+    @Test
+    public void testAppendixPageReference_requiresTitleAndSeparator() {
+        List<Map<String, Object>> data = new ArrayList<>(Arrays.asList(
+                // Page 0: heading + only three "TOC lines", each of which is a
+                // lone reference token with no title in front of it.
+                page(0,
+                        catalogHeadingItem(0, "目  錄", 50.0),
+                        tocLineItem(1, "COVID-19", 100.0),
+                        tocLineItem(2, "ISO-9001", 200.0),
+                        tocLineItem(3, "EGM-1", 300.0))));
+
+        CatalogBookmarkProcessor.CatalogResult result =
+                CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, new Config());
+
+        Assertions.assertEquals(-1, result.getStartPage(),
+                "Lone '<letters>-<digits>' tokens are not catalog entries");
+        Assertions.assertTrue(result.getBookmarks().isEmpty());
+    }
+
+    /**
+     * Reported case: {@code 202512101785225970868005474.pdf} — the body heading
+     * of 附錄二 is printed with a broken font mapping
+     * ({@code "附錄二 … T E C H S T A ☑的財務資料"}: the "R" came out as U+2611),
+     * so no exact/prefix/fuzzy match can pair it with the catalog entry. The
+     * entry must still resolve, by its appendix marker alone, to the first page
+     * whose page-top heading carries that marker.
+     *
+     * <p>The fixture also plants a decoy page whose heading is 附錄<em>十一</em>:
+     * it starts with the marker 附錄一 and must be skipped, otherwise the entry
+     * would land on the wrong appendix.</p>
+     */
+    @Test
+    public void testSectionMarkerFallback_resolvesCorruptedBodyHeading() {
+        List<Map<String, Object>> data = new ArrayList<>(Arrays.asList(
+                page(0,
+                        catalogHeadingItem(0, "目  錄", 50.0),
+                        tocLineItem(1, "第一章 總則 .... 1", 100.0),
+                        tocLineItem(2, "第二章 分則 .... 3", 200.0),
+                        tocLineItem(3, "第三章 細則 .... 5", 300.0),
+                        tocLineItem(4, "附錄一 － 財務資料 .... I-1", 400.0)),
+                page(1, legacyTextItem(20, "第一章 總則", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(2, legacyTextItem(21, "第二章 分則", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                page(3, legacyTextItem(22, "第三章 細則", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                // Decoy: another appendix whose heading starts with "附錄一".
+                page(4, legacyTextItem(23, "附錄十一    彙總資料", JsonName.SOURCE_TYPE_HEADING, 100.0)),
+                // Real appendix page 1; "R" is mapped to a symbol by the font.
+                page(5, legacyTextItem(30, "附錄一    財 ☑ 資料", JsonName.SOURCE_TYPE_HEADING, 100.0))));
+
+        CatalogBookmarkProcessor.CatalogResult result =
+                CatalogBookmarkProcessor.extractCatalogBookmarksFromJson(data, new Config());
+
+        Bookmark appendix = result.getBookmarks().get(3);
+        Assertions.assertEquals("附錄一 － 財務資料", appendix.getText());
+        Assertions.assertEquals(0, (int) appendix.getOriginalPageNum());
+        Assertions.assertEquals(6, appendix.getPageNum(),
+                "The appendix marker must resolve to the first page of that appendix, "
+                        + "skipping the 附錄十一 decoy");
+        Assertions.assertEquals(30, (int) appendix.getRelatedId());
+        Assertions.assertEquals(0, result.getEndPage(),
+                "The marker fallback runs inside the catalog range resolution, "
+                        + "which still spans a single page here");
+    }
+
     private static Map<String, Object> legacyImageItem(int id, String altText, double y0) {
         Map<String, Object> item = new HashMap<>();
         item.put(JsonName.ID, id);
