@@ -621,7 +621,7 @@ public class DocumentProcessor {
                 imagesUtils.write(contents);
             }
 
-            // Loop 2: TableBorder + TextLine per-page
+            // Loop 2: TableBorder + TextLine per-page + StreamTable detection (parallelized)
             final String finalImagesDirectory = absoluteImagesDirectory;
             pool.submit(() ->
                 IntStream.range(0, totalPages).parallel().forEach(pageNumber -> {

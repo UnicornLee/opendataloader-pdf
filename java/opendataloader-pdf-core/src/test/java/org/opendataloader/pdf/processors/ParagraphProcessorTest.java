@@ -47,6 +47,119 @@ public class ParagraphProcessorTest {
     }
 
     /**
+     * Same-row fragments (a definition term in the left margin column and its definition
+     * in the right column of an HKEX-style definitions page) share the same y range and
+     * must end up in ONE paragraph consisting of a single merged TextLine.
+     */
+    @Test
+    public void testSameRowFragmentsAreMergedIntoSingleTextLine() {
+        StaticContainers.setIsDataLoader(true);
+        List<IObject> contents = new ArrayList<>();
+        TextLine term = new TextLine(new TextChunk(
+            new BoundingBox(1, 79.789, 279.29, 168.252, 293.118), "「《中 央 結 算 系 統", 10.5, 279.29));
+        TextLine definition = new TextLine(new TextChunk(
+            new BoundingBox(1, 212.598, 279.29, 510.239, 293.118),
+            "規範中央結算系統使用的條款和條件（經不時修訂或修", 10.5, 279.29));
+        contents.add(term);
+        contents.add(definition);
+
+        contents = ParagraphProcessor.processParagraphs(contents, 595.276);
+
+        Assertions.assertEquals(1, contents.size(),
+            "Same-row fragments should be merged into one paragraph");
+        Assertions.assertInstanceOf(SemanticParagraph.class, contents.get(0));
+        SemanticParagraph paragraph = (SemanticParagraph) contents.get(0);
+        Assertions.assertEquals(1, paragraph.getLinesNumber(),
+            "The two same-row TextLines should be merged into a single TextLine");
+        String value = paragraph.getFirstLine().getValue();
+        Assertions.assertTrue(value.contains("「《中 央 結 算 系 統"));
+        Assertions.assertTrue(value.contains("規範中央結算系統使用的條款和條件（經不時修訂或修"));
+    }
+
+    /**
+     * A line that continues the right column of a composite (row-merged) line — e.g.
+     * "序 規 則》" continuing "…應包括《中央結算系統運作程" — starts at the right-column
+     * x, not at the composite line's leftX, so it must still be merged into the
+     * preceding paragraph.
+     */
+    @Test
+    public void testCompositeRowContinuationLineMergesIntoPrecedingParagraph() {
+        StaticContainers.setIsDataLoader(true);
+        List<IObject> contents = new ArrayList<>();
+        // Row 1: term fragment (left column) + definition (right column)
+        contents.add(new TextLine(new TextChunk(
+            new BoundingBox(1, 79.789, 279.29, 168.252, 293.118), "「《中 央 結 算 系 統", 10.5, 279.29)));
+        contents.add(new TextLine(new TextChunk(
+            new BoundingBox(1, 212.598, 279.29, 510.239, 293.118),
+            "規範中央結算系統使用的條款和條件（經不時修訂或修", 10.5, 279.29)));
+        // Row 2: term continuation (left column, indented) + definition continuation
+        contents.add(new TextLine(new TextChunk(
+            new BoundingBox(1, 95.528, 296.289, 159.315, 310.118), "一 般 規 則》」", 10.5, 296.289)));
+        contents.add(new TextLine(new TextChunk(
+            new BoundingBox(1, 212.598, 296.289, 510.233, 310.118),
+            "改），在 文 義 允 許 的 情 況 下，應 包 括《中 央 結 算 系 統 運 作 程", 10.5, 296.289)));
+        // Row 3: right-column-only continuation line
+        contents.add(new TextLine(new TextChunk(
+            new BoundingBox(1, 212.598, 313.289, 258.535, 327.117), "序 規 則》", 10.5, 313.289)));
+
+        contents = ParagraphProcessor.processParagraphs(contents, 595.276);
+
+        Assertions.assertEquals(1, contents.size(),
+            "The continuation line should be merged into the preceding paragraph");
+        Assertions.assertInstanceOf(SemanticParagraph.class, contents.get(0));
+        SemanticParagraph paragraph = (SemanticParagraph) contents.get(0);
+        Assertions.assertEquals(3, paragraph.getLinesNumber(),
+            "All three rows should belong to one paragraph");
+        String value = paragraph.getLastLine().getValue();
+        Assertions.assertTrue(value.contains("序 規 則》"));
+    }
+
+    /**
+     * "一、" right after a line ending with "之" is the word "之一" carried over, not a
+     * list label — the line must be merged into the preceding paragraph (HKEX definition
+     * "「劉 先 生」…控股股東之 / 一、曲 女 士 的 配 偶").
+     */
+    @Test
+    public void testZhiNumeralLabelContinuationMergesIntoPrecedingParagraph() {
+        StaticContainers.setIsDataLoader(true);
+        List<IObject> contents = new ArrayList<>();
+        // y-up coordinates: the second row sits BELOW the first one (smaller baseline).
+        contents.add(new TextLine(new TextChunk(
+            new BoundingBox(1, 79.789, 602.283, 510.236, 616.112),
+            "「劉 先 生」        劉建輝先生，執行董事、包銷商唯一股東、控股股東之", 10.5, 604.3)));
+        contents.add(new TextLine(new TextChunk(
+            new BoundingBox(1, 212.598, 585.4, 306.31, 599.2), "一、曲 女 士 的 配 偶", 10.5, 587.4)));
+
+        contents = ParagraphProcessor.processParagraphs(contents, 595.276);
+
+        Assertions.assertEquals(1, contents.size(),
+            "The '之一' continuation line should be merged into the preceding paragraph");
+        SemanticParagraph paragraph = (SemanticParagraph) contents.get(0);
+        Assertions.assertEquals(2, paragraph.getLinesNumber());
+        Assertions.assertTrue(paragraph.getLastLine().getValue().contains("一、曲 女 士 的 配 偶"));
+    }
+
+    /**
+     * Without the "之" carry-over, a "一、" line remains a genuine list label and starts
+     * its own paragraph.
+     */
+    @Test
+    public void testGenuineChineseNumeralLabelStillStartsNewParagraph() {
+        StaticContainers.setIsDataLoader(true);
+        List<IObject> contents = new ArrayList<>();
+        contents.add(new TextLine(new TextChunk(
+            new BoundingBox(1, 79.789, 602.283, 510.236, 616.112),
+            "「劉 先 生」        劉建輝先生，執行董事、包銷商唯一股東、控股股東，", 10.5, 604.3)));
+        contents.add(new TextLine(new TextChunk(
+            new BoundingBox(1, 212.598, 585.4, 306.31, 599.2), "一、曲 女 士 的 配 偶", 10.5, 587.4)));
+
+        contents = ParagraphProcessor.processParagraphs(contents, 595.276);
+
+        Assertions.assertEquals(2, contents.size(),
+            "A genuine '一、' list label must still open its own paragraph");
+    }
+
+    /**
      * Regression test for PR `#567`: right-alignment detection must claim adjacent single-line
      * blocks before the two-line paragraph heuristic.
      *
