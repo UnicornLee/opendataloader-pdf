@@ -31,6 +31,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -1591,6 +1592,19 @@ public class PageBookmarkProcessor {
         // numbered "1" sitting between "6." and "7." of one heading sequence
         // leaves [1..6] and [7..8] unable to merge, and Step 4.8 then discards
         // the stranded [7..8] run even though the two runs do abut.
+        //
+        // Value abutting alone is not enough, though: the groups must also be
+        // able to reach each other by reading *forwards* ("只能向后连，不能向前
+        // 连"). Two unrelated sequences whose values merely happen to abut — e.g.
+        // a section-local "1..34" list sitting on page 671 and the "35..38"
+        // sub-sections of a different appendix on page 570 — must not be glued
+        // into one chain, because that resurrects the earlier run inside a slice
+        // that opens later in the document.
+        Map<Candidate, Integer> readingOrder = new IdentityHashMap<>();
+        for (int i = 0; i < sorted.size(); i++) {
+            readingOrder.put(sorted.get(i), i);
+        }
+
         List<List<List<Candidate>>> chains = new ArrayList<>();
         List<List<Candidate>> pending = new ArrayList<>(groups);
         while (!pending.isEmpty()) {
@@ -1603,7 +1617,8 @@ public class PageBookmarkProcessor {
                 for (int i = 0; i < pending.size(); i++) {
                     List<Candidate> group = pending.get(i);
                     int groupMin = group.get(0).value;
-                    if (!seeded || chainMax + 1 == groupMin) {
+                    if (!seeded || (chainMax + 1 == groupMin
+                            && startsAfterChainEnd(chain, group, readingOrder))) {
                         chain.add(group);
                         chainMax = group.get(group.size() - 1).value;
                         seeded = true;
@@ -1637,7 +1652,7 @@ public class PageBookmarkProcessor {
         // range from [2..max] to [1..max] (length grows by one), making it
         // more competitive against the sibling value=1 sub-chain and recovering
         // the leading "一、" as the first L2 child of the parent section.
-        prependValueOneOrphansOntoValueTwoChains(chains);
+        prependValueOneOrphansOntoValueTwoChains(chains, readingOrder);
 
         // Step 4.8: A parent's children must number from 1 and be strictly
         // consecutive. Chains are already strictly consecutive by construction
@@ -1693,6 +1708,41 @@ public class PageBookmarkProcessor {
         }
         result.sort(Comparator.comparingInt((Candidate c) -> c.value));
         return result;
+    }
+
+    /**
+     * Step 4 merge guard: {@code true} when {@code group} starts later in the
+     * document than the chain's current last group, so the chain can only be
+     * extended <em>forwards</em> ("只能向后连，不能向前连").
+     *
+     * <p>Groups are ordered by their start value, not by position, so a value
+     * abutting pair may well be stored in reverse document order. Appending a
+     * group that sits <em>before</em> the chain end would produce a chain that
+     * jumps back inside the slice: the value sequence stays consecutive, but the
+     * emitted anchors are re-sorted into reading order by
+     * {@link #childAnchorIndices}, which then surfaces the earlier run as the
+     * parent's leading children.</p>
+     *
+     * @param chain       groups already merged into the chain, never empty here
+     * @param group       candidate group considered for the merge
+     * @param readingOrder candidate to reading-order index, built from Step 1
+     * @return true when the group may be appended to the chain
+     */
+    private static boolean startsAfterChainEnd(List<List<Candidate>> chain,
+                                              List<Candidate> group,
+                                              Map<Candidate, Integer> readingOrder) {
+        if (chain.isEmpty() || group.isEmpty()) {
+            return true;
+        }
+        List<Candidate> lastGroup = chain.get(chain.size() - 1);
+        if (lastGroup.isEmpty()) {
+            return true;
+        }
+        Integer chainEnd = readingOrder.get(lastGroup.get(lastGroup.size() - 1));
+        Integer groupStart = readingOrder.get(group.get(0));
+        // Unknown positions keep the historical behaviour instead of dropping
+        // groups that the map cannot describe.
+        return chainEnd == null || groupStart == null || groupStart > chainEnd;
     }
 
     /**
@@ -1967,9 +2017,14 @@ public class PageBookmarkProcessor {
      * <p>If multiple orphans exist, each is matched against the next available
      * value=2 chain in chain-list order; surplus orphans stay as their own
      * value=1 chains and compete normally in Step 5.</p>
+     *
+     * <p>The same "只能向后连，不能向前连" rule as Step 4 applies: an orphan may
+     * only be prepended onto a chain that starts <em>after</em> it in the
+     * document, otherwise the resulting value sequence would run backwards.</p>
      */
     private static void prependValueOneOrphansOntoValueTwoChains(
-            List<List<List<Candidate>>> chains) {
+            List<List<List<Candidate>>> chains,
+            Map<Candidate, Integer> readingOrder) {
         if (chains == null || chains.size() < 2) {
             return;
         }
@@ -1990,7 +2045,8 @@ public class PageBookmarkProcessor {
             List<List<Candidate>> target = null;
             for (List<List<Candidate>> chain : nonOrphans) {
                 if (!chain.isEmpty() && !chain.get(0).isEmpty()
-                        && chain.get(0).get(0).value == 2) {
+                        && chain.get(0).get(0).value == 2
+                        && isPrependable(orphan, chain, readingOrder)) {
                     target = chain;
                     break;
                 }
@@ -2007,6 +2063,27 @@ public class PageBookmarkProcessor {
         }
         chains.clear();
         chains.addAll(nonOrphans);
+    }
+
+    /**
+     * Step 4.7 guard: {@code true} when {@code orphan} sits before the target
+     * chain's first group in the document, i.e. prepending keeps the chain
+     * monotonic in reading order.
+     *
+     * @param orphan      single-candidate value=1 group to prepend
+     * @param target      chain that starts at value=2
+     * @param readingOrder candidate to reading-order index, built from Step 1
+     * @return true when the orphan may be prepended
+     */
+    private static boolean isPrependable(List<Candidate> orphan,
+                                        List<List<Candidate>> target,
+                                        Map<Candidate, Integer> readingOrder) {
+        if (orphan.isEmpty() || target.isEmpty() || target.get(0).isEmpty()) {
+            return true;
+        }
+        Integer orphanIndex = readingOrder.get(orphan.get(0));
+        Integer targetIndex = readingOrder.get(target.get(0).get(0));
+        return orphanIndex == null || targetIndex == null || orphanIndex < targetIndex;
     }
 
     private static List<Candidate> collectCandidates(List<List<IObject>> contents) {

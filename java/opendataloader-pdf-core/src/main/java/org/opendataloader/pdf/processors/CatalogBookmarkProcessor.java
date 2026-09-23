@@ -119,6 +119,22 @@ public class CatalogBookmarkProcessor {
     // match sites; group(2) is the starting page number.
     private static final Pattern ARABIC_RANGE_TOC_PATTERN =
             Pattern.compile("^(.*?)[\\s\\.]+(\\d{1,5})\\s*[—\\-–]\\s*\\d{1,5}\\s*$");
+    // Appendix-style page references: "Title …… I-1" / "IV-1" / "IX-1" / "EGM-1".
+    // Appendices restart their own page numbering and are printed as
+    // "<prefix>-<page>" (a roman numeral or a short acronym) rather than as a
+    // plain Arabic number, so the Arabic/Roman patterns above never see them.
+    // Without this branch a multi-page catalog whose second page lists only
+    // appendices (e.g. "附錄一 － 目標集團的會計師報告 …. I-1") fails the
+    // page-level TOC ratio and is dropped from the detected range, which also
+    // makes the preceding entry look like the last catalog entry.
+    // The reference must be preceded by a non-empty title and a whitespace or
+    // dot-leader separator, so a lone token such as "COVID-19" is not read as a
+    // catalog entry; the prefix accepts lowercase roman numerals and acronyms
+    // of up to 16 letters. Group(2)+"-"+group(3) is reported as the raw page
+    // reference so the entry keeps a value that cannot be resolved
+    // arithmetically (its physical page is found later by title matching).
+    private static final Pattern APPENDIX_PAGE_TOC_PATTERN =
+            Pattern.compile("^(.*?)[\\s\\.]+([A-Za-z]{1,16})\\s*-\\s*(\\d{1,5})\\s*$");
     // Strips trailing whitespace and "dot-leader" punctuation from a TOC title.
     // The leading character class covers (a) ASCII full stop ".", (b) the
     // horizontal ellipsis "…" (U+2026) which is the most common TOC leader
@@ -137,6 +153,18 @@ public class CatalogBookmarkProcessor {
     // range-selection score below — which only counts matched lines — would
     // prefer that page over the real table of contents.
     private static final Pattern CATALOG_HEADING_PATTERN = Pattern.compile("目\\s*[录錄]");
+    // Appendix-family section markers ("附錄二", "附件三", "Appendix II", "Annex 1").
+    // An appendix repeats its marker in the running header of every page it
+    // spans, so the marker alone identifies the appendix's first page even when
+    // the rest of the body heading is unusable (broken ToUnicode mappings can
+    // replace a Latin letter with a symbol, e.g. "T E C H S T A ☑"). Used only as
+    // a last-resort fallback for entries whose printed reference is
+    // section-local and whose title has no counterpart in the body text.
+    private static final Pattern SECTION_MARKER_PATTERN =
+            Pattern.compile("^(附錄|附件|Appendix|Annex)\\s*"
+                + "([0-9]{1,3}|[IVXLCDMivxlcdm]{1,8}|[一二三四五六七八九十]{1,4})");
+    /** Numeral characters that may follow a section marker ("附錄二" vs "附錄二十"). */
+    private static final String NUMERAL_CHARS = "0123456789IVXLCDMivxlcdm一二三四五六七八九十";
     // Similarity fallback for catalog ↔ body title matching (see
     // isFuzzyTitleMatch): the characters left over in the middle of the two
     // strings must not add up to more than this on the two sides combined.
@@ -556,6 +584,19 @@ public class CatalogBookmarkProcessor {
             }
         }
 
+        // Appendix-style page references: "Title .... I-1" / "IV-1" / "EGM-1".
+        // The reference itself is section-local (each appendix restarts at 1),
+        // so it is reported verbatim: parseOriginalPageNum yields 0 for it and
+        // resolveCatalogBookmarkTarget then locates the physical page by
+        // matching the title in document order.
+        Matcher appendixMatcher = APPENDIX_PAGE_TOC_PATTERN.matcher(text);
+        if (appendixMatcher.matches()) {
+            String title = appendixMatcher.group(1).trim().replaceAll(TITLE_CLEANUP, "");
+            if (!title.isEmpty()) {
+                return new TocMatch(title, appendixMatcher.group(2) + "-" + appendixMatcher.group(3));
+            }
+        }
+
         // Document page labels: "Title .... A" or "Title .... iii"
         if (pageLabels != null) {
             for (String label : pageLabels) {
@@ -821,7 +862,9 @@ public class CatalogBookmarkProcessor {
 
     /**
      * Parses a raw page string into an integer for original_page_num. Roman numerals
-     * and labels that are not pure Arabic integers are returned as 0.
+     * and labels that are not pure Arabic integers are returned as 0 — such entries
+     * are section-local (front matter, appendices) and are resolved by title
+     * later (see {@link #resolveCatalogBookmarkTarget}).
      */
     private static int parseOriginalPageNum(String rawPage) {
         try {
@@ -1730,6 +1773,12 @@ public class CatalogBookmarkProcessor {
      * appears multiple times, the occurrence closest to the printed page is chosen;
      * if two occurrences are equally close, the earlier page wins.</p>
      *
+     * <p>Entries whose printed reference is not an Arabic integer — Roman-numbered
+     * front matter ("釋義 …. ii") and appendix-local references ("附錄一 …. I-1",
+     * "股東特別大會通告 …. EGM-1") — carry {@code original_page_num == 0}. They are
+     * resolved by title as well, ranked by document order instead of by distance,
+     * so they land on the earliest matching page at or after the preceding entry.</p>
+     *
      * <p>Two ordering constraints are applied on top of that distance rule, and
      * each of them only takes effect when it can be satisfied:</p>
      * <ol>
@@ -1799,17 +1848,25 @@ public class CatalogBookmarkProcessor {
      * {@link #resolveCatalogBookmarkTargets(List, List, int, int, int)} for the
      * selection rules.
      *
+     * <p>A bookmark whose printed page reference cannot be parsed — the
+     * {@code original_page_num} is 0, e.g. the Roman-numbered front matter
+     * ("釋義 …. ii") or an appendix-local reference ("附錄一 …. I-1") — is still
+     * resolved by title. With no numeric hint the distance used by
+     * {@link #isBetterMatch} degenerates to the physical page itself, so the
+     * entry lands on the <em>earliest</em> matching page at or after the
+     * preceding entry, which is exactly where such a section starts.</p>
+     *
      * @return the resolved physical page (1-based), or 0 when the bookmark could
      *         not be resolved to any body paragraph
      */
     private static int resolveCatalogBookmarkTarget(Bookmark bookmark,
-                                                     List<Map<String, Object>> data,
-                                                     int catalogStartPage,
-                                                     int catalogEndPage,
-                                                     int floorPage) {
+                                                    List<Map<String, Object>> data,
+                                                    int catalogStartPage,
+                                                    int catalogEndPage,
+                                                    int floorPage) {
         String title = bookmark.getText();
         Integer catalogHint = bookmark.getOriginalPageNum();
-        if (title == null || title.trim().isEmpty() || catalogHint == null || catalogHint <= 0) {
+        if (title == null || title.trim().isEmpty() || catalogHint == null) {
             return 0;
         }
 
@@ -1843,17 +1900,41 @@ public class CatalogBookmarkProcessor {
                     continue;
                 }
                 int physicalPage = pageIndex + 1;
-                int distance = Math.abs(physicalPage - catalogHint);
+                // With no usable hint the distance falls back to the physical
+                // page, which ranks the matches by document order (earliest
+                // first) instead of by proximity to a printed number.
+                int distance = catalogHint > 0
+                    ? Math.abs(physicalPage - catalogHint)
+                    : physicalPage;
                 Object idObj = item.get(JsonName.ID);
                 int relatedId = idObj instanceof Number ? ((Number) idObj).intValue() : 0;
                 matches.add(new TargetMatch(pageIndex, relatedId, distance, quality));
             }
         }
         if (matches.isEmpty()) {
-            return 0;
+            // Last resort for a section-local reference (hint 0): the body heading
+            // may be unusable because of a broken font mapping, but the running
+            // header of the appendix still carries its marker ("附錄二").
+            if (catalogHint > 0) {
+                return 0;
+            }
+            TargetMatch markerHit = findSectionMarkerHit(normalizedTitle, data,
+                catalogStartPage, catalogEndPage, floorPage);
+            if (markerHit == null) {
+                return 0;
+            }
+            bookmark.setPageNum(markerHit.pageIndex + 1);
+            bookmark.setRelatedId(markerHit.relatedId);
+            LOGGER.log(Level.INFO, String.format(
+                "[CatalogBookmark] catalog entry '%s' has no body match; resolved to page %d "
+                    + "by its section marker",
+                title, markerHit.pageIndex + 1));
+            return markerHit.pageIndex + 1;
         }
 
-        // Constraint 1: the printed page number is a lower bound.
+        // Constraint 1: the printed page number is a lower bound. A non-positive
+        // hint keeps every match, so the ordering is driven by Constraint 2 and
+        // by the document-order distance fallback above.
         List<TargetMatch> preferred = matchesAtOrAfter(matches, catalogHint);
         if (preferred.isEmpty()) {
             preferred = matches;
@@ -1884,6 +1965,115 @@ public class CatalogBookmarkProcessor {
                 title, bestMatch.pageIndex + 1, floorPage, floorPage));
         }
         return bestMatch.pageIndex + 1;
+    }
+
+    /**
+     * Finds the first page whose page-top heading carries the same appendix
+     * marker as {@code normalizedTitle} (see {@link #SECTION_MARKER_PATTERN}).
+     *
+     * <p>Search starts at {@code floorPage} so the hit cannot move backwards in
+     * the catalog order; when no page at or after it qualifies, the whole
+     * document is searched instead, mirroring the optional-filter behaviour of
+     * the two ordering constraints above. Only a page whose <em>first</em> text
+     * item is a heading is considered: the running header of an appendix is the
+     * first heading of each of its pages, so this keeps a mid-page cross
+     * reference that merely names the appendix out of the result.</p>
+     *
+     * @return the marker hit, or null when the title carries no marker or no
+     *         page matches it
+     */
+    private static TargetMatch findSectionMarkerHit(String normalizedTitle,
+                                                    List<Map<String, Object>> data,
+                                                    int catalogStartPage,
+                                                    int catalogEndPage,
+                                                    int floorPage) {
+        String marker = sectionMarkerOf(normalizedTitle);
+        if (marker == null || marker.isEmpty()) {
+            return null;
+        }
+        TargetMatch afterFloor = scanSectionMarker(marker, data, catalogStartPage, catalogEndPage, floorPage);
+        if (afterFloor != null) {
+            return afterFloor;
+        }
+        return scanSectionMarker(marker, data, catalogStartPage, catalogEndPage, 0);
+    }
+
+    /**
+     * Scans pages for the first page-top heading starting with {@code marker}.
+     *
+     * @param marker section marker, e.g. {@code 附錄二} or {@code AppendixII}
+     * @param floorPage 1-based page the scan starts at; 0 or less scans from the
+     *                  beginning of the document
+     * @return the first hit, or null
+     */
+    private static TargetMatch scanSectionMarker(String marker,
+                                                List<Map<String, Object>> data,
+                                                int catalogStartPage,
+                                                int catalogEndPage,
+                                                int floorPage) {
+        for (int pageIndex = Math.max(0, floorPage - 1); pageIndex < data.size(); pageIndex++) {
+            if (catalogStartPage >= 0 && catalogEndPage >= catalogStartPage
+                    && pageIndex >= catalogStartPage && pageIndex <= catalogEndPage) {
+                continue;
+            }
+            Map<String, Object> page = data.get(pageIndex);
+            List<Map<String, Object>> items = (List<Map<String, Object>>) page.get(JsonName.ITEMS);
+            if (items == null) {
+                continue;
+            }
+            for (Map<String, Object> item : items) {
+                if (!isTextItem(item)) {
+                    continue;
+                }
+                // Only the page's first text item is a candidate; an appendix
+                // header is a heading, so a page that opens with body copy is
+                // not a marker page.
+                if (!JsonName.SOURCE_TYPE_HEADING.equals(item.get(JsonName.SOURCE_TYPE))) {
+                    break;
+                }
+                if (startsWithMarker(normalizeBookmarkText(getJsonItemFullText(item)), marker)) {
+                    Object idObj = item.get(JsonName.ID);
+                    int relatedId = idObj instanceof Number ? ((Number) idObj).intValue() : 0;
+                    return new TargetMatch(pageIndex, relatedId, 0, MatchQuality.EXACT);
+                }
+                break;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Extracts the appendix marker ({@code 附錄二}, {@code AppendixII}, ...) from
+     * a normalized bookmark title.
+     *
+     * @param normalizedTitle title with all whitespace removed
+     * @return the marker, or null when the title is not an appendix-family entry
+     */
+    private static String sectionMarkerOf(String normalizedTitle) {
+        if (normalizedTitle == null) {
+            return null;
+        }
+        Matcher matcher = SECTION_MARKER_PATTERN.matcher(normalizedTitle);
+        if (!matcher.find()) {
+            return null;
+        }
+        return matcher.group(1) + matcher.group(2);
+    }
+
+    /**
+     * Returns true when {@code normalizedHeading} starts with {@code marker} and
+     * the marker is not followed by another numeral character, so "附錄二" does
+     * not match the heading of "附錄二十" and "Annex1" not the one of "Annex10".
+     */
+    private static boolean startsWithMarker(String normalizedHeading, String marker) {
+        if (normalizedHeading == null || !normalizedHeading.regionMatches(true, 0, marker, 0, marker.length())) {
+            return false;
+        }
+        if (normalizedHeading.length() == marker.length()) {
+            return true;
+        }
+        char next = normalizedHeading.charAt(marker.length());
+        return NUMERAL_CHARS.indexOf(next) < 0;
     }
 
     /**
