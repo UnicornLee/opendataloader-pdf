@@ -53,6 +53,11 @@ public class ContentFilterProcessor {
     public static List<IObject> getFilteredContents(String inputPdfName, List<IChunk> contents, int pageNumber,
                                                     Config config) throws IOException {
         List<IObject> pageContents = new ArrayList<>(contents);
+        // Drop text the PDF painted several times on top of itself (fake-bold overprint). Runs
+        // before removeSameTextChunks because it works on the per-symbol geometry, which the
+        // value-equality based passes cannot use once the copies were re-chunked differently.
+        TextProcessor.removeOverprintedTextChunks(pageContents);
+        pageContents = DocumentProcessor.removeNullObjectsFromList(pageContents);
         TextProcessor.removeSameTextChunks(pageContents);
         pageContents = DocumentProcessor.removeNullObjectsFromList(pageContents);
         TextProcessor.removeTextDecorationImages(pageContents);
