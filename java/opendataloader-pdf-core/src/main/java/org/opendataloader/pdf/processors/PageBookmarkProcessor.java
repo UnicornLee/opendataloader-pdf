@@ -65,8 +65,10 @@ import java.util.logging.Logger;
  *
  * <p>Below the first level the period-end consistency filter is not applied
  * destructively: the level is evaluated twice, once with the filter and once
- * without it, and the richer outcome is kept (see
- * {@link #preferUnfilteredSelection}).</p>
+ * without it, and the richer outcome is kept whenever the filtered run collapsed
+ * to a single child but was not positively rejected as body-text residue (see
+ * {@link #preferUnfilteredSelection} and Step 6.5 of
+ * {@link #cleanCandidatesLocal}).</p>
  */
 public class PageBookmarkProcessor {
 
@@ -1023,9 +1025,17 @@ public class PageBookmarkProcessor {
      * carries no trailing "。" and is dropped as the minority, splitting
      * "1,2,3" into "1" and "3"; the surviving lone "1" (or an empty result) then
      * wins the level selection and surfaces as the parent's only child.</p>
+     *
+     * <p>An empty filtered selection is never replaced. Step 6.5 of
+     * {@link #cleanCandidatesLocal} deliberately empties a result whose only
+     * entry is a lone body-text mimic, so a zero here is a positive verdict, not
+     * an over-filtered chain: letting the unfiltered run revive that single
+     * residue would undo the rule. The rescue path stays available for its real
+     * trigger — a one-entry collapse that Step 6.5 did not reject.</p>
      */
     private static boolean preferUnfilteredSelection(List<Integer> unfiltered, List<Integer> filtered) {
-        return unfiltered.size() > filtered.size() && filtered.size() <= 1;
+        return unfiltered.size() > filtered.size()
+            && filtered.size() == 1;
     }
 
     /**
@@ -1506,6 +1516,12 @@ public class PageBookmarkProcessor {
      * strictly-consecutive requirement is identical at every level (see Step
      * 4.8), so a parent's children never continue another parent's numbering.</p>
      *
+     * <p>When the selection ends up a single entry, it is re-checked against the
+     * pre-filter list: an adjacency pair there means the group was laid out as
+     * a table of contents or numbered body list, so the lone survivor is body
+     * residue and yields nothing (see Step 6.5 and
+     * {@link #hasAdjacentPair(List)}).</p>
+     *
      * @param level depth at which the cleaning runs (1=L1, 2=L2, 3=L3);
      *              only L2+ applies the period-end consistency filter.
      */
@@ -1530,6 +1546,12 @@ public class PageBookmarkProcessor {
         sorted.sort(Comparator
             .comparingInt((Candidate c) -> c.pageIndex)
             .thenComparing((Candidate c) -> -c.topY));
+
+        // Keep the pre-filter list for the Step 6.5 adjacency re-check. Holding
+        // a reference (rather than a copy) is safe: Step 1.5 either returns
+        // this very list unchanged or a brand-new list, so rebinding `sorted`
+        // never mutates the list captured here.
+        List<Candidate> unfiltered = sorted;
 
         // Step 1.5: Period-end consistency filter for L2+.
         //
@@ -1707,7 +1729,58 @@ public class PageBookmarkProcessor {
             result.addAll(group);
         }
         result.sort(Comparator.comparingInt((Candidate c) -> c.value));
+
+        // Step 6.5: Re-check the surviving singleton against the pre-filter
+        // list.
+        //
+        // The period-end filter (Step 1.5) drops the minority side of a template
+        // group, so a body paragraph that merely mimics the numbering prefix can
+        // be the *only* candidate left holding value=1, with every genuine
+        // heading of that shape already removed as the majority-different
+        // minority. The singleton then satisfies Step 4.8 (value=1) and is
+        // emitted as a lone child even though it is not a heading at all.
+        //
+        // Re-check the pre-filter list: if any two candidates there form an
+        // adjacency pair, the group is laid out like a table of contents (or a
+        // numbered body list), and a lone survivor cannot be a genuine heading
+        // chain — it is residue of the same block the other entries were removed
+        // from. Emitting nothing lets the parent drop the child instead of
+        // surfacing body text as a bookmark.
+        if (result.size() == 1 && hasAdjacentPair(unfiltered)) {
+            return Collections.emptyList();
+        }
         return result;
+    }
+
+    /**
+     * Returns {@code true} when any two entries of {@code list} form an
+     * adjacency pair under the table-of-contents layout test, i.e. same-page
+     * items whose JSON ids are consecutive ({@link #isSamePageAdjacent}) or a
+     * page-boundary pair ({@link #isCrossPageAdjacent}).
+     *
+     * <p>Used by the Step 6.5 singleton re-check to decide whether the
+     * unfiltered group was laid out as a table of contents or numbered body
+     * list. Only adjacency is considered — deliberately not
+     * {@link #isTocLikeGroup}'s over-long-entry rule — because the survivor has
+     * already cleared that length test in Step 4.5; re-applying it against the
+     * unfiltered list could delete a legitimate single child whose sibling
+     * happens to be an over-long paragraph of the same template.</p>
+     *
+     * @param list candidates in reading order; must not be {@code null}
+     * @return true when at least one adjacent pair exists
+     */
+    private static boolean hasAdjacentPair(List<Candidate> list) {
+        for (int i = 0; i < list.size(); i++) {
+            for (int j = i + 1; j < list.size(); j++) {
+                if (isSamePageAdjacent(list.get(i), list.get(j))) {
+                    return true;
+                }
+                if (j == i + 1 && isCrossPageAdjacent(list.get(i), list.get(j))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
