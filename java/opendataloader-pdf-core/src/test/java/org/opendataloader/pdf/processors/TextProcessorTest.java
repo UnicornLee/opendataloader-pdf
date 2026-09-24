@@ -23,7 +23,10 @@ import org.verapdf.wcag.algorithms.entities.content.TextChunk;
 import org.verapdf.wcag.algorithms.entities.geometry.BoundingBox;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
+import java.util.stream.Collectors;
 
 public class TextProcessorTest {
 
@@ -101,6 +104,176 @@ public class TextProcessorTest {
         TextProcessor.removeSameTextChunks(contents);
         contents = DocumentProcessor.removeNullObjectsFromList(contents);
         Assertions.assertEquals(1, contents.size());
+    }
+
+    /**
+     * The first three lines of {@code docs/pdf/200812311782183951489043113-1.pdf} paint every
+     * glyph four times at {@code (x +-0.24, baseline +-0.24)}. All four copies of "表格" carry the
+     * same value and bbox, so this mirrors the grid observed in the real file.
+     */
+    @Test
+    public void testRemoveOverprintedTextChunksCollapsesFourCopies() {
+        List<IObject> contents = new ArrayList<>();
+        contents.add(overprintChunk("表格", 186.960, 206.994, 759.375, 761.360,
+            Arrays.asList(186.960, 196.914, 206.994)));
+        contents.add(overprintChunk("表格", 187.200, 207.234, 759.375, 761.360,
+            Arrays.asList(187.200, 197.154, 207.234)));
+        contents.add(overprintChunk("表格", 186.960, 206.994, 759.615, 761.600,
+            Arrays.asList(186.960, 196.914, 206.994)));
+        contents.add(overprintChunk("表格", 187.200, 207.234, 759.615, 761.600,
+            Arrays.asList(187.200, 197.154, 207.234)));
+
+        TextProcessor.removeOverprintedTextChunks(contents);
+        contents = DocumentProcessor.removeNullObjectsFromList(contents);
+
+        Assertions.assertEquals("表格", renderByLeftX(contents));
+        Assertions.assertEquals(1, contents.size(), "the surviving characters must stay in a single chunk");
+        Assertions.assertEquals(1, countChar(contents, '表'));
+        Assertions.assertEquals(1, countChar(contents, '格'));
+    }
+
+    /**
+     * Real geometry of the "」)" run of the same file: one copy carries the "」" as two halves
+     * (5.097pt each), another one carries it whole (9.954pt) plus a ")" (6.658pt) and two
+     * ")" copies that are only 1.675pt wide, plus a zero-advance ")" phantom.
+     */
+    @Test
+    public void testRemoveOverprintedTextChunksKeepsWholeGlyphOverSplitHalves() {
+        List<IObject> contents = new ArrayList<>();
+        TextChunk halves = overprintChunk("」」", 398.040, 408.234, 759.375, 761.360,
+            Arrays.asList(398.040, 403.137, 408.234));
+        TextChunk whole = overprintChunk("」", 398.280, 408.234, 759.615, 761.600,
+            Arrays.asList(398.280, 408.234));
+        TextChunk withParenthesis = overprintChunk("」)", 398.040, 411.356, 759.615, 761.600,
+            Arrays.asList(398.040, 404.698, 411.356));
+        TextChunk narrowParentheses = overprintChunk("))", 408.000, 411.351, 759.375, 761.360,
+            Arrays.asList(408.000, 409.675, 411.351));
+        TextChunk phantomParenthesis = overprintChunk("))", 411.240, 411.480, 759.375, 761.360,
+            Arrays.asList(411.240, 411.360, 411.480));
+        contents.add(halves);
+        contents.add(whole);
+        contents.add(withParenthesis);
+        contents.add(narrowParentheses);
+        contents.add(phantomParenthesis);
+
+        TextProcessor.removeOverprintedTextChunks(contents);
+        contents = DocumentProcessor.removeNullObjectsFromList(contents);
+
+        Assertions.assertEquals("」)", renderByLeftX(contents));
+        Assertions.assertEquals(1, countChar(contents, '」'));
+        Assertions.assertEquals(1, countChar(contents, ')'));
+    }
+
+    /**
+     * Real geometry of the "致香港聯合交易所有限公司" run: one copy absorbed the leading
+     * "  :  " and the tail is also painted on its own, so the surviving chunks are one "  :  "
+     * (front of the merged copy) and one "致" (the separate copy).
+     */
+    @Test
+    public void testRemoveOverprintedTextChunksKeepsFrontMergedCopyOnce() {
+        List<IObject> contents = new ArrayList<>();
+        TextChunk merged = overprintChunk("  :  致", 207.000, 229.921, 759.615, 761.600,
+            Arrays.asList(207.000, 209.588, 212.042, 214.640, 217.273, 219.967, 229.921));
+        TextChunk tail = overprintChunk("致", 219.720, 229.674, 759.375, 761.360,
+            Arrays.asList(219.720, 229.674));
+        contents.add(merged);
+        contents.add(tail);
+
+        TextProcessor.removeOverprintedTextChunks(contents);
+        contents = DocumentProcessor.removeNullObjectsFromList(contents);
+
+        Assertions.assertEquals("  :  致", renderByLeftX(contents));
+        Assertions.assertEquals(1, countChar(contents, ':'));
+        Assertions.assertEquals(1, countChar(contents, '致'));
+    }
+
+    /**
+     * Ordinary text must never be touched: repeated characters that are simply adjacent
+     * (letter spacing / kerning) and lone narrow glyphs are not an overprint signature.
+     */
+    @Test
+    public void testRemoveOverprintedTextChunksLeavesNormalTextUntouched() {
+        List<IObject> contents = new ArrayList<>();
+        TextChunk repeated = overprintChunk("aa bb", 10.0, 60.0, 90.0, 100.0,
+            Arrays.asList(10.0, 20.0, 30.0, 40.0, 50.0, 60.0));
+        TextChunk narrowGlyph = overprintChunk(".", 70.0, 70.4, 90.0, 100.0,
+            Arrays.asList(70.0, 70.4));
+        contents.add(repeated);
+        contents.add(narrowGlyph);
+
+        TextProcessor.removeOverprintedTextChunks(contents);
+
+        Assertions.assertEquals(2, contents.size());
+        Assertions.assertEquals("aa bb", ((TextChunk) contents.get(0)).getValue());
+        Assertions.assertEquals(".", ((TextChunk) contents.get(1)).getValue());
+    }
+
+    /**
+     * Regression test: the extractor reports collapsed widths for some ordinary characters — in
+     * {@code docs/pdf/202504291785149927447006139.pdf} the second "「" of "提升「技防」「智控」水平。"
+     * comes back 0.135pt wide while the first one is 4.635pt. Such a character has no equal
+     * character painted next to it, so it must never be treated as an overprint phantom.
+     */
+    @Test
+    public void testRemoveOverprintedTextChunksKeepsCollapsedWidthCharacterWithoutCopy() {
+        List<IObject> contents = new ArrayList<>();
+        contents.add(overprintChunk("提升「技防」「智控」", 255.480, 333.330, 638.114, 647.114,
+            Arrays.asList(255.480, 264.615, 273.750, 278.385, 287.520, 296.655, 305.790, 305.925,
+                315.060, 324.195, 333.330)));
+        TextChunk second = (TextChunk) contents.get(0);
+
+        TextProcessor.removeOverprintedTextChunks(contents);
+
+        Assertions.assertEquals(1, contents.size());
+        Assertions.assertSame(second, contents.get(0));
+        Assertions.assertEquals("提升「技防」「智控」", ((TextChunk) contents.get(0)).getValue());
+    }
+
+    /** Chunks without symbol geometry (e.g. OCR / hybrid results) are ignored. */
+    @Test
+    public void testRemoveOverprintedTextChunksIgnoresChunksWithoutSymbolEnds() {
+        List<IObject> contents = new ArrayList<>();
+        TextChunk withoutGeometry = new TextChunk(new BoundingBox(1, 10.0, 90.0, 20.0, 100.0),
+            "表格", 9.96, 100.0);
+        contents.add(withoutGeometry);
+
+        TextProcessor.removeOverprintedTextChunks(contents);
+
+        Assertions.assertEquals(1, contents.size());
+        Assertions.assertSame(withoutGeometry, contents.get(0));
+    }
+
+    private static TextChunk overprintChunk(String value, double left, double right, double bottomY,
+                                            double baseLine, List<Double> symbolEnds) {
+        TextChunk chunk = new TextChunk(new BoundingBox(1, left, bottomY, right, bottomY + 10.0),
+            value, 9.96, baseLine);
+        chunk.setFontName("TT491A9C96tCID");
+        chunk.setFontWeight(400);
+        chunk.setSymbolEnds(new ArrayList<>(symbolEnds));
+        return chunk;
+    }
+
+    private static String renderByLeftX(List<IObject> contents) {
+        return contents.stream()
+            .filter(object -> object instanceof TextChunk)
+            .map(object -> (TextChunk) object)
+            .sorted(Comparator.comparingDouble(TextChunk::getLeftX))
+            .map(TextChunk::getValue)
+            .collect(Collectors.joining());
+    }
+
+    private static int countChar(List<IObject> contents, char value) {
+        int count = 0;
+        for (IObject object : contents) {
+            if (object instanceof TextChunk) {
+                for (char current : ((TextChunk) object).getValue().toCharArray()) {
+                    if (current == value) {
+                        count++;
+                    }
+                }
+            }
+        }
+        return count;
     }
 
     @Test
