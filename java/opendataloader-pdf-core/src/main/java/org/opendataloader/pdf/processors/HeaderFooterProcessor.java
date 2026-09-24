@@ -22,6 +22,7 @@ import org.verapdf.wcag.algorithms.entities.INode;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.SemanticHeaderOrFooter;
 import org.verapdf.wcag.algorithms.entities.SemanticTextNode;
+import org.verapdf.wcag.algorithms.entities.content.ImageChunk;
 import org.verapdf.wcag.algorithms.entities.content.LineArtChunk;
 import org.verapdf.wcag.algorithms.entities.content.LineChunk;
 import org.verapdf.wcag.algorithms.entities.content.TextBlock;
@@ -171,12 +172,30 @@ public class HeaderFooterProcessor {
         return result;
     }
 
+    /**
+     * Page-local content indexes of one header/footer, used to cut those elements out of the page.
+     *
+     * <p>{@link ImageChunk} is skipped because its {@code index} is not a page-local position:
+     * {@link DocumentProcessor#setIndexesForContentsList(List)} deliberately leaves images alone and
+     * {@link org.opendataloader.pdf.utils.ImagesUtils} takes the field over as the global image-file
+     * number ({@code imageFile3.png} ⇒ index 3). Adding that number to the index set removes
+     * whichever unrelated page element happens to sit at that position — in
+     * {@code docs/pdf/202609251790240460775053085.pdf} the page-2 letterhead image carries image
+     * index 3, which deleted the third text line of the page
+     * ("召开 2026 年第三次临时股东会的") from the output.</p>
+     *
+     * @param header the detected header or footer
+     * @return the page-local indexes of its positioned contents (empty when it has none)
+     */
     private static Set<Integer> getHeaderOrFooterContentsIndexes(SemanticHeaderOrFooter header) {
         if (header == null) {
             return Collections.emptySet();
         }
         SortedSet<Integer> set = new TreeSet<>();
         for (IObject content : header.getContents()) {
+            if (content instanceof ImageChunk || content.getIndex() == null) {
+                continue;
+            }
             set.add(content.getIndex());
         }
         return set;
