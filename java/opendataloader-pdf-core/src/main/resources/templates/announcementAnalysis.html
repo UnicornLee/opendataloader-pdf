@@ -59,7 +59,9 @@
                          :style="{textIndent: _text.x0 - list.x0 + 'pt'}"
                          :class="_textIndex !== 0 && _textIndex !== list.content.length - 1 && 'justify'">
 
-                      <div v-html="_text.content[0]" :style="{fontSize: _text.font_size + 'pt', fontWeight: _text.is_bold && 'bold'}"></div>
+                      <!-- white-space: pre-wrap 用于保留解析结果中的连续空格，HTML 默认会将其折叠为一个 -->
+                      <div v-html="_text.content[0]" style="white-space: pre-wrap"
+                           :style="{fontSize: _text.font_size + 'pt', fontWeight: _text.is_bold && 'bold'}"></div>
                     </div>
                   </div>
                 </template>
@@ -78,12 +80,13 @@
                             :class="td.split_type?td.split_type === 'backslash' ? 'table_td_split_backslash':'table_td_split':''"
                         >
                           <template v-if="td.cell_type === 'image'">
-                            <div v-html="td.text[0]"  :style="{height:td.height / td.text.length + 'pt'}"></div>
+                            <div v-html="td.text[0]" style="white-space: pre-wrap"
+                                 :style="{height:td.height / td.text.length + 'pt'}"></div>
                           </template>
                           <template v-else>
                             <div class="cell" v-if="!td.split_type">
                               <div v-for="(tdText, _tdText) in td.text" :key="'tdText' + item.page_index + _tdText">
-                                <div  v-html="tdText" :style="{fontSize: td.font_size + 'pt'}"></div>
+                                <div  v-html="tdText" style="white-space: pre-wrap" :style="{fontSize: td.font_size + 'pt'}"></div>
                               </div>
                             </div>
                             <div class="cell" :style="{fontSize: td.font_size + 'pt'}"
@@ -93,13 +96,14 @@
                                  <div v-for="(_split_right_td, _split_right_td_index) in td.text"
                                       :key="'td' + _table + item.page_index + _idx + _td + 'left' + _split_right_td_index"
                                       v-html="_split_right_td"
+                                      style="white-space: pre-wrap"
                                       :class="_split_right_td_index >= td.split_index ? '':'td_split_hidden'">
                               </div>
                               </span>
                                 <span class="table_td_split_right">
                                 <div v-for="(_split_left_td, _split_left_td_index) in td.text.slice(0, td.split_index)"
                                      :key="'td' + _table + item.page_index + _idx + _td + 'left' + _split_left_td_index"
-                                     v-html="_split_left_td">
+                                     v-html="_split_left_td" style="white-space: pre-wrap">
                               </div>
                               </span>
                               </div>
@@ -107,13 +111,14 @@
                                 <span class="table_td_split_left">
                                 <div v-for="(_split_left_td, _split_left_td_index) in td.text.slice(0, td.split_index)"
                                      :key="'td' + _table + item.page_index + _idx + _td + 'left' + _split_left_td_index"
-                                     v-html="_split_left_td">
+                                     v-html="_split_left_td" style="white-space: pre-wrap">
                               </div>
                               </span>
                                 <span class="table_td_split_right">
                                  <div v-for="(_split_right_td, _split_right_td_index) in td.text"
                                       :key="'td' + _table + item.page_index + _idx + _td + 'left' + _split_right_td_index"
                                       v-html="_split_right_td"
+                                      style="white-space: pre-wrap"
                                       :class="_split_right_td_index >= td.split_index ? '':'td_split_hidden'">
                               </div>
                               </span>
