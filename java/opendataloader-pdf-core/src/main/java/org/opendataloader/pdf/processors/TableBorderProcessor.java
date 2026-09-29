@@ -175,14 +175,17 @@ public class TableBorderProcessor {
                         }
                     }
                 } else {
-                    for (TableBorderCell tableBorderCell : tableBorderCells) {
-                        if (content instanceof LineArtChunk &&
-                                tableBorderCell.getBoundingBox().getIntersectionPercent(content.getBoundingBox()) > LINE_ART_PERCENT) {
-                            return tableBorder;
-                        }
-                        tableBorderCell.addContentObject(content);
-                        break;
+                    // The content overlaps several cells (typically an image wider than its
+                    // cell, crossing a column border). getTableBorderCells returns a HashSet
+                    // whose iteration order is undefined, so taking the first cell could drop
+                    // the image into a neighbouring column it barely touches. Pick the cell
+                    // that holds the largest fraction of the content instead.
+                    TableBorderCell bestCell = getBestOverlappingCell(tableBorderCells, content.getBoundingBox());
+                    if (content instanceof LineArtChunk &&
+                            bestCell.getBoundingBox().getIntersectionPercent(content.getBoundingBox()) > LINE_ART_PERCENT) {
+                        return tableBorder;
                     }
+                    bestCell.addContentObject(content);
                 }
                 return tableBorder;
             }
@@ -420,6 +423,34 @@ public class TableBorderProcessor {
         }
         previousTable.setNextTable(currentTable);
         currentTable.setPreviousTable(previousTable);
+    }
+
+    /**
+     * Picks the cell that contains the largest fraction of the given content box.
+     *
+     * <p>Used when one object (most often an ImageChunk whose width exceeds the cell)
+     * straddles a column border and therefore maps to several candidate cells. The
+     * overlap is measured against the content box
+     * ({@code contentBox.getIntersectionPercent(cellBox)}, i.e. how much of the
+     * <em>content</em> lies inside the cell) so that cells of different widths are
+     * compared fairly. Exact ties are broken by row then column number, keeping the
+     * assignment deterministic across runs.</p>
+     */
+    private static TableBorderCell getBestOverlappingCell(Set<TableBorderCell> cells, BoundingBox contentBox) {
+        TableBorderCell best = null;
+        double bestOverlap = -Double.MAX_VALUE;
+        for (TableBorderCell cell : cells) {
+            double overlap = contentBox.getIntersectionPercent(cell.getBoundingBox());
+            if (overlap > bestOverlap
+                    || (overlap == bestOverlap && best != null
+                        && (cell.getRowNumber() < best.getRowNumber()
+                            || (cell.getRowNumber() == best.getRowNumber()
+                                && cell.getColNumber() < best.getColNumber())))) {
+                best = cell;
+                bestOverlap = overlap;
+            }
+        }
+        return best;
     }
 
     private static TextChunk getTextChunkPartForTableCell(TextChunk textChunk, TableBorderCell cell) {
