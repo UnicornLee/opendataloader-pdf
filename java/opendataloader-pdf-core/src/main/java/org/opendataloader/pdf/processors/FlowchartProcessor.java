@@ -64,6 +64,19 @@ public class FlowchartProcessor {
      * (see {@link #findProseBlocks}), which is what keeps body text out.</p>
      */
     private static final double LABEL_COLLECTION_MARGIN = 8.0;
+    /**
+     * Margin used when collecting shapes that sit next to the region
+     * (see {@link #absorbAdjacentShapes}).
+     *
+     * <p>{@link #collectOverlappingContents} skips shapes on purpose — the region is grown
+     * from one shape group while further groups are merged separately — but some diagrams
+     * draw a part of themselves as a shape that touches nothing: the dark header band
+     * above a node grid (measured 4.7 pt above the grid), a legend block, a frame drawn as
+     * its own rectangle. Such a shape is invisible in the output (only text, images and
+     * tables are serialized) and would moreover be cut off by the screenshot. The margin
+     * matches the label margin, which was measured for the same gaps.</p>
+     */
+    private static final double SHAPE_COLLECTION_MARGIN = 8.0;
     /** Maximum height (pt) of a text block that may still count as a diagram label. */
     private static final double LABEL_MAX_HEIGHT = 12.0;
     /**
@@ -100,6 +113,15 @@ public class FlowchartProcessor {
     private static final double MAX_ASPECT_RATIO = 6.0;
     private static final int MIN_SHAPE_COUNT = 2;
     private static final int MIN_TOTAL_COMPONENTS = 5;
+    /**
+     * A diagram can also be a grid of similar card boxes (rounded rectangles with text
+     * inside) without any connector: an "our achievements" card grid, an infrastructure
+     * diagram of labelled nodes. Such a grid is recognized by the shape layer as one
+     * compound group shape plus the individual node rectangles, so it carries many
+     * rectangles and many components but no connector at all.
+     */
+    private static final int MIN_CARD_GRID_RECTANGLES = 4;
+    private static final int MIN_CARD_GRID_COMPONENTS = 8;
 
     /**
      * A regular table must occupy more than this ratio of the cluster for the
@@ -113,6 +135,16 @@ public class FlowchartProcessor {
      * threshold therefore sits at 0.30.</p>
      */
     private static final double REGULAR_TABLE_AREA_RATIO = 0.3;
+    /**
+     * Arrow-driven regions skip the "regular table" veto above (the line preprocessing
+     * routinely splits a diagram's node boxes into small 2x2 / 3x3 fragments), but a
+     * table that covers most of the region is not a fragment - it *is* the region, and
+     * cropping it would replace a table that is still perfectly readable as a table with
+     * an image. Measured: organisation charts peak at 0.235, "table - caption - table"
+     * bands at 0.35, while a real table that got grouped with its border lines reaches
+     * 0.8 - 0.95.
+     */
+    private static final double ARROW_DRIVEN_TABLE_AREA_RATIO = 0.5;
 
     /**
      * A single shape whose bounding box covers more than this share of the page is
@@ -228,6 +260,7 @@ public class FlowchartProcessor {
             List<IObject> mergedShapes = new ArrayList<>(group);
             List<IObject> mergedContents = new ArrayList<>(cluster.collectedContents);
             BoundingBox mergedBox = new BoundingBox(cluster.boundingBox);
+            absorbAdjacentShapes(pageContents, mergedShapes, mergedBox, proseBlocks);
             BoundingBox screenshotBox = expandHorizontally(mergedBox, SCREENSHOT_HORIZONTAL_MARGIN,
                     SCREENSHOT_VERTICAL_TOLERANCE);
             boolean expanded;
@@ -245,6 +278,10 @@ public class FlowchartProcessor {
                     }
                     BoundingBox laterBox = BoundingBoxGroupUtils.unionBoundingBoxes(laterGroup, pageNumber);
                     if (laterBox == null || !screenshotBox.overlaps(laterBox)) {
+                        continue;
+                    }
+                    // Do not merge a group that would newly swallow a body-text block.
+                    if (coversNewProse(mergedBox, laterBox, proseBlocks)) {
                         continue;
                     }
                     Cluster laterCluster = collectCluster(pageContents, laterGroup, pageNumber, proseBlocks);
@@ -273,11 +310,10 @@ public class FlowchartProcessor {
             // reject every diagram whose labels are a fraction taller than a label
             // (see absorbInteriorText). Collection and dropBodyTextBlocks already keep real
             // prose out of the region, so nothing is lost by checking here instead.
-            // TEMPORARY A/B SWITCH (remove after the corpus comparison):
-            // -DlegacyBodyTextGuard=true restores the previous behaviour (guard only inside
-            // isFlowchartCluster, i.e. evaluated after absorbInteriorText) so both variants
-            // can be diffed on the corpus.
-            if (!Boolean.getBoolean("legacyBodyTextGuard") && containsBodyText(mergedCluster)) {
+            // A flowchart region that still contains body text is not a clean diagram: the
+            // text would be cropped into the screenshot yet remain in the text layer, so
+            // leave the page untouched.
+            if (containsBodyText(mergedCluster)) {
                 continue;
             }
             // Text that lies inside the diagram region belongs to the diagram even when it is
@@ -285,20 +321,36 @@ public class FlowchartProcessor {
             // blocks were skipped during collection because they look like prose; absorb them
             // now so the screenshot becomes the only place where they appear.
             mergedCluster = absorbInteriorText(mergedCluster, mergedShapes, pageContents);
+            if (!isFlowchartCluster(mergedCluster, arrowDriven)) {
+                continue;
+            }
             // Recompute the screenshot box from the (possibly shrunk) region: when a page-wide
             // heading or paragraph was dropped, the region has to shrink with it, otherwise the
             // text would still be cropped into the screenshot while remaining in the text layer.
-            BoundingBox finalScreenshotBox = expandHorizontally(mergedCluster.boundingBox,
+            BoundingBox candidateBox = expandHorizontally(mergedCluster.boundingBox,
                     SCREENSHOT_HORIZONTAL_MARGIN, SCREENSHOT_VERTICAL_TOLERANCE);
-            if (isFlowchartCluster(mergedCluster, arrowDriven)) {
-                LOGGER.log(Level.INFO, "Page {0}: detected flowchart cluster with screenshot bbox {1}",
-                        new Object[]{pageNumber + 1, finalScreenshotBox});
-                pageContents.removeAll(mergedCluster.collectedContents);
-                pageContents.removeAll(mergedShapes);
-                ImageChunk imageChunk = new ImageChunk(finalScreenshotBox);
-                imagesUtils.saveImageChunk(imageChunk);
-                addInOrder(pageContents, imageChunk);
+            BoundingBox shapeBox = BoundingBoxGroupUtils.unionShapeBoundingBoxes(mergedShapes, pageNumber);
+            if (shapeBox == null) {
+                continue;
             }
+            // The crop may only cover content that is removed with it: whatever stays in the
+            // text layer (body text that the collection step deliberately skipped, elements the
+            // region only partially covers) would otherwise be rendered twice, once inside the
+            // image and once in the text flow. fitScreenshotToContents cuts the box back or asks
+            // for the crop to be skipped.
+            BoundingBoxGroupUtils.ScreenshotFit fit = BoundingBoxGroupUtils.fitScreenshotToContents(
+                    candidateBox, shapeBox, mergedCluster.collectedContents, pageContents,
+                    BoundingBoxGroupUtils.identitySet(mergedShapes));
+            if (fit.box == null || fit.box.getWidth() < MIN_WIDTH || fit.box.getHeight() < MIN_HEIGHT) {
+                continue;
+            }
+            LOGGER.log(Level.INFO, "Page {0}: detected flowchart cluster with screenshot bbox {1}",
+                    new Object[]{pageNumber + 1, fit.box});
+            pageContents.removeAll(fit.removableContents);
+            pageContents.removeAll(mergedShapes);
+            ImageChunk imageChunk = new ImageChunk(fit.box);
+            imagesUtils.saveImageChunk(imageChunk);
+            addInOrder(pageContents, imageChunk);
         }
     }
 
@@ -376,6 +428,92 @@ public class FlowchartProcessor {
                 if (content == shape) {
                     return true;
                 }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Absorbs the shapes that sit right next to the diagram region.
+     *
+     * <p>{@link #collectOverlappingContents} ignores shapes on purpose: the region is grown
+     * from one shape group, and further groups are merged by the caller. A diagram can
+     * nevertheless draw part of itself as a shape that touches nothing else — the dark
+     * header band above a node grid, a legend block, a frame drawn as its own rectangle.
+     * Those sit within {@link #SHAPE_COLLECTION_MARGIN} of the region, and leaving them out
+     * means the screenshot cuts them off while the output shows nothing at all in their
+     * place (a shape is never serialized on its own).</p>
+     *
+     * <p>Only one ring of neighbours is absorbed: chaining the absorption would let a table
+     * whose cells carry fills walk into the region cell by cell. Chart shapes are never
+     * absorbed either — {@code BarChartProcessor} and friends have already replaced those by
+     * their own screenshot, and cropping them again would duplicate the chart. A shape that
+     * would newly cover a block of prose is skipped as well: everything inside the region is
+     * taken out of the text layer later (see {@link #absorbInteriorText}), so a table caption
+     * or a heading right above the diagram must not be pulled in (measured: a table header
+     * band 4 pt above the region would have swallowed the "合并所有者权益变动表" caption).</p>
+     *
+     * @param pageContents the current page contents
+     * @param shapes       the region's shapes; the absorbed shapes are appended
+     * @param box          the region box; grown by every absorbed shape
+     * @param proseBlocks  text blocks that belong to a paragraph and must stay in the text layer
+     */
+    private static void absorbAdjacentShapes(List<IObject> pageContents, List<IObject> shapes, BoundingBox box,
+                                             Set<IObject> proseBlocks) {
+        for (IObject content : new ArrayList<>(pageContents)) {
+            if (!(content instanceof ShapeChunk) || containsIdentity(shapes, content)
+                    || isChartShape((ShapeChunk) content)) {
+                continue;
+            }
+            BoundingBox shapeBox = content.getBoundingBox();
+            if (shapeBox == null || shapeBox.isEmpty() || !shapeBox.overlaps(box, SHAPE_COLLECTION_MARGIN)) {
+                continue;
+            }
+            if (coversNewProse(box, shapeBox, proseBlocks)) {
+                continue;
+            }
+            shapes.add(content);
+            box.union(shapeBox);
+        }
+    }
+
+    /**
+     * Returns true when adding {@code shapeBox} to {@code box} would newly cover a block of
+     * prose, i.e. a text block that the region does not cover yet and that
+     * {@link #absorbInteriorText} would take out of the text layer afterwards.
+     */
+    private static boolean coversNewProse(BoundingBox box, BoundingBox shapeBox, Set<IObject> proseBlocks) {
+        if (proseBlocks == null || proseBlocks.isEmpty()) {
+            return false;
+        }
+        BoundingBox grown = new BoundingBox(box);
+        grown.union(shapeBox);
+        for (IObject prose : proseBlocks) {
+            BoundingBox proseBox = prose.getBoundingBox();
+            if (proseBox == null || proseBox.isEmpty()) {
+                continue;
+            }
+            if (grown.contains(proseBox, INTERIOR_TEXT_TOLERANCE, INTERIOR_TEXT_TOLERANCE)
+                    && !box.contains(proseBox, INTERIOR_TEXT_TOLERANCE, INTERIOR_TEXT_TOLERANCE)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Returns true for the shapes a chart processor has already turned into an image. */
+    private static boolean isChartShape(ShapeChunk shape) {
+        String type = shape.getShapeType();
+        return ShapeChunk.TYPE_BAR_CHART.equals(type)
+                || ShapeChunk.TYPE_PIE_CHART.equals(type)
+                || ShapeChunk.TYPE_LINE_CHART.equals(type);
+    }
+
+    /** Returns true when {@code items} contains {@code target} by identity. */
+    private static boolean containsIdentity(List<IObject> items, IObject target) {
+        for (IObject item : items) {
+            if (item == target) {
+                return true;
             }
         }
         return false;
@@ -563,10 +701,6 @@ public class FlowchartProcessor {
         // absorbInteriorText runs. Keeping it here as well would reject every diagram whose
         // interior labels were taken back by that step, because a label a fraction taller
         // than LABEL_MAX_HEIGHT is indistinguishable from a prose line at this point.
-        // TEMPORARY A/B SWITCH (remove after the corpus comparison).
-        if (Boolean.getBoolean("legacyBodyTextGuard") && containsBodyText(cluster)) {
-            return false;
-        }
         double width = cluster.boundingBox.getWidth();
         double height = cluster.boundingBox.getHeight();
         if (width < MIN_WIDTH || height < MIN_HEIGHT) {
@@ -575,7 +709,11 @@ public class FlowchartProcessor {
         if (Math.max(width / height, height / width) > MAX_ASPECT_RATIO) {
             return false;
         }
-        if (!skipTableVeto && isRegularTable(cluster)) {
+        if (skipTableVeto) {
+            if (isRegularTable(cluster, ARROW_DRIVEN_TABLE_AREA_RATIO)) {
+                return false;
+            }
+        } else if (isRegularTable(cluster, REGULAR_TABLE_AREA_RATIO)) {
             return false;
         }
         if (cluster.shapeCount < MIN_SHAPE_COUNT || cluster.totalComponents < MIN_TOTAL_COMPONENTS) {
@@ -589,8 +727,18 @@ public class FlowchartProcessor {
         boolean imageWithConnectors = cluster.imageCount >= 1 && connectorCount >= 2 && cluster.textCount >= 1;
         boolean labelsWithConnectors = cluster.textCount >= 3 && connectorCount >= 2;
         boolean boxesWithArrows = cluster.rectangleCount >= 2 && cluster.arrowCount >= 1;
+        // A card grid / node diagram has no connector at all: the node rectangles and the
+        // compound group shape spanning them are the whole region (see MIN_CARD_GRID_*). The
+        // group shape is required — it is only produced for closed *curve* paths, the node
+        // shape of such a diagram. Merely counting rectangles would also accept a grid of
+        // table cell fills as a diagram (measured: three pages of a financial statement whose
+        // tables are drawn with filled cells).
+        boolean cardGrid = cluster.groupCount >= 1
+                && cluster.rectangleCount >= MIN_CARD_GRID_RECTANGLES
+                && cluster.totalComponents >= MIN_CARD_GRID_COMPONENTS;
 
-        return mixedShapes || compositeContent || imageWithConnectors || labelsWithConnectors || boxesWithArrows;
+        return mixedShapes || compositeContent || imageWithConnectors || labelsWithConnectors || boxesWithArrows
+                || cardGrid;
     }
 
     /**
@@ -667,7 +815,7 @@ public class FlowchartProcessor {
         return !isDiagramLabel(content);
     }
 
-    private static boolean isRegularTable(Cluster cluster) {
+    private static boolean isRegularTable(Cluster cluster, double areaRatioThreshold) {
         if (cluster.tableCount == 0) {
             return false;
         }
@@ -698,11 +846,13 @@ public class FlowchartProcessor {
         // flowchart (the diagram stayed in the text layer and was emitted as a series
         // of bogus tables). A real table page has its table roughly coinciding with
         // the shape cluster, so the ratio there is close to (or above) 1.
-        return maxTableArea / clusterArea > REGULAR_TABLE_AREA_RATIO;
+        return maxTableArea / clusterArea > areaRatioThreshold;
     }
 
     private static final class Cluster {
         final int shapeCount;
+        /** Compound shapes ({@link ShapeChunk#TYPE_GROUP}) spanning a whole node grid. */
+        final int groupCount;
         final int rectangleCount;
         final int polylineCount;
         final int arrowCount;
@@ -724,6 +874,7 @@ public class FlowchartProcessor {
             this.boundingBox = new BoundingBox(boundingBox);
 
             int shapeCount = 0;
+            int groupCount = 0;
             int rectangleCount = 0;
             int polylineCount = 0;
             int arrowCount = 0;
@@ -743,7 +894,9 @@ public class FlowchartProcessor {
                         }
                     }
                     String type = shape.getShapeType();
-                    if (ShapeChunk.TYPE_RECTANGLE.equals(type)) {
+                    if (ShapeChunk.TYPE_GROUP.equals(type)) {
+                        groupCount++;
+                    } else if (ShapeChunk.TYPE_RECTANGLE.equals(type)) {
                         rectangleCount++;
                     } else if (ShapeChunk.TYPE_POLYLINE.equals(type)) {
                         polylineCount++;
@@ -757,6 +910,7 @@ public class FlowchartProcessor {
             }
             this.shapeBox = shapesUnion;
             this.shapeCount = shapeCount;
+            this.groupCount = groupCount;
             this.rectangleCount = rectangleCount;
             this.polylineCount = polylineCount;
             this.arrowCount = arrowCount;

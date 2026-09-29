@@ -49,7 +49,17 @@ public class GetDrawings {
     public static class Drawing {
         public PaintType type;
         public boolean closePath;
+        /** True when the path used curve segments (e.g. a rounded rectangle). */
+        public boolean hasCurve;
         public Rect rect;
+        /**
+         * Bounding box of every subpath, in the order the path drew them.
+         *
+         * <p>A diagram of rounded-rectangle cards is typically a single PDF path with one
+         * subpath per card, so {@link #rect} spans the whole diagram and is useless as a
+         * node box.</p>
+         */
+        public List<Rect> subpathRects = new ArrayList<>();
     }
 
     /**
@@ -66,6 +76,7 @@ public class GetDrawings {
         private final GeneralPath path = new GeneralPath();
         private final List<Drawing> drawings = new ArrayList<>();
         private boolean closed;
+        private boolean hasCurve;
 
         private Collector(PDPage page) {
             super(page);
@@ -102,6 +113,7 @@ public class GetDrawings {
         @Override
         public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) {
             path.curveTo(x1, y1, x2, y2, x3, y3);
+            hasCurve = true;
         }
 
         @Override
@@ -143,6 +155,7 @@ public class GetDrawings {
             Drawing drawing = new Drawing();
             drawing.type = type;
             drawing.closePath = closed;
+            drawing.hasCurve = hasCurve;
             Rectangle2D bounds = path.getBounds2D();
             if (!bounds.isEmpty()) {
                 Rect rect = new Rect();
@@ -152,13 +165,89 @@ public class GetDrawings {
                 rect.y1 = (float) bounds.getMaxY();
                 drawing.rect = rect;
             }
+            drawing.subpathRects = computeSubpathRects(path);
             drawings.add(drawing);
             resetPath();
+        }
+
+        /**
+         * Splits a path into the bounding boxes of its subpaths. Card diagrams draw every
+         * rounded rectangle as one subpath of a single path, so only this split yields
+         * usable node boxes.
+         */
+        private static List<Rect> computeSubpathRects(GeneralPath path) {
+            List<Rect> rects = new ArrayList<>();
+            java.awt.geom.PathIterator iterator = path.getPathIterator(null);
+            double[] coords = new double[6];
+            double minX = 0;
+            double minY = 0;
+            double maxX = 0;
+            double maxY = 0;
+            boolean started = false;
+            while (!iterator.isDone()) {
+                int type = iterator.currentSegment(coords);
+                if (type == java.awt.geom.PathIterator.SEG_MOVETO) {
+                    if (started) {
+                        addRect(rects, minX, minY, maxX, maxY);
+                    }
+                    minX = maxX = coords[0];
+                    minY = maxY = coords[1];
+                    started = true;
+                } else if (type == java.awt.geom.PathIterator.SEG_LINETO
+                        || type == java.awt.geom.PathIterator.SEG_QUADTO
+                        || type == java.awt.geom.PathIterator.SEG_CUBICTO) {
+                    if (!started) {
+                        minX = maxX = coords[0];
+                        minY = maxY = coords[1];
+                        started = true;
+                    }
+                    minX = Math.min(minX, coords[0]);
+                    minY = Math.min(minY, coords[1]);
+                    maxX = Math.max(maxX, coords[0]);
+                    maxY = Math.max(maxY, coords[1]);
+                    if (type == java.awt.geom.PathIterator.SEG_QUADTO
+                            || type == java.awt.geom.PathIterator.SEG_CUBICTO) {
+                        minX = Math.min(minX, coords[2]);
+                        minY = Math.min(minY, coords[3]);
+                        maxX = Math.max(maxX, coords[2]);
+                        maxY = Math.max(maxY, coords[3]);
+                    }
+                    if (type == java.awt.geom.PathIterator.SEG_CUBICTO) {
+                        minX = Math.min(minX, coords[4]);
+                        minY = Math.min(minY, coords[5]);
+                        maxX = Math.max(maxX, coords[4]);
+                        maxY = Math.max(maxY, coords[5]);
+                    }
+                } else if (type == java.awt.geom.PathIterator.SEG_CLOSE) {
+                    if (started) {
+                        addRect(rects, minX, minY, maxX, maxY);
+                        started = false;
+                    }
+                }
+                iterator.next();
+            }
+            if (started) {
+                addRect(rects, minX, minY, maxX, maxY);
+            }
+            return rects;
+        }
+
+        private static void addRect(List<Rect> rects, double minX, double minY, double maxX, double maxY) {
+            if (maxX <= minX || maxY <= minY) {
+                return;
+            }
+            Rect rect = new Rect();
+            rect.x0 = (float) minX;
+            rect.y0 = (float) minY;
+            rect.x1 = (float) maxX;
+            rect.y1 = (float) maxY;
+            rects.add(rect);
         }
 
         private void resetPath() {
             path.reset();
             closed = false;
+            hasCurve = false;
         }
     }
 }

@@ -148,15 +148,19 @@ class FlowchartProcessorTest {
     @Test
     void arrowDrivenClusterIsNotVetoedByTablesInsideIt() {
         // A row of boxes connected by an arrow — the shape a flow diagram degenerates
-        // into — plus a table that covers most of the region, exactly like the bogus
-        // tables the line preprocessing produces for such diagrams.
+        // into — plus a node table inside the diagram, exactly like the bogus tables the
+        // line preprocessing produces for such diagrams. The table covers ~40% of the
+        // region: below ARROW_DRIVEN_TABLE_AREA_RATIO (0.5) so the arrow-driven region
+        // stays a diagram (veto skipped), yet above REGULAR_TABLE_AREA_RATIO (0.3) so
+        // without the arrow grouping the regular-table veto still applies.
         ShapeChunk box1 = new ShapeChunk(new BoundingBox(0, 100, 400, 180, 440), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
         ShapeChunk box2 = new ShapeChunk(new BoundingBox(0, 100, 300, 180, 340), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
         ShapeChunk box3 = new ShapeChunk(new BoundingBox(0, 100, 200, 180, 240), ShapeChunk.TYPE_RECTANGLE, GRAY, 4);
         ShapeChunk arrow = new ShapeChunk(new BoundingBox(0, 140, 240, 142, 300), ShapeChunk.TYPE_ARROW, BLACK, 1);
         ShapeChunk head = new ShapeChunk(new BoundingBox(0, 138, 238, 144, 244), ShapeChunk.TYPE_ARROW_HEADER, BLACK, 1);
         TableBorder table = new TableBorder(3, 3);
-        table.setBoundingBox(new BoundingBox(0, 100, 200, 175, 440));
+        // ~40% of the cluster (x 105-175, y 180-320 inside the region x 100-180, y 138-440).
+        table.setBoundingBox(new BoundingBox(0, 105, 320, 175, 180));
 
         List<IObject> group = Arrays.asList(box1, box2, box3, arrow, head);
 
@@ -167,7 +171,7 @@ class FlowchartProcessorTest {
                 arrowDrivenImages, 0, 0.0, 0.0, true);
 
         Assertions.assertEquals(1, arrowDrivenImages.saved.size(),
-                "A region grown from an arrowhead is a diagram even when a table covers it");
+                "A region grown from an arrowhead is a diagram even when a small table sits inside it");
         Assertions.assertEquals(1, arrowDrivenContents.size(), "The table is removed with the diagram");
 
         // The same region without the arrow driven grouping keeps the veto.

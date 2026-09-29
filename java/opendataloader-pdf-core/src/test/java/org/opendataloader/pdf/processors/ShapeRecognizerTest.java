@@ -133,6 +133,76 @@ class ShapeRecognizerTest {
     }
 
     @Test
+    void recognizesLineChartDataPathInsideItsAxisFrame() {
+        List<IChunk> artifacts = new ArrayList<>();
+        double[] color = new double[]{0.8, 0.0, 0.2};
+        addAxisFrame(artifacts, color);
+        addDataPath(artifacts, color);
+        addDataMarker(artifacts, color);
+
+        List<ShapeChunk> shapes = ShapeRecognizer.recognizePage(0, artifacts);
+
+        ShapeChunk dataPath = shapes.stream()
+                .filter(s -> ShapeChunk.TYPE_LINE_CHART.equals(s.getShapeType()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("expected the data path to be recognized as a line chart"));
+        Assertions.assertEquals(2, dataPath.getComponentCount(), "The path keeps its own segments");
+        Assertions.assertEquals(119.5, dataPath.getBoundingBox().getLeftX(), 0.0001);
+        Assertions.assertEquals(380.5, dataPath.getBoundingBox().getRightX(), 0.0001);
+    }
+
+    @Test
+    void frameWithNodeBoxesIsNotALineChart() {
+        List<IChunk> artifacts = new ArrayList<>();
+        double[] color = new double[]{0.8, 0.0, 0.2};
+        addAxisFrame(artifacts, color);
+        addDataPath(artifacts, color);
+        addDataMarker(artifacts, color);
+        // Two node-sized filled boxes inside the frame: a flow diagram, not a plot.
+        artifacts.add(new LineChunk(0, 150, 165, 220, 165, 30, color));
+        artifacts.add(new LineChunk(0, 300, 165, 360, 165, 30, color));
+
+        List<ShapeChunk> shapes = ShapeRecognizer.recognizePage(0, artifacts);
+
+        Assertions.assertTrue(
+                shapes.stream().noneMatch(s -> ShapeChunk.TYPE_LINE_CHART.equals(s.getShapeType())),
+                "A frame enclosing several node boxes must stay a diagram");
+    }
+
+    @Test
+    void frameWithoutDataMarkerIsNotALineChart() {
+        List<IChunk> artifacts = new ArrayList<>();
+        double[] color = new double[]{0.8, 0.0, 0.2};
+        addAxisFrame(artifacts, color);
+        addDataPath(artifacts, color);
+
+        List<ShapeChunk> shapes = ShapeRecognizer.recognizePage(0, artifacts);
+
+        Assertions.assertTrue(
+                shapes.stream().noneMatch(s -> ShapeChunk.TYPE_LINE_CHART.equals(s.getShapeType())),
+                "Without a data-point marker the bent line is just a polyline");
+    }
+
+    /** y-axis and x-axis meeting at the origin: one bent chain spanning the plot area. */
+    private static void addAxisFrame(List<IChunk> artifacts, double[] color) {
+        artifacts.add(new LineChunk(0, 100, 100, 100, 220, 1.0, color));
+        artifacts.add(new LineChunk(0, 100, 100, 400, 100, 1.0, color));
+    }
+
+    /** Two connected segments spanning most of the frame width. */
+    private static void addDataPath(List<IChunk> artifacts, double[] color) {
+        artifacts.add(new LineChunk(0, 120, 130, 250, 130, 1.0, color));
+        artifacts.add(new LineChunk(0, 250, 130, 380, 190, 1.0, color));
+    }
+
+    /** A small triangle drawn next to the path, the way data points are marked. */
+    private static void addDataMarker(List<IChunk> artifacts, double[] color) {
+        artifacts.add(new LineChunk(0, 240, 160, 244, 160, 0.5, color));
+        artifacts.add(new LineChunk(0, 244, 160, 244, 164, 0.5, color));
+        artifacts.add(new LineChunk(0, 244, 164, 240, 160, 0.5, color));
+    }
+
+    @Test
     void separatesShapesByColor() {
         List<IChunk> artifacts = new ArrayList<>();
         artifacts.add(new LineChunk(0, 0, 0, 10, 10, 0.5, new double[]{1.0, 0.0, 0.0}));

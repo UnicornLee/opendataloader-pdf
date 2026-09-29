@@ -24,6 +24,8 @@ import org.verapdf.wcag.algorithms.entities.content.ImageChunk;
 import org.verapdf.wcag.algorithms.entities.content.TextChunk;
 import org.verapdf.wcag.algorithms.entities.content.TextLine;
 import org.verapdf.wcag.algorithms.entities.geometry.BoundingBox;
+import org.verapdf.wcag.algorithms.entities.tables.Table;
+import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorder;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -67,6 +69,23 @@ public final class BarChartProcessor {
 
     /** Margin used when collecting neighbouring page contents around the region. */
     private static final double COLLECTION_MARGIN = 1.0;
+    /**
+     * Extra margin (pt) used for a short label sitting directly above or below the
+     * region: the chart's unit caption ("人民幣十億元", "千台") and the labels of a
+     * legend / column-header block drawn above the plot. Such a label regularly hangs a
+     * few points off the plot area — measured 4.5 pt on one page and 7.7 pt on another —
+     * so the plain {@link #COLLECTION_MARGIN} stops just short of it and whether it is
+     * cropped comes down to sub-point differences between pages. On a page carrying two
+     * charts of the same kind this shows up as one screenshot containing the legend and
+     * the unit caption while the other one does not.
+     */
+    private static final double VERTICAL_LABEL_MARGIN = 8.0;
+    /**
+     * Minimum share of a label's width that has to overlap the region horizontally
+     * before {@link #VERTICAL_LABEL_MARGIN} may be applied. Prevents labels that merely
+     * sit on the same rows from being pulled in.
+     */
+    private static final double VERTICAL_LABEL_OVERLAP_RATIO = 0.5;
     /** Horizontal expansion applied to the final bar-chart screenshot bbox. */
     private static final double SCREENSHOT_HORIZONTAL_MARGIN = 5.0;
     /** Vertical tolerance (pt) added to the final bar-chart screenshot bbox:
@@ -74,6 +93,38 @@ public final class BarChartProcessor {
     private static final double SCREENSHOT_VERTICAL_TOLERANCE = 1.0;
     /** Safety cap on the do-while growth loop to avoid runaway iteration. */
     private static final int MAX_GROWTH_ITERATIONS = 30;
+    /**
+     * Minimum share of a candidate chart box that has to lie inside a table (a
+     * {@link org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorder}
+     * or {@link org.verapdf.wcag.algorithms.entities.tables.Table}) for the region
+     * to be treated as that table instead of a chart. Tables drawn with filled
+     * cells whose rows carry grid lines regularly pass the bar tests (gaps between
+     * cells + varying cell heights look like gapped, varying bars); cropping such a
+     * region would replace a perfectly readable table with an image.
+     */
+    private static final double TABLE_OVERLAP_RATIO = 0.5;
+    /** Minimum filled rectangles a candidate group needs before the table-grid test runs. */
+    private static final int MIN_TABLE_GRID_RECT_COUNT = 6;
+    /** Bottom-Y distance (pt) under which two rectangles count as the same table row. */
+    private static final double TABLE_GRID_ROW_TOLERANCE = 3.0;
+    /** Minimum distinct row (bottom-Y cluster) count for the group to count as a table. */
+    private static final int MIN_TABLE_GRID_ROW_COUNT = 3;
+    /**
+     * Maximum vertical gap (pt) between two stacked bar segments. Segments of one
+     * stack are drawn as a single path, so the upper segment's bottom equals the
+     * lower segment's top (measured gap 0.0 on the stacked charts of the Hong Kong
+     * prospectus); the filled cells of a table are always separated by a grid line
+     * and never abut. A gap within this tolerance counts as "tiling".
+     */
+    private static final double STACK_CHAIN_GAP_TOLERANCE = 0.5;
+    /** Maximum left/right edge delta (pt) for two rectangles to count as the same x-column. */
+    private static final double STACK_COLUMN_X_TOLERANCE = 1.0;
+    /**
+     * Minimum number of x-columns that have to form exact vertical chains before
+     * the group is treated as a stacked bar chart. Requiring at least two chained
+     * columns keeps a single column of abutting cells from disabling the table test.
+     */
+    private static final int MIN_STACKED_COLUMNS = 2;
 
     /**
      * Maximum thickness (pt) of a shape that still counts as an axis line.
@@ -192,6 +243,18 @@ public final class BarChartProcessor {
             if (groupBox == null || groupBox.isEmpty()) {
                 continue;
             }
+            // A region that lies inside a table is that table, not a chart: tables whose
+            // cells are filled rectangles separated by grid lines regularly pass the bar
+            // tests (gaps + varying cell heights), and cropping them would replace a
+            // readable table with an image. Only applied to bar charts: a line chart's
+            // axis frame is itself picked up as a TableBorder by TableBorderProcessor
+            // (a 2x2 grid of axis lines), so vetoing line charts here would suppress
+            // every genuine line chart (verified on prospectus p117).
+            if (ShapeChunk.TYPE_BAR_CHART.equals(chartType)
+                    && (liesInsideTable(pageContents, groupBox) || looksLikeTableGrid(group))) {
+                skipped[i] = true;
+                continue;
+            }
 
             // Initial screenshot box already carries the horizontal / vertical margin so the
             // first iteration can find neighbouring groups and content that touch the chart.
@@ -237,7 +300,9 @@ public final class BarChartProcessor {
                     if (contentBox == null || contentBox.isEmpty()) {
                         continue;
                     }
-                    if (contentBox.overlaps(screenshotBox, COLLECTION_MARGIN)) {
+                    if (contentBox.overlaps(screenshotBox, COLLECTION_MARGIN)
+                            || (isShortSingleLineText(content)
+                                && isVerticallyAdjacentLabel(contentBox, screenshotBox))) {
                         absorbedContents.add(content);
                         screenshotBox.union(contentBox);
                         expanded = true;
@@ -256,6 +321,154 @@ public final class BarChartProcessor {
             imagesUtils.saveImageChunk(imageChunk);
             pageContents.add(imageChunk);
         }
+    }
+
+    /**
+     * Returns true when {@code box} lies substantially inside a table border / table
+     * on the page: at least {@link #TABLE_OVERLAP_RATIO} of {@code box}'s area is
+     * covered by the table's bounding box. Such a region is the table itself (its
+     * filled cells passed the bar tests), not a chart.
+     */
+    /**
+     * Returns true when {@code group}'s filled rectangles form a multi-row grid —
+     * i.e. a table — rather than a bar chart. Genuine bar-chart bars share a single
+     * baseline (one row); a filled-cell table stacks cells across many rows, so its
+     * rectangles span several distinct bottom-Y clusters. Counting those clusters
+     * catches tables whose rows passed the per-column bar tests (gaps + varying cell
+     * heights) and were never turned into a {@link TableBorder} that
+     * {@link #liesInsideTable} could see.
+     */
+    private static boolean looksLikeTableGrid(List<IObject> group) {
+        if (group == null || group.isEmpty()) {
+            return false;
+        }
+        List<BoundingBox> rects = new ArrayList<>();
+        for (IObject obj : group) {
+            if (!(obj instanceof ShapeChunk)) {
+                continue;
+            }
+            ShapeChunk shape = (ShapeChunk) obj;
+            String type = shape.getShapeType();
+            if (!ShapeChunk.TYPE_BAR_CHART.equals(type) && !ShapeChunk.TYPE_RECTANGLE.equals(type)) {
+                continue;
+            }
+            List<BoundingBox> components = shape.getComponentBBoxes();
+            if (components != null && !components.isEmpty()) {
+                for (BoundingBox b : components) {
+                    if (b != null && !b.isEmpty()) {
+                        rects.add(b);
+                    }
+                }
+            } else {
+                BoundingBox box = shape.getBoundingBox();
+                if (box != null && !box.isEmpty()) {
+                    rects.add(box);
+                }
+            }
+        }
+        int n = rects.size();
+        if (n < MIN_TABLE_GRID_RECT_COUNT) {
+            return false;
+        }
+        // Stacked bar charts pass the row-cluster test below by construction: every
+        // segment above the baseline starts at a different height, so its bottom
+        // lands in its own cluster. But unlike table cells (separated by grid
+        // lines), the segments of one stack tile exactly — chain check first.
+        if (isStackedBarComponents(rects)) {
+            return false;
+        }
+        List<Double> bottoms = new ArrayList<>(n);
+        for (BoundingBox b : rects) {
+            bottoms.add(b.getBottomY());
+        }
+        int clusters = 1;
+        List<Double> sorted = new ArrayList<>(bottoms);
+        java.util.Collections.sort(sorted);
+        for (int i = 1; i < n; i++) {
+            if (sorted.get(i) - sorted.get(i - 1) > TABLE_GRID_ROW_TOLERANCE) {
+                clusters++;
+            }
+        }
+        return clusters >= MIN_TABLE_GRID_ROW_COUNT;
+    }
+
+    /**
+     * Returns true when {@code rects} form a stacked bar chart: grouped into
+     * x-columns (matching left/right edges), the rectangles of at least
+     * {@link #MIN_STACKED_COLUMNS} columns tile vertically without gaps — each
+     * upper rectangle's bottom coincides with the rectangle below's top within
+     * {@link #STACK_CHAIN_GAP_TOLERANCE}. That exact tiling is the signature of
+     * stacked bars (one path per stack); the filled cells of a table are always
+     * separated by a grid line, so they never form such chains.
+     */
+    private static boolean isStackedBarComponents(List<BoundingBox> rects) {
+        List<List<BoundingBox>> columns = new ArrayList<>();
+        for (BoundingBox b : rects) {
+            List<BoundingBox> column = null;
+            for (List<BoundingBox> c : columns) {
+                BoundingBox rep = c.get(0);
+                if (Math.abs(b.getLeftX() - rep.getLeftX()) <= STACK_COLUMN_X_TOLERANCE
+                        && Math.abs(b.getRightX() - rep.getRightX()) <= STACK_COLUMN_X_TOLERANCE) {
+                    column = c;
+                    break;
+                }
+            }
+            if (column == null) {
+                column = new ArrayList<>();
+                columns.add(column);
+            }
+            column.add(b);
+        }
+        int chained = 0;
+        for (List<BoundingBox> column : columns) {
+            if (column.size() < 2) {
+                continue;
+            }
+            column.sort(java.util.Comparator.comparingDouble(BoundingBox::getBottomY));
+            boolean tiles = true;
+            for (int i = 1; i < column.size(); i++) {
+                if (Math.abs(column.get(i).getBottomY() - column.get(i - 1).getTopY())
+                        > STACK_CHAIN_GAP_TOLERANCE) {
+                    tiles = false;
+                    break;
+                }
+            }
+            if (tiles) {
+                chained++;
+            }
+        }
+        return chained >= MIN_STACKED_COLUMNS;
+    }
+
+    private static boolean liesInsideTable(List<IObject> pageContents, BoundingBox box) {
+        if (pageContents == null || box == null || box.isEmpty()) {
+            return false;
+        }
+        double boxArea = box.getArea();
+        if (boxArea <= 0) {
+            return false;
+        }
+        for (IObject content : pageContents) {
+            BoundingBox tableBox;
+            if (content instanceof TableBorder) {
+                tableBox = content.getBoundingBox();
+            } else if (content instanceof Table) {
+                tableBox = content.getBoundingBox();
+            } else {
+                continue;
+            }
+            if (tableBox == null || tableBox.isEmpty()) {
+                continue;
+            }
+            double overlapX = Math.min(box.getRightX(), tableBox.getRightX())
+                    - Math.max(box.getLeftX(), tableBox.getLeftX());
+            double overlapY = Math.min(box.getTopY(), tableBox.getTopY())
+                    - Math.max(box.getBottomY(), tableBox.getBottomY());
+            if (overlapX > 0 && overlapY > 0 && (overlapX * overlapY) / boxArea >= TABLE_OVERLAP_RATIO) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -542,6 +755,33 @@ public final class BarChartProcessor {
             }
         }
         return false;
+    }
+
+    /**
+     * Returns true when {@code label} sits directly above or below {@code box} — closer
+     * than {@link #VERTICAL_LABEL_MARGIN} — and shares at least
+     * {@link #VERTICAL_LABEL_OVERLAP_RATIO} of its width with it.
+     *
+     * <p>Only the vertical direction is widened: a label hanging off the left or right
+     * edge of the plot (e.g. the wrapped CAGR column header of a chart table) is not a
+     * continuation of the chart's own column layout, and pulling it in would stretch the
+     * screenshot sideways over content the text layer keeps.</p>
+     *
+     * @param label bounding box of the candidate label
+     * @param box   the region being grown
+     */
+    private static boolean isVerticallyAdjacentLabel(BoundingBox label, BoundingBox box) {
+        double overlap = Math.min(label.getRightX(), box.getRightX())
+                - Math.max(label.getLeftX(), box.getLeftX());
+        if (label.getWidth() <= 0 || overlap / label.getWidth() < VERTICAL_LABEL_OVERLAP_RATIO) {
+            return false;
+        }
+        double gapAbove = label.getBottomY() - box.getTopY();
+        if (gapAbove >= 0) {
+            return gapAbove <= VERTICAL_LABEL_MARGIN;
+        }
+        double gapBelow = box.getBottomY() - label.getTopY();
+        return gapBelow >= 0 && gapBelow <= VERTICAL_LABEL_MARGIN;
     }
 
     /**

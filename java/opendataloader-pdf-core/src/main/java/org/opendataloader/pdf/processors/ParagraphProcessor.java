@@ -17,6 +17,7 @@ package org.opendataloader.pdf.processors;
 
 import org.opendataloader.pdf.custom.constants.GlobalConstant;
 import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
+import org.opendataloader.pdf.entities.content.ShapeChunk;
 import org.opendataloader.pdf.utils.BulletedParagraphUtils;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.content.ImageChunk;
@@ -79,10 +80,30 @@ public class ParagraphProcessor {
      */
     private static final double MIN_Y_OVERLAP_MERGE_RATIO = 0.7;
 
+    /**
+     * Minimum horizontal gap (in multiples of the font size) for a pair of same-row
+     * text fragments to be considered two separate columns rather than one visual row.
+     * Only used together with {@link #isSeparatedByShapeNode}: a term in a left margin
+     * column and its definition on the right are still merged, because neither of them
+     * sits inside a vector shape.
+     */
+    private static final double SHAPE_ROW_SEPARATION_GAP_RATIO = 3.0;
+
+    /** Tolerance (pt) when testing whether a text fragment lies inside a shape node. */
+    private static final double SHAPE_ROW_CONTAINMENT_TOLERANCE = 1.0;
+
+    /** Minimum side (pt) of a shape for it to count as a diagram node rather than a stripe. */
+    private static final double MIN_SHAPE_NODE_SIZE = 10.0;
+
     public static List<IObject> processParagraphs(List<IObject> contents, double width) {
         DocumentProcessor.setIndexesForContentsList(contents);
         List<TextBlock> blocks = new ArrayList<>();
         List<IObject> separators = new ArrayList<>();
+        List<BoundingBox> shapeBoxes = new ArrayList<>();
+        // Chart pages keep the previous paragraph behaviour: their labels and legends are
+        // routinely split across the plot's shape boxes, and changing the merge there costs
+        // chart-region growth. The guard is only needed for diagram pages.
+        boolean collectShapeNodes = !hasChartShape(contents);
         for (IObject content : contents) {
             if (content instanceof TextLine) {
                 blocks.add(new TextBlock((TextLine) content));
@@ -93,9 +114,15 @@ public class ParagraphProcessor {
                     || content instanceof Table || content instanceof ImageChunk) {
                 separators.add(content);
             }
+            if (collectShapeNodes && content instanceof ShapeChunk) {
+                BoundingBox shapeBox = content.getBoundingBox();
+                if (shapeBox != null && !shapeBox.isEmpty()) {
+                    shapeBoxes.add(shapeBox);
+                }
+            }
         }
         Set<TextLine> compositeRowLines = new HashSet<>();
-        blocks = mergeVerticallyOverlappingBlocks(blocks, compositeRowLines);
+        blocks = mergeVerticallyOverlappingBlocks(blocks, compositeRowLines, shapeBoxes);
         List<Double> leftXList = blocks.stream().map(block -> block.getBoundingBox().getLeftX()).collect(Collectors.toList());
         // 从 leftXList 中取出中位数，或者非常靠近中位数的集合的平均数
         double leftX = 0;
@@ -131,12 +158,20 @@ public class ParagraphProcessor {
     public static List<IObject> processParagraphs(List<IObject> contents) {
         DocumentProcessor.setIndexesForContentsList(contents);
         List<TextBlock> blocks = new ArrayList<>();
+        List<BoundingBox> shapeBoxes = new ArrayList<>();
+        boolean collectShapeNodes = !hasChartShape(contents);
         for (IObject content : contents) {
             if (content instanceof TextLine) {
                 blocks.add(new TextBlock((TextLine) content));
             }
+            if (collectShapeNodes && content instanceof ShapeChunk) {
+                BoundingBox shapeBox = content.getBoundingBox();
+                if (shapeBox != null && !shapeBox.isEmpty()) {
+                    shapeBoxes.add(shapeBox);
+                }
+            }
         }
-        blocks = mergeVerticallyOverlappingBlocks(blocks, new HashSet<>());
+        blocks = mergeVerticallyOverlappingBlocks(blocks, new HashSet<>(), shapeBoxes);
         blocks = detectParagraphsWithJustifyAlignments(blocks);
         blocks = detectFirstAndLastLinesOfParagraphsWithJustifyAlignments(blocks);
         blocks = detectParagraphsWithLeftAlignments(blocks, true);
@@ -182,7 +217,8 @@ public class ParagraphProcessor {
      * TextLine index and {@code getContentsWithDetectedParagraphs} keeps mapping the
      * block back to the right position in {@code contents}.</p>
      */
-    private static List<TextBlock> mergeVerticallyOverlappingBlocks(List<TextBlock> blocks, Set<TextLine> compositeRowLines) {
+    private static List<TextBlock> mergeVerticallyOverlappingBlocks(List<TextBlock> blocks, Set<TextLine> compositeRowLines,
+                                                                    List<BoundingBox> shapeBoxes) {
         if (blocks.size() <= 1) {
             return blocks;
         }
@@ -193,7 +229,8 @@ public class ParagraphProcessor {
         }
         for (int i = 0; i < n; i++) {
             for (int j = i + 1; j < n; j++) {
-                if (haveSignificantYOverlap(blocks.get(i), blocks.get(j))) {
+                if (haveSignificantYOverlap(blocks.get(i), blocks.get(j))
+                        && !isSeparatedByShapeNode(blocks.get(i), blocks.get(j), shapeBoxes)) {
                     union(parent, i, j);
                 }
             }
@@ -215,6 +252,72 @@ public class ParagraphProcessor {
             result.add(buildBlockWithMergedRows(lines, compositeRowLines));
         }
         return result;
+    }
+
+    /** True when the page carries a bar / pie / line chart shape. */
+    private static boolean hasChartShape(List<IObject> contents) {
+        for (IObject content : contents) {
+            if (!(content instanceof ShapeChunk)) {
+                continue;
+            }
+            String type = ((ShapeChunk) content).getShapeType();
+            if (ShapeChunk.TYPE_BAR_CHART.equals(type)
+                    || ShapeChunk.TYPE_PIE_CHART.equals(type)
+                    || ShapeChunk.TYPE_LINE_CHART.equals(type)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * True when two same-row text fragments are separated by a diagram node box: one
+     * fragment lies inside a {@link ShapeChunk} and the other does not, with a wide
+     * horizontal gap between them.
+     *
+     * <p>This is the case that must not become one composite row: a flowchart node label
+     * ("量產" inside its box) shares its row with the body text next to the diagram. Merging
+     * them produces one paragraph that spans the diagram boundary, which then blocks the
+     * screenshot crop because it can neither be fully covered nor left in the text layer.
+     * A definition list is unaffected: neither the term nor its definition sits inside a
+     * vector shape, so they keep merging.</p>
+     */
+    private static boolean isSeparatedByShapeNode(TextBlock first, TextBlock second, List<BoundingBox> shapeBoxes) {
+        if (shapeBoxes == null || shapeBoxes.isEmpty()) {
+            return false;
+        }
+        BoundingBox firstBox = first.getBoundingBox();
+        BoundingBox secondBox = second.getBoundingBox();
+        if (firstBox == null || secondBox == null || firstBox.isEmpty() || secondBox.isEmpty()) {
+            return false;
+        }
+        double gap;
+        if (firstBox.getRightX() <= secondBox.getLeftX()) {
+            gap = secondBox.getLeftX() - firstBox.getRightX();
+        } else if (secondBox.getRightX() <= firstBox.getLeftX()) {
+            gap = firstBox.getLeftX() - secondBox.getRightX();
+        } else {
+            return false;
+        }
+        double fontSize = Math.max(first.getFirstLine().getFontSize(), second.getFirstLine().getFontSize());
+        if (gap < SHAPE_ROW_SEPARATION_GAP_RATIO * fontSize) {
+            return false;
+        }
+        boolean firstInsideShape = isInsideShapeNode(firstBox, shapeBoxes);
+        boolean secondInsideShape = isInsideShapeNode(secondBox, shapeBoxes);
+        return firstInsideShape != secondInsideShape;
+    }
+
+    private static boolean isInsideShapeNode(BoundingBox box, List<BoundingBox> shapeBoxes) {
+        for (BoundingBox shapeBox : shapeBoxes) {
+            if (shapeBox.getWidth() < MIN_SHAPE_NODE_SIZE || shapeBox.getHeight() < MIN_SHAPE_NODE_SIZE) {
+                continue;
+            }
+            if (shapeBox.contains(box, SHAPE_ROW_CONTAINMENT_TOLERANCE, SHAPE_ROW_CONTAINMENT_TOLERANCE)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

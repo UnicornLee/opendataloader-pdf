@@ -766,6 +766,11 @@ public class DocumentProcessor {
                     if (groupedShapeChunks != null && !groupedShapeChunks.isEmpty()) {
                         BarChartProcessor.processBarChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
                         PieChartProcessor.processPieChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
+                        // Line charts are claimed last: their data path is a plain polyline, and
+                        // running after the bar/pie passes keeps chart columns from being read as
+                        // one. Must stay before the flowchart pass, whose regular-table veto would
+                        // otherwise drop the plot frame the line preprocessing turned into a table.
+                        LineChartProcessor.processLineChartGroups(pageContents, groupedShapeChunks, imagesUtils, pageNumber);
                     }
                     // When the page has arrowheads, the diagram regions are grown from them
                     // instead: the arrows already connect the parts of the diagram, which the
@@ -1160,7 +1165,8 @@ public class DocumentProcessor {
             StaticContainers.setTextLineSpaceRatio(textLineSpaceRatio);
         }
         document.parseChunks();
-        ShapeRecognizer.recognize(document, extractPageFillBoxes(pdfName, pdDocument.getNumberOfPages()));
+        PathBoxBundle pathBoxes = extractPagePathBoxes(pdfName, pdDocument.getNumberOfPages());
+        ShapeRecognizer.recognize(document, pathBoxes.fillBoxes, pathBoxes.curvedClosedPathBoxes);
         LinesPreprocessingConsumer linesPreprocessingConsumer = new LinesPreprocessingConsumer();
         linesPreprocessingConsumer.findTableBorders();
         /*linesPreprocessingConsumer.getTableBorders().forEach(builders -> builders.forEach(builder -> {
@@ -1268,32 +1274,36 @@ public class DocumentProcessor {
     }
 
     /**
-     * Extracts the bounding boxes of filled paths from the raw PDF content stream
+     * Extracts the bounding boxes of closed paths from the raw PDF content stream
      * using PDFBox, per page, in y-up (bottom-left origin) coordinates.
      *
-     * <p>These boxes are a fallback source for arrowheads: veraPDF's chunk layer can
-     * merge an arrowhead triangle into a larger marked-content container, which loses
-     * the bbox-only line-art chunk the shape recognizer normally relies on. Only
-     * closed fill paths are kept to limit noise. The boxes are empty for pages with
-     * no fills.</p>
+     * <p>These boxes are the fallback source for everything veraPDF's chunk layer
+     * loses: filled shapes whose color resolves to nothing (pattern fills) or that are
+     * merged into a larger marked-content container, and the rounded-rectangle nodes of
+     * a diagram, which exist only as closed curve paths and produce no line geometry at
+     * all. Two sources are kept:</p>
+     * <ul>
+     *   <li>{@code fillBoxes} — closed paths that are filled (former behaviour);</li>
+     *   <li>{@code curvedClosedPathBoxes} — closed paths containing curve segments:
+     *       the rounded-rectangle node boxes of diagrams.</li>
+     * </ul>
+     * <p>All boxes are per subpath: a card diagram draws every card as one subpath of
+     * a single path, so the overall box of such a path spans the whole diagram.</p>
      *
      * @param pdfName   the PDF file path
      * @param pageCount expected page count (from the already parsed veraPDF document)
-     * @return map of page number (0-based) to fill boxes; never null
+     * @return the three box maps by page number (0-based); never null
      */
-    private static Map<Integer, List<BoundingBox>> extractPageFillBoxes(String pdfName, int pageCount) {
-        Map<Integer, List<BoundingBox>> pageFillBoxes = new HashMap<>();
+    private static PathBoxBundle extractPagePathBoxes(String pdfName, int pageCount) {
+        PathBoxBundle bundle = new PathBoxBundle();
         try (org.apache.pdfbox.pdmodel.PDDocument boxDocument = Loader.loadPDF(new File(pdfName))) {
             int pages = Math.min(pageCount, boxDocument.getNumberOfPages());
             for (int pageNumber = 0; pageNumber < pages; pageNumber++) {
-                List<BoundingBox> pageBoxes = new ArrayList<>();
+                List<BoundingBox> fillBoxes = new ArrayList<>();
+                List<BoundingBox> curvedClosedPathBoxes = new ArrayList<>();
                 try {
                     PDPage page = boxDocument.getPage(pageNumber);
                     for (GetDrawings.Drawing drawing : GetDrawings.getDrawings(page, pageNumber)) {
-                        if (drawing.type != GetDrawings.PaintType.FILL
-                                && drawing.type != GetDrawings.PaintType.FILL_STROKE) {
-                            continue;
-                        }
                         if (!drawing.closePath || drawing.rect == null) {
                             continue;
                         }
@@ -1303,22 +1313,46 @@ public class DocumentProcessor {
                         // needed.  Previously the values were mirrored, which moved
                         // fallback arrowhead fills to the wrong side of the page and
                         // made the PDFBox fallback fail for merged arrowheads.
-                        pageBoxes.add(new BoundingBox(pageNumber,
+                        BoundingBox box = new BoundingBox(pageNumber,
                                 drawing.rect.x0, drawing.rect.y0,
-                                drawing.rect.x1, drawing.rect.y1));
+                                drawing.rect.x1, drawing.rect.y1);
+                        if (drawing.type == GetDrawings.PaintType.FILL
+                                || drawing.type == GetDrawings.PaintType.FILL_STROKE) {
+                            fillBoxes.add(box);
+                        }
+                        if (!drawing.hasCurve) {
+                            continue;
+                        }
+                        if (drawing.subpathRects.isEmpty()) {
+                            curvedClosedPathBoxes.add(box);
+                        } else {
+                            for (GetDrawings.Rect subRect : drawing.subpathRects) {
+                                curvedClosedPathBoxes.add(new BoundingBox(pageNumber,
+                                        subRect.x0, subRect.y0, subRect.x1, subRect.y1));
+                            }
+                        }
                     }
                 } catch (IOException e) {
-                    LOGGER.log(Level.WARNING, "Failed to extract fill drawings for page " + (pageNumber + 1), e);
+                    LOGGER.log(Level.WARNING, "Failed to extract path drawings for page " + (pageNumber + 1), e);
                 }
-                if (!pageBoxes.isEmpty()) {
-                    pageFillBoxes.put(pageNumber, pageBoxes);
+                if (!fillBoxes.isEmpty()) {
+                    bundle.fillBoxes.put(pageNumber, fillBoxes);
+                }
+                if (!curvedClosedPathBoxes.isEmpty()) {
+                    bundle.curvedClosedPathBoxes.put(pageNumber, curvedClosedPathBoxes);
                 }
             }
         } catch (IOException e) {
-            LOGGER.log(Level.WARNING, "Failed to load " + displayName(pdfName) + " for fill extraction; "
+            LOGGER.log(Level.WARNING, "Failed to load " + displayName(pdfName) + " for path extraction; "
                     + "arrowheads will rely on artifacts only", e);
         }
-        return pageFillBoxes;
+        return bundle;
+    }
+
+    /** Filled-path and closed curve-path fallback boxes per page, see {@link #extractPagePathBoxes}. */
+    private static final class PathBoxBundle {
+        private final Map<Integer, List<BoundingBox>> fillBoxes = new HashMap<>();
+        private final Map<Integer, List<BoundingBox>> curvedClosedPathBoxes = new HashMap<>();
     }
 
     /**

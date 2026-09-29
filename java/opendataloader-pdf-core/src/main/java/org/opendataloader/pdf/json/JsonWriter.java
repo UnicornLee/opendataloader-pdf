@@ -715,10 +715,13 @@ public class JsonWriter {
                         paragraphMap.put(JsonName.HEIGHT, block.getHeight());
                         paragraphMap.put(JsonName.MARGIN_TOP, marginTop(lineBottomY[0] - block.getTopY()));
                         List<Map<String, Object>> lineList = new ArrayList<>();
+                        final List<Double> lineFontSizes = new ArrayList<>();
                         block.getLines().forEach(line -> {
+                            double lineFontSize = computeLineFontSize(line.getTextChunks());
+                            lineFontSizes.add(lineFontSize);
                             Map<String, Object> textMap = new HashMap<>();
                             textMap.put(JsonName.ITEM_TYPE, "text");
-                            textMap.put(JsonName.FONT_UNDERLINE_SIZE, line.getFontSize());
+                            textMap.put(JsonName.FONT_UNDERLINE_SIZE, lineFontSize);
                             textMap.put(JsonName.X0, line.getLeftX());
                             textMap.put(JsonName.X1, line.getRightX());
                             textMap.put(JsonName.Y0, height - line.getTopY());
@@ -731,6 +734,9 @@ public class JsonWriter {
                             lineList.add(textMap);
                             lineBottomY[0] = line.getBottomY();
                         });
+                        if (!lineFontSizes.isEmpty()) {
+                            paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, computeFontSizeFromCollection(lineFontSizes));
+                        }
                         paragraphMap.put(JsonName.CONTENT, lineList);
                         headingList.add(paragraphMap);
                         lineBottomY[0] = block.getBottomY();
@@ -758,10 +764,13 @@ public class JsonWriter {
                     paragraphMap.put(JsonName.HEIGHT, listItem.getHeight());
                     paragraphMap.put(JsonName.MARGIN_TOP, marginTop(lineBottomY[0] - listItem.getTopY()));
                     List<Map<String, Object>> lineList = new ArrayList<>();
+                    final List<Double> lineFontSizes = new ArrayList<>();
                     listItem.getLines().forEach(line -> {
+                        double lineFontSize = computeLineFontSize(line.getTextChunks());
+                        lineFontSizes.add(lineFontSize);
                         Map<String, Object> textMap = new HashMap<>();
                         textMap.put(JsonName.ITEM_TYPE, "text");
-                        textMap.put(JsonName.FONT_UNDERLINE_SIZE, line.getFontSize());
+                        textMap.put(JsonName.FONT_UNDERLINE_SIZE, lineFontSize);
                         textMap.put(JsonName.X0, line.getLeftX());
                         textMap.put(JsonName.X1, line.getRightX());
                         textMap.put(JsonName.Y0, height - line.getTopY());
@@ -774,6 +783,9 @@ public class JsonWriter {
                         lineList.add(textMap);
                         lineBottomY[0] = line.getBottomY();
                     });
+                    if (!lineFontSizes.isEmpty()) {
+                        paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, computeFontSizeFromCollection(lineFontSizes));
+                    }
                     paragraphMap.put(JsonName.CONTENT, lineList);
                     list.add(paragraphMap);
                     lineBottomY[0] = listItem.getBottomY();
@@ -801,10 +813,13 @@ public class JsonWriter {
                         paragraphMap.put(JsonName.HEIGHT, block.getHeight());
                         paragraphMap.put(JsonName.MARGIN_TOP, marginTop(lineBottomY[0] - block.getTopY()));
                         List<Map<String, Object>> lineList = new ArrayList<>();
+                        final List<Double> lineFontSizes = new ArrayList<>();
                         block.getLines().forEach(line -> {
+                            double lineFontSize = computeLineFontSize(line.getTextChunks());
+                            lineFontSizes.add(lineFontSize);
                             Map<String, Object> textMap = new HashMap<>();
                             textMap.put(JsonName.ITEM_TYPE, "text");
-                            textMap.put(JsonName.FONT_UNDERLINE_SIZE, line.getFontSize());
+                            textMap.put(JsonName.FONT_UNDERLINE_SIZE, lineFontSize);
                             textMap.put(JsonName.X0, line.getLeftX());
                             textMap.put(JsonName.X1, line.getRightX());
                             textMap.put(JsonName.Y0, height - line.getTopY());
@@ -817,6 +832,9 @@ public class JsonWriter {
                             lineList.add(textMap);
                             lineBottomY[0] = line.getBottomY();
                         });
+                        if (!lineFontSizes.isEmpty()) {
+                            paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, computeFontSizeFromCollection(lineFontSizes));
+                        }
                         paragraphMap.put(JsonName.CONTENT, lineList);
                         captionList.add(paragraphMap);
                         lineBottomY[0] = block.getBottomY();
@@ -834,11 +852,12 @@ public class JsonWriter {
                     if (tocItem instanceof SemanticTOCI) {
                         SemanticTOCI semanticTOCI = (SemanticTOCI) tocItem;
                         semanticTOCI.getLines().forEach(line -> {
+                            double lineFontSize = computeLineFontSize(line.getTextChunks());
                             Map<String, Object> paragraphMap = new HashMap<>();
                             paragraphMap.put(JsonName.ITEM_TYPE, "text");
                             paragraphMap.put(JsonName.SOURCE_TYPE, JsonName.SOURCE_TYPE_TOC);
                             paragraphMap.put(JsonName.ID, finalTextId);
-                            paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, line.getFontSize());
+                            paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, lineFontSize);
                             paragraphMap.put(JsonName.X0, line.getLeftX());
                             paragraphMap.put(JsonName.X1, line.getRightX());
                             paragraphMap.put(JsonName.Y0, height - line.getTopY());
@@ -848,7 +867,7 @@ public class JsonWriter {
                             paragraphMap.put(JsonName.MARGIN_TOP, marginTop(lineBottomY[0] - line.getTopY()));
                             Map<String, Object> tocItemMap = new HashMap<>();
                             tocItemMap.put(JsonName.ITEM_TYPE, "text");
-                            tocItemMap.put(JsonName.FONT_UNDERLINE_SIZE, line.getFontSize());
+                            tocItemMap.put(JsonName.FONT_UNDERLINE_SIZE, lineFontSize);
                             tocItemMap.put(JsonName.X0, line.getLeftX());
                             tocItemMap.put(JsonName.X1, line.getRightX());
                             tocItemMap.put(JsonName.Y0, height - line.getTopY());
@@ -905,13 +924,16 @@ public class JsonWriter {
                 List<Map<String, Object>> paragraphContentList = new ArrayList<>();
                 CustomSemanticParagraph customSemanticParagraph = (CustomSemanticParagraph) content;
                 final double[] lineBottomY = {prevBottomY[0]};
+                final List<Double> lineFontSizes = new ArrayList<>();
                 customSemanticParagraph.getTextLines().forEach(textLine -> {
+                    double lineFontSize = computeLineFontSize(textLine.getTextChunks());
+                    lineFontSizes.add(lineFontSize);
                     Map<String, Object> textLineMap = new HashMap<>();
                     textLineMap.put(JsonName.ITEM_TYPE, "text");
                     textLineMap.put(JsonName.IS_THIRD_PARTY, false);
                     textLineMap.put(JsonName.HEIGHT, textLine.getHeight());
                     textLineMap.put(JsonName.WIDTH, textLine.getWidth());
-                    textLineMap.put(JsonName.FONT_UNDERLINE_SIZE, textLine.getFontSize());
+                    textLineMap.put(JsonName.FONT_UNDERLINE_SIZE, lineFontSize);
                     textLineMap.put(JsonName.X0, textLine.getLeftX());
                     textLineMap.put(JsonName.X1, textLine.getRightX());
                     textLineMap.put(JsonName.Y0, height - textLine.getTopY());
@@ -928,6 +950,9 @@ public class JsonWriter {
                 paragraphMap.put(JsonName.ID, finalTextId);
                 paragraphMap.put(JsonName.IS_BOOKMARK, false);
                 paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, customSemanticParagraph.getFontSize());
+                if (!lineFontSizes.isEmpty()) {
+                    paragraphMap.put(JsonName.FONT_UNDERLINE_SIZE, computeFontSizeFromCollection(lineFontSizes));
+                }
                 paragraphMap.put(JsonName.X0, customSemanticParagraph.getLeftX());
                 paragraphMap.put(JsonName.X1, customSemanticParagraph.getRightX());
                 paragraphMap.put(JsonName.Y0, height - customSemanticParagraph.getTopY());
@@ -1769,6 +1794,38 @@ public class JsonWriter {
             return exactForKey.get(modeKey);
         }
         return sum / sizes.length;
+    }
+
+    /**
+     * Computes a representative font size for a single text line from its chunks:
+     * the unique mode of the chunks' font sizes (rounded to 3 decimals), otherwise
+     * their mean. Returns {@code 0.0} for an empty chunk list.
+     */
+    private static double computeLineFontSize(List<TextChunk> textChunks) {
+        if (textChunks == null || textChunks.isEmpty()) {
+            return 0.0;
+        }
+        double[] sizes = new double[textChunks.size()];
+        for (int i = 0; i < sizes.length; i++) {
+            sizes[i] = textChunks.get(i).getFontSize();
+        }
+        return computeFontSize(sizes);
+    }
+
+    /**
+     * Computes a representative font size from an already-collected list of line
+     * font sizes: the unique mode, otherwise the mean. Returns {@code 0.0} for an
+     * empty collection.
+     */
+    private static double computeFontSizeFromCollection(List<Double> sizes) {
+        if (sizes == null || sizes.isEmpty()) {
+            return 0.0;
+        }
+        double[] arr = new double[sizes.size()];
+        for (int i = 0; i < arr.length; i++) {
+            arr[i] = sizes.get(i);
+        }
+        return computeFontSize(arr);
     }
 
     public static boolean isChinese(char c) {
