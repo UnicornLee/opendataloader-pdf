@@ -136,6 +136,13 @@ public class ShapeRecognizer {
     /** Bar chart: width variation tolerance between bars. */
     private static final double BAR_WIDTH_VARIATION = 0.35;
     /**
+     * Stacked bar charts: maximum difference (pt) between the stack bottoms of two
+     * columns that still counts as a shared baseline. Bars sit on the x-axis, but the
+     * very short first columns of a chart can be rendered a couple of points off it
+     * (observed 3.3 pt), so the tolerance has to stay above that.
+     */
+    private static final double STACK_BASELINE_TOLERANCE = 5.0;
+    /**
      * Minimum relative variation in bar length (height for vertical bars, width
      * for horizontal bars) required to treat a cluster as a bar chart. A set of
      * bars with nearly identical lengths is usually a table row or decorative
@@ -146,6 +153,95 @@ public class ShapeRecognizer {
      *  group in {@link #groupShapes}. A shape sitting up to this distance below
      *  another shape's top edge (or above its bottom edge) still counts. */
     private static final double SHAPE_GROUP_Y_TOLERANCE = 2.0;
+
+    /**
+     * Rounded-rectangle node boxes (see {@link #recognizeCurvedNodeBoxes}).
+     *
+     * <p>Such a box survives in the content stream only as a closed path with curve
+     * segments; the chunk layer has no line geometry for it. A single curved path can
+     * also be a decorative blob, so at least {@link #MIN_CURVED_NODE_COUNT} of them have
+     * to be present before any of them is treated as a diagram node.</p>
+     */
+    private static final double CURVED_NODE_MIN_SIZE = 15.0;
+    private static final int MIN_CURVED_NODE_COUNT = 2;
+
+    /**
+     * Line-chart recognition (see {@link #applyLineChartTypes}).
+     *
+     * <p>A line chart carries no marker of its own: the straight axis lines are filtered
+     * out of polyline building (see {@link #isStraightChain}), so the only chart-specific
+     * geometry that survives is the bent data path plus the small markers drawn on its
+     * data points. What makes such a path a chart rather than a decorative line is the
+     * axis frame around it, and the absence of the node boxes a flow diagram would have
+     * inside that frame.</p>
+     */
+    /** Minimum width (pt) of the frame enclosing a line chart's data path. */
+    private static final double LINE_CHART_MIN_FRAME_WIDTH = 120.0;
+    /** Minimum height (pt) of the frame enclosing a line chart's data path. */
+    private static final double LINE_CHART_MIN_FRAME_HEIGHT = 40.0;
+    /** Maximum height/width ratio of that frame; taller regions are not plot areas. */
+    private static final double LINE_CHART_MAX_FRAME_ASPECT = 0.6;
+    /** Tolerance (pt) when deciding a shape lies inside the frame. */
+    private static final double LINE_CHART_FRAME_TOLERANCE = 3.0;
+    /** Minimum share of the frame's width that the data path has to span. */
+    private static final double LINE_CHART_MIN_DATA_SPAN_RATIO = 0.5;
+    /** Minimum width (pt) of a polyline that counts as the plot's data path. */
+    private static final double LINE_CHART_MIN_DATA_LENGTH = 40.0;
+    /** Maximum thickness (pt) of a frame piece that can still be one of the plot's axes. */
+    private static final double LINE_CHART_AXIS_MAX_THICKNESS = 8.0;
+    /** Minimum share of the frame's extent an axis piece has to run along. */
+    private static final double LINE_CHART_AXIS_MIN_COVER = 0.7;
+    /** Maximum side (pt) of a shape that counts as a data-point marker. */
+    private static final double LINE_CHART_MARKER_MAX_SIZE = 8.0;
+    /**
+     * Minimum margin (pt) between a data-point marker and the frame's edges. Markers
+     * sitting on the frame boundary itself are a table's corner stubs, not data points.
+     */
+    private static final double LINE_CHART_MARKER_INSET = 1.0;
+    /**
+     * Maximum share of a frame edge that a data-path piece may run along before that
+     * edge counts as "hugged". A data path following two or more frame edges is a piece
+     * of the frame itself (measured: the bottom row of a lattice table misread as a plot
+     * because its right and bottom borders look like a bent data path).
+     */
+    private static final double LINE_CHART_MAX_EDGE_HUG = 0.5;
+    /** Minimum width (pt) of a polyline piece that can join a frameless path family. */
+    private static final double LINE_CHART_FAMILY_MIN_PIECE_WIDTH = 15.0;
+    /** Maximum gap (pt) in x between two chained pieces of one path family. */
+    private static final double LINE_CHART_FAMILY_MAX_GAP = 25.0;
+    /** Pieces of one path family may overlap by at most this much (pt) in x. */
+    private static final double LINE_CHART_FAMILY_MAX_OVERLAP = 2.0;
+    /** Maximum vertical discontinuity (pt) allowed where two pieces of a family meet. */
+    private static final double LINE_CHART_FAMILY_MAX_Y_JUMP = 8.0;
+    /** Minimum width (pt) of a path family's overall span. */
+    private static final double LINE_CHART_FAMILY_MIN_WIDTH = 120.0;
+    /**
+     * Minimum height (pt) of a path family's overall span. A real series travels a
+     * visible vertical range; a degenerate flat band is a ruled line or a table row's
+     * fragments (measured: a waterfall chart's baseline band chained into a bogus
+     * family).
+     */
+    private static final double LINE_CHART_FAMILY_MIN_HEIGHT = 20.0;
+    /** Maximum height/width ratio of a path family's overall span; taller groups are diagrams. */
+    private static final double LINE_CHART_FAMILY_MAX_ASPECT = 0.5;
+    /** Maximum width (pt) of a dash rectangle that may belong to a path family. */
+    private static final double LINE_CHART_FAMILY_DASH_MAX_WIDTH = 20.0;
+    /** Maximum height (pt) of a dash rectangle that may belong to a path family. */
+    private static final double LINE_CHART_FAMILY_DASH_MAX_HEIGHT = 12.0;
+    /** A node-sized shape this close (pt) to a path family's span disqualifies it. */
+    private static final double LINE_CHART_FAMILY_NODE_MARGIN = 3.0;
+    /** Minimum width (pt) of a shape that looks like a diagram node. */
+    private static final double LINE_CHART_NODE_MIN_WIDTH = 15.0;
+    /** Minimum height (pt) of a shape that looks like a diagram node. */
+    private static final double LINE_CHART_NODE_MIN_HEIGHT = 8.0;
+    /**
+     * How many node-like shapes may sit inside the frame before the region is read as a flow
+     * diagram or a table instead of a plot. The data path itself is excluded from the count;
+     * a plot's frame encloses nothing but the path and its markers, so any node-sized shape
+     * inside it means the frame is something else (measured: a chart grid's cell outlines, a
+     * table's frame, a diagram's box).
+     */
+    private static final int LINE_CHART_MAX_NODE_LIKE_SHAPES = 0;
 
     /**
      * Pie-chart recognition from the PDFBox fill-box fallback source.
@@ -225,6 +321,23 @@ public class ShapeRecognizer {
      * @return the list of shapes found per page
      */
     public static List<List<ShapeChunk>> recognize(IDocument document, Map<Integer, List<BoundingBox>> pageFillBoxes) {
+        return recognize(document, pageFillBoxes, null);
+    }
+
+    /**
+     * Same as {@link #recognize(IDocument, Map)}, with one additional fallback source
+     * extracted from the raw PDF content stream: {@code pageCurvedClosedPathBoxes} —
+     * closed paths that contain curve segments. These are the rounded-rectangle node
+     * boxes of diagrams, which the chunk layer does not expose as line geometry at all.
+     *
+     * @param document                  the already-parsed document
+     * @param pageFillBoxes             per-page filled-path boxes, or null
+     * @param pageCurvedClosedPathBoxes per-page closed curve-path boxes, or null
+     * @return the list of shapes found per page
+     */
+    public static List<List<ShapeChunk>> recognize(IDocument document,
+                                                   Map<Integer, List<BoundingBox>> pageFillBoxes,
+                                                   Map<Integer, List<BoundingBox>> pageCurvedClosedPathBoxes) {
         if (document == null) {
             return Collections.emptyList();
         }
@@ -233,7 +346,9 @@ public class ShapeRecognizer {
         for (int pageNumber = 0; pageNumber < pages; pageNumber++) {
             List<IChunk> artifacts = document.getArtifacts(pageNumber);
             List<BoundingBox> fillBoxes = pageFillBoxes == null ? null : pageFillBoxes.get(pageNumber);
-            List<ShapeChunk> shapes = recognizePage(pageNumber, artifacts, fillBoxes);
+            List<BoundingBox> curvedClosedPathBoxes = pageCurvedClosedPathBoxes == null
+                    ? null : pageCurvedClosedPathBoxes.get(pageNumber);
+            List<ShapeChunk> shapes = recognizePage(pageNumber, artifacts, fillBoxes, curvedClosedPathBoxes);
             if (artifacts != null && !shapes.isEmpty()) {
                 artifacts.addAll(shapes);
             }
@@ -271,10 +386,24 @@ public class ShapeRecognizer {
      * @return a list of new shape chunks; never null
      */
     public static List<ShapeChunk> recognizePage(int pageNumber, List<IChunk> artifacts, List<BoundingBox> fillBoxes) {
+        return recognizePage(pageNumber, artifacts, fillBoxes, null);
+    }
+
+    /**
+     * Recognizes shapes on a single page, see {@link #recognize(IDocument, Map, Map)}
+     * for the extra path-box fallback source.
+     *
+     * @param pageNumber              the 0-based page number
+     * @param artifacts               the raw page artifacts (may be null)
+     * @param fillBoxes               raw filled-path boxes (y-up), or null
+     * @param curvedClosedPathBoxes   raw closed curve-path boxes (y-up), or null
+     * @return a list of new shape chunks; never null
+     */
+    public static List<ShapeChunk> recognizePage(int pageNumber, List<IChunk> artifacts, List<BoundingBox> fillBoxes,
+                                                 List<BoundingBox> curvedClosedPathBoxes) {
         if (artifacts == null || artifacts.isEmpty()) {
             return Collections.emptyList();
         }
-
         List<LineChunk> allLines = new ArrayList<>();
         List<BoundingBox> filledArtBoxes = new ArrayList<>();
         for (IChunk chunk : artifacts) {
@@ -312,7 +441,11 @@ public class ShapeRecognizer {
         }
 
         if (allLines.isEmpty()) {
-            return Collections.emptyList();
+            // A diagram may be drawn with rounded rectangles only: such a page has no line
+            // geometry at all, and the closed curve paths are its only shape source.
+            List<ShapeChunk> nodeShapes = new ArrayList<>();
+            nodeShapes.addAll(recognizeCurvedNodeBoxes(pageNumber, curvedClosedPathBoxes, nodeShapes));
+            return nodeShapes;
         }
 
         List<ShapeChunk> shapes = new ArrayList<>();
@@ -342,12 +475,440 @@ public class ShapeRecognizer {
         // the bar-chart pass so already recognised bars are excluded from pie candidates.
         shapes.addAll(recognizePieChartsFromFillBoxes(pageNumber, fillBoxes, shapes));
         shapes.addAll(recognizePolylines(pageNumber, thinLines));
+        // Rounded-rectangle node boxes survive only as closed curve paths in the content
+        // stream; the chunk layer has no line geometry for them. Turn the box-sized ones
+        // into rectangles so diagram regions can form around them.
+        shapes.addAll(recognizeCurvedNodeBoxes(pageNumber, curvedClosedPathBoxes, shapes));
         // Single-segment lines that bridge two existing shapes are likely arrows/connectors.
         // They are too short to form a polyline on their own but are important for
         // reconstructing flowcharts and diagrams.
         shapes.addAll(recognizeConnectorLines(pageNumber, thinLines, shapes, filledArtBoxes, fillBoxes));
+        applyLineChartTypes(shapes);
+        applyPathFamilyChartTypes(shapes);
 
         return shapes;
+    }
+
+    /**
+     * Retypes the data path of every line chart as {@link ShapeChunk#TYPE_LINE_CHART}.
+     *
+     * <p>A line chart is not recognizable from one shape alone, so the decision needs the
+     * whole page's shape list: a wide, flat polyline acts as the plot's axis frame, and a
+     * bent polyline that spans most of that frame is its data path. Two further guards keep
+     * flow diagrams and tables out:</p>
+     * <ul>
+     *   <li>the frame must contain a small marker (a data-point symbol);</li>
+     *   <li>the frame must not enclose node-sized shapes — a diagram's boxes, or a table's
+     *       cell outlines, would show up there (see
+     *       {@link #LINE_CHART_MAX_NODE_LIKE_SHAPES}).</li>
+     * </ul>
+     *
+     * <p>The data paths keep their geometry and only change type, so downstream code that
+     * counts shapes per type sees one polyline less and one chart more.</p>
+     */
+    private static void applyLineChartTypes(List<ShapeChunk> shapes) {
+        List<ShapeChunk> frames = new ArrayList<>();
+        for (ShapeChunk shape : shapes) {
+            if (isLineChartFrame(shape)) {
+                frames.add(shape);
+            }
+        }
+        if (frames.isEmpty()) {
+            return;
+        }
+        for (ShapeChunk frame : frames) {
+            if (isFrameInsideAnotherFrame(frame, frames)) {
+                // Nested frames (a chart grid, a table with merged cells): the outer frame is the
+                // region, and judging the inner one lets a small piece of it pass as a "plot".
+                continue;
+            }
+            if (!hasPlotAxes(frame)) {
+                continue;
+            }
+            ShapeChunk dataPath = soleDataPath(shapes, frame);
+            if (dataPath == null) {
+                continue;
+            }
+            for (int i = 0; i < shapes.size(); i++) {
+                // Identity comparison: ShapeChunk.equals() compares the geometry, and a plot can
+                // contain several identical pieces.
+                if (shapes.get(i) == dataPath) {
+                    shapes.set(i, new ShapeChunk(dataPath.getBoundingBox(), ShapeChunk.TYPE_LINE_CHART,
+                            dataPath.getColor(), dataPath.getComponentCount(), dataPath.getComponentBBoxes()));
+                    break;
+                }
+            }
+        }
+    }
+
+    /**
+     * Retypes frameless path families as {@link ShapeChunk#TYPE_LINE_CHART}.
+     *
+     * <p>Some plots draw their series as several end-to-end polylines (the renderer splits
+     * the path at dash boundaries), interleaved with the small filled rectangles those dashes
+     * are made of, and draw no axis frame at all. Such a family is recognized when:</p>
+     * <ul>
+     *   <li>at least two substantial polylines chain in x — mostly disjoint, advancing, with
+     *   a small gap and no vertical jump at the joints — into a wide, flat span;</li>
+     *   <li>at least one dash-sized rectangle sits on the family's span (the dashes a real
+     *   series is stroked with; plain diagram connectors do not have them);</li>
+     *   <li>no node-sized shape comes near the span — a diagram's boxes would.</li>
+     * </ul>
+     *
+     * <p>The family's pieces and its dashes are replaced by a single composite chunk (union
+     * box, all piece boxes as components), so downstream processors see one chart covering
+     * the whole series, not scattered fragments.</p>
+     */
+    private static void applyPathFamilyChartTypes(List<ShapeChunk> shapes) {
+        List<ShapeChunk> pieces = new ArrayList<>();
+        for (ShapeChunk shape : shapes) {
+            if (ShapeChunk.TYPE_POLYLINE.equals(shape.getShapeType())
+                    && shape.getBoundingBox() != null && !shape.getBoundingBox().isEmpty()
+                    && shape.getBoundingBox().getWidth() >= LINE_CHART_FAMILY_MIN_PIECE_WIDTH) {
+                pieces.add(shape);
+            }
+        }
+        if (pieces.size() < 2) {
+            return;
+        }
+        pieces.sort(Comparator.comparingDouble(shape -> shape.getBoundingBox().getLeftX()));
+
+        List<ShapeChunk> consumed = new ArrayList<>();
+        List<ShapeChunk> family = new ArrayList<>();
+        for (ShapeChunk piece : pieces) {
+            if (!consumed.contains(piece) && !family.isEmpty()) {
+                ShapeChunk tail = family.get(family.size() - 1);
+                if (!chainLink(tail.getBoundingBox(), piece.getBoundingBox())) {
+                    finishFamily(shapes, family, consumed);
+                    family = new ArrayList<>();
+                }
+            }
+            if (!consumed.contains(piece)) {
+                family.add(piece);
+            }
+        }
+        finishFamily(shapes, family, consumed);
+    }
+
+    /** True when {@code next} continues the chain started by {@code prev} in x and y. */
+    private static boolean chainLink(BoundingBox prev, BoundingBox next) {
+        double gap = next.getLeftX() - prev.getRightX();
+        if (gap > LINE_CHART_FAMILY_MAX_GAP || gap < -LINE_CHART_FAMILY_MAX_OVERLAP) {
+            return false;
+        }
+        double yOverlap = intervalOverlap(prev.getBottomY(), prev.getTopY(),
+                next.getBottomY(), next.getTopY());
+        if (yOverlap >= 2.0) {
+            return true;
+        }
+        double yJump = Math.max(next.getBottomY() - prev.getTopY(), prev.getBottomY() - next.getTopY());
+        return yJump <= LINE_CHART_FAMILY_MAX_Y_JUMP;
+    }
+
+    /** Validates one chained family and, if it is a frameless plot, consumes its pieces. */
+    private static void finishFamily(List<ShapeChunk> shapes, List<ShapeChunk> family,
+                                     List<ShapeChunk> consumed) {
+        if (family.size() < 2) {
+            family.clear();
+            return;
+        }
+        BoundingBox union = new BoundingBox(family.get(0).getBoundingBox().getPageNumber());
+        for (ShapeChunk piece : family) {
+            union.union(piece.getBoundingBox());
+        }
+        if (union.getWidth() < LINE_CHART_FAMILY_MIN_WIDTH
+                || union.getHeight() < LINE_CHART_FAMILY_MIN_HEIGHT
+                || union.getHeight() > LINE_CHART_FAMILY_MAX_ASPECT * union.getWidth()) {
+            family.clear();
+            return;
+        }
+        List<ShapeChunk> members = new ArrayList<>(family);
+        // The dashes stroked along the series: small rectangles sitting on the span.
+        List<ShapeChunk> dashes = new ArrayList<>();
+        for (ShapeChunk shape : shapes) {
+            if (members.contains(shape) || consumed.contains(shape)
+                    || !ShapeChunk.TYPE_RECTANGLE.equals(shape.getShapeType())) {
+                continue;
+            }
+            BoundingBox box = shape.getBoundingBox();
+            if (box == null || box.isEmpty()
+                    || box.getWidth() > LINE_CHART_FAMILY_DASH_MAX_WIDTH
+                    || box.getHeight() > LINE_CHART_FAMILY_DASH_MAX_HEIGHT) {
+                continue;
+            }
+            if (box.getLeftX() >= union.getLeftX() - LINE_CHART_FAMILY_NODE_MARGIN
+                    && box.getRightX() <= union.getRightX() + LINE_CHART_FAMILY_NODE_MARGIN
+                    && intervalOverlap(box.getBottomY(), box.getTopY(),
+                            union.getBottomY(), union.getTopY()) >= 2.0) {
+                dashes.add(shape);
+            }
+        }
+        if (dashes.isEmpty()) {
+            family.clear();
+            return;
+        }
+        // Node-sized shapes near the span mean a diagram, not a plot.
+        for (ShapeChunk shape : shapes) {
+            if (members.contains(shape) || dashes.contains(shape) || consumed.contains(shape)) {
+                continue;
+            }
+            BoundingBox box = shape.getBoundingBox();
+            if (box == null || box.isEmpty()
+                    || box.getWidth() < LINE_CHART_NODE_MIN_WIDTH
+                    || box.getHeight() < LINE_CHART_NODE_MIN_HEIGHT) {
+                continue;
+            }
+            if (intervalOverlap(box.getLeftX(), box.getRightX(),
+                    union.getLeftX() - LINE_CHART_FAMILY_NODE_MARGIN,
+                    union.getRightX() + LINE_CHART_FAMILY_NODE_MARGIN) > 0
+                    && intervalOverlap(box.getBottomY(), box.getTopY(),
+                            union.getBottomY() - LINE_CHART_FAMILY_NODE_MARGIN,
+                            union.getTopY() + LINE_CHART_FAMILY_NODE_MARGIN) > 0) {
+                family.clear();
+                return;
+            }
+        }
+        members.addAll(dashes);
+        int componentCount = 0;
+        List<BoundingBox> components = new ArrayList<>();
+        for (ShapeChunk member : members) {
+            componentCount += member.getComponentCount();
+            components.add(member.getBoundingBox());
+        }
+        ShapeChunk composite = new ShapeChunk(union, ShapeChunk.TYPE_LINE_CHART,
+                family.get(0).getColor(), componentCount, components);
+        shapes.removeAll(members);
+        shapes.add(composite);
+        consumed.addAll(members);
+        family.clear();
+    }
+
+    /**
+     * The single bent path spanning most of {@code frame}'s width, or {@code null} when the
+     * frame does not have exactly one — a plot draws one path per series, so several wide flat
+     * polylines inside the same frame mean a table grid or a diagram — or when the chart
+     * context is missing (no data-point marker, or a node-sized shape inside the frame).
+     */
+    private static ShapeChunk soleDataPath(List<ShapeChunk> shapes, ShapeChunk frame) {
+        BoundingBox frameBox = frame.getBoundingBox();
+        if (frameBox == null || frameBox.isEmpty()) {
+            return null;
+        }
+        // A plot carries exactly one substantial polyline: its data path. Everything else inside
+        // the frame is a small data-point marker. Several wide polylines mean a chart grid or a
+        // table drawn with lines, not a plot (measured: pages whose frames enclose two to seven
+        // further wide polylines).
+        ShapeChunk found = null;
+        int substantial = 0;
+        for (ShapeChunk shape : shapes) {
+            if (shape == frame || !ShapeChunk.TYPE_POLYLINE.equals(shape.getShapeType())) {
+                continue;
+            }
+            BoundingBox box = shape.getBoundingBox();
+            if (box == null || box.isEmpty() || !isInside(box, frameBox, LINE_CHART_FRAME_TOLERANCE)) {
+                continue;
+            }
+            if (box.getWidth() < LINE_CHART_MIN_DATA_LENGTH) {
+                continue;
+            }
+            substantial++;
+            found = shape;
+        }
+        if (substantial != 1 || found == null) {
+            return null;
+        }
+        if (found.getBoundingBox().getWidth() < LINE_CHART_MIN_DATA_SPAN_RATIO * frameBox.getWidth()) {
+            return null;
+        }
+        if (hugsFrameEdges(found, frameBox)) {
+            // The "data path" is a piece of the frame itself (a table row's right and
+            // bottom borders read as a bent path); a plotted series stays clear of the
+            // frame's edges.
+            return null;
+        }
+        if (!hasDataMarker(shapes, frame, frameBox)) {
+            return null;
+        }
+        return countNodeLikeShapes(shapes, frame, found, frameBox) == LINE_CHART_MAX_NODE_LIKE_SHAPES ? found : null;
+    }
+
+    /**
+     * True when the frame's pieces include a vertical run along (nearly) its full height and a
+     * horizontal run along (nearly) its full width — the two axes of a plot. Frames assembled
+     * from short pieces (a table grid, a diagram drawn box by box) fail this test.
+     */
+    private static boolean hasPlotAxes(ShapeChunk frame) {
+        BoundingBox box = frame.getBoundingBox();
+        if (box == null || box.isEmpty()) {
+            return false;
+        }
+        boolean vertical = false;
+        boolean horizontal = false;
+        for (BoundingBox part : frame.getComponentBBoxes()) {
+            if (part == null || part.isEmpty()) {
+                continue;
+            }
+            if (part.getWidth() <= LINE_CHART_AXIS_MAX_THICKNESS
+                    && part.getHeight() >= LINE_CHART_AXIS_MIN_COVER * box.getHeight()) {
+                vertical = true;
+            }
+            if (part.getHeight() <= LINE_CHART_AXIS_MAX_THICKNESS
+                    && part.getWidth() >= LINE_CHART_AXIS_MIN_COVER * box.getWidth()) {
+                horizontal = true;
+            }
+        }
+        return vertical && horizontal;
+    }
+
+    /**
+     * True when {@code frame} lies inside another frame candidate: only the outer one is then
+     * judged, otherwise a small piece of a chart grid or a table passes as a plot.
+     */    private static boolean isFrameInsideAnotherFrame(ShapeChunk frame, List<ShapeChunk> frames) {
+        for (ShapeChunk other : frames) {
+            if (other == frame) {
+                continue;
+            }
+            if (isInside(frame.getBoundingBox(), other.getBoundingBox(), LINE_CHART_FRAME_TOLERANCE)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** A wide, flat polyline large enough to be the frame of a plot area. */
+    private static boolean isLineChartFrame(ShapeChunk shape) {
+        if (!ShapeChunk.TYPE_POLYLINE.equals(shape.getShapeType())) {
+            return false;
+        }
+        BoundingBox box = shape.getBoundingBox();
+        if (box == null || box.isEmpty()) {
+            return false;
+        }
+        double width = box.getWidth();
+        double height = box.getHeight();
+        return width >= LINE_CHART_MIN_FRAME_WIDTH && height >= LINE_CHART_MIN_FRAME_HEIGHT
+                && height <= LINE_CHART_MAX_FRAME_ASPECT * width;
+    }
+
+    /** True when the frame encloses a data-point marker (a small polygon on the path). */
+    private static boolean hasDataMarker(List<ShapeChunk> shapes, ShapeChunk frame, BoundingBox frameBox) {
+        for (ShapeChunk shape : shapes) {
+            if (shape == frame) {
+                continue;
+            }
+            BoundingBox box = shape.getBoundingBox();
+            if (box == null || box.isEmpty()
+                    || box.getWidth() > LINE_CHART_MARKER_MAX_SIZE
+                    || box.getHeight() > LINE_CHART_MARKER_MAX_SIZE) {
+                continue;
+            }
+            if (isStrictlyInside(box, frameBox, LINE_CHART_MARKER_INSET)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * True when {@code inner} sits at least {@code margin} points clear of every edge
+     * of {@code outer} — unlike {@link #isInside}, shapes touching the boundary fail.
+     */
+    private static boolean isStrictlyInside(BoundingBox inner, BoundingBox outer, double margin) {
+        return inner.getLeftX() >= outer.getLeftX() + margin
+                && inner.getRightX() <= outer.getRightX() - margin
+                && inner.getBottomY() >= outer.getBottomY() + margin
+                && inner.getTopY() <= outer.getTopY() - margin;
+    }
+
+    /**
+     * True when {@code dataPath} has pieces running along two or more edges of
+     * {@code frameBox}. A plotted series lives strictly inside the plot area, so a path
+     * that hugs the frame's edges is a fragment of the frame itself — measured on a
+     * lattice table whose bottom row's borders (right edge + bottom edge + corner
+     * stubs) were misread as the bent data path of a plot.
+     */
+    private static boolean hugsFrameEdges(ShapeChunk dataPath, BoundingBox frameBox) {
+        List<BoundingBox> parts = dataPath.getComponentBBoxes();
+        if (parts == null || parts.isEmpty()) {
+            return false;
+        }
+        double leftX = frameBox.getLeftX();
+        double rightX = frameBox.getRightX();
+        double bottomY = frameBox.getBottomY();
+        double topY = frameBox.getTopY();
+        boolean left = false;
+        boolean right = false;
+        boolean bottom = false;
+        boolean top = false;
+        for (BoundingBox part : parts) {
+            if (part == null || part.isEmpty()) {
+                continue;
+            }
+            double centerX = 0.5 * (part.getLeftX() + part.getRightX());
+            double centerY = 0.5 * (part.getBottomY() + part.getTopY());
+            if (part.getWidth() <= 2.0 * LINE_CHART_FRAME_TOLERANCE
+                    && Math.abs(centerX - leftX) <= LINE_CHART_FRAME_TOLERANCE
+                    && intervalOverlap(part.getBottomY(), part.getTopY(), bottomY, topY)
+                            >= LINE_CHART_MAX_EDGE_HUG * frameBox.getHeight()) {
+                left = true;
+            }
+            if (part.getWidth() <= 2.0 * LINE_CHART_FRAME_TOLERANCE
+                    && Math.abs(centerX - rightX) <= LINE_CHART_FRAME_TOLERANCE
+                    && intervalOverlap(part.getBottomY(), part.getTopY(), bottomY, topY)
+                            >= LINE_CHART_MAX_EDGE_HUG * frameBox.getHeight()) {
+                right = true;
+            }
+            if (part.getHeight() <= 2.0 * LINE_CHART_FRAME_TOLERANCE
+                    && Math.abs(centerY - bottomY) <= LINE_CHART_FRAME_TOLERANCE
+                    && intervalOverlap(part.getLeftX(), part.getRightX(), leftX, rightX)
+                            >= LINE_CHART_MAX_EDGE_HUG * frameBox.getWidth()) {
+                bottom = true;
+            }
+            if (part.getHeight() <= 2.0 * LINE_CHART_FRAME_TOLERANCE
+                    && Math.abs(centerY - topY) <= LINE_CHART_FRAME_TOLERANCE
+                    && intervalOverlap(part.getLeftX(), part.getRightX(), leftX, rightX)
+                            >= LINE_CHART_MAX_EDGE_HUG * frameBox.getWidth()) {
+                top = true;
+            }
+        }
+        int hugged = (left ? 1 : 0) + (right ? 1 : 0) + (bottom ? 1 : 0) + (top ? 1 : 0);
+        return hugged >= 2;
+    }
+
+    /** Length of the intersection of the intervals [a0, a1] and [b0, b1]. */
+    private static double intervalOverlap(double a0, double a1, double b0, double b1) {
+        return Math.max(0.0, Math.min(a1, b1) - Math.max(a0, b0));
+    }
+
+    /**
+     * Counts the node-sized shapes inside the frame, ignoring the frame itself and the data
+     * path under test: two or more of them mean the region is a diagram or a table, not a plot.
+     */
+    private static int countNodeLikeShapes(List<ShapeChunk> shapes, ShapeChunk frame, ShapeChunk dataPath,
+                                           BoundingBox frameBox) {
+        int count = 0;
+        for (ShapeChunk shape : shapes) {
+            if (shape == frame || shape == dataPath) {
+                continue;
+            }
+            BoundingBox box = shape.getBoundingBox();
+            if (box == null || box.isEmpty()) {
+                continue;
+            }
+            if (box.getWidth() >= LINE_CHART_NODE_MIN_WIDTH && box.getHeight() >= LINE_CHART_NODE_MIN_HEIGHT
+                    && isInside(box, frameBox, LINE_CHART_FRAME_TOLERANCE)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /** True when {@code inner} lies inside {@code outer} within {@code tolerance} points. */
+    private static boolean isInside(BoundingBox inner, BoundingBox outer, double tolerance) {
+        return inner.getLeftX() >= outer.getLeftX() - tolerance
+                && inner.getRightX() <= outer.getRightX() + tolerance
+                && inner.getBottomY() >= outer.getBottomY() - tolerance
+                && inner.getTopY() <= outer.getTopY() + tolerance;
     }
 
     private static boolean isFilledRectangle(LineChunk line) {
@@ -370,6 +931,24 @@ public class ShapeRecognizer {
 
         Map<String, List<LineChunk>> byColor = groupByColor(filledRects);
         List<ShapeChunk> shapes = new ArrayList<>();
+
+        // Stacked bar charts are assembled across colors first: their segments belong to
+        // different series (colors), so the per-color passes below never see a column as a
+        // whole. The rectangles claimed here are removed from the per-color input.
+        Set<LineChunk> usedInStacks = new HashSet<>();
+        for (List<LineChunk> chart : detectStackedBarColumns(filledRects)) {
+            shapes.add(createShape(pageNumber, chart, ShapeChunk.TYPE_BAR_CHART));
+            usedInStacks.addAll(chart);
+        }
+        if (!usedInStacks.isEmpty()) {
+            List<LineChunk> remainingRects = new ArrayList<>(filledRects.size());
+            for (LineChunk rect : filledRects) {
+                if (!usedInStacks.contains(rect)) {
+                    remainingRects.add(rect);
+                }
+            }
+            byColor = groupByColor(remainingRects);
+        }
 
         for (List<LineChunk> sameColorRects : byColor.values()) {
             // First, detect bar-chart groups (gapped but aligned rectangles).
@@ -468,7 +1047,24 @@ public class ShapeRecognizer {
             return Collections.emptyList();
         }
         List<ShapeChunk> shapes = new ArrayList<>();
-        for (List<LineChunk> group : detectBarGroups(rects)) {
+        // Stacked bar charts are recognized across colors first (see
+        // detectStackedBarColumns); the per-color alignment pass below cannot see a
+        // stack as a whole.
+        Set<LineChunk> usedInStacks = new HashSet<>();
+        for (List<LineChunk> chart : detectStackedBarColumns(rects)) {
+            shapes.add(createShape(pageNumber, chart, ShapeChunk.TYPE_BAR_CHART));
+            usedInStacks.addAll(chart);
+        }
+        List<LineChunk> remaining = rects;
+        if (!usedInStacks.isEmpty()) {
+            remaining = new ArrayList<>(rects.size());
+            for (LineChunk rect : rects) {
+                if (!usedInStacks.contains(rect)) {
+                    remaining.add(rect);
+                }
+            }
+        }
+        for (List<LineChunk> group : detectBarGroups(remaining)) {
             if (group.size() >= MIN_BAR_COUNT && isValidBarGroup(group)) {
                 shapes.add(createShape(pageNumber, group, ShapeChunk.TYPE_BAR_CHART));
             }
@@ -664,6 +1260,247 @@ public class ShapeRecognizer {
     }
 
     /**
+     * Detects <b>stacked</b> bar charts: several equally wide columns standing
+     * side by side with positive gaps between them, where at least one column
+     * consists of two or more vertically contiguous segments that belong to
+     * different series (different fill colors) and all columns share a baseline.
+     *
+     * <p>{@link #detectBarGroups} cannot see those charts: it buckets rectangles by
+     * their baseline, so the segments stacked on top of each other end up in
+     * different buckets and the group never reaches {@link #MIN_BAR_COUNT}. The
+     * columns are therefore assembled first and treated as one bar chart; the
+     * rectangles used here are excluded from the per-color passes.</p>
+     *
+     * <p>Only columns that touch each other vertically inside one stack qualify, and
+     * the recognition is deliberately narrow so that ordinary tables are not
+     * mistaken for charts: the columns have to be separated horizontally, have
+     * similar widths, share a baseline, vary in total height as if encoding values,
+     * and at least one column has to mix two series colors. A table's cell
+     * backgrounds are aligned to the same row boundaries, so their column heights
+     * do not vary and the table is rejected.</p>
+     *
+     * @param rects all filled rectangles of the page (any color)
+     * @return one rectangle list per recognized chart; never null
+     */
+    private static List<List<LineChunk>> detectStackedBarColumns(List<LineChunk> rects) {
+        if (rects == null || rects.size() < 2 * MIN_BAR_COUNT) {
+            return Collections.emptyList();
+        }
+        List<LineChunk> sorted = new ArrayList<>(rects);
+        sorted.sort(Comparator.comparingDouble(LineChunk::getLeftX));
+
+        // 1. Assemble columns: rectangles sharing the same horizontal extent.
+        List<List<LineChunk>> columns = new ArrayList<>();
+        for (LineChunk rect : sorted) {
+            BoundingBox box = rect.getBoundingBox();
+            if (box == null || box.isEmpty()) {
+                continue;
+            }
+            List<LineChunk> target = null;
+            for (List<LineChunk> column : columns) {
+                BoundingBox columnBox = columnBoundingBox(column);
+                if (isSameColumn(columnBox, box)) {
+                    target = column;
+                    break;
+                }
+            }
+            if (target == null) {
+                target = new ArrayList<>();
+                columns.add(target);
+            }
+            target.add(rect);
+        }
+
+        // 2. Keep only columns that form a contiguous stack of similar widths.
+        List<List<LineChunk>> stacks = new ArrayList<>();
+        for (List<LineChunk> column : columns) {
+            if (isColumnStack(column)) {
+                stacks.add(column);
+            }
+        }
+        if (stacks.size() < MIN_BAR_COUNT) {
+            return Collections.emptyList();
+        }
+        stacks.sort(Comparator.comparingDouble(column -> columnBoundingBox(column).getCenterX()));
+
+        // 3. Split into runs of horizontally separated, similarly wide columns so two
+        //    charts on one page (or a chart next to unrelated blocks) stay separate.
+        //    The series-color test is only meaningful when the source layer reports
+        //    colors at all (the PDFBox fill fallback uses a single synthetic color).
+        boolean colorInformationAvailable = countDistinctColors(rects) >= 2;
+        List<List<LineChunk>> charts = new ArrayList<>();
+        List<List<LineChunk>> run = new ArrayList<>();
+        for (List<LineChunk> column : stacks) {
+            if (!run.isEmpty() && !isNextColumnOfRun(columnBoundingBox(run.get(run.size() - 1)),
+                    columnBoundingBox(column))) {
+                addStackedChart(charts, run, colorInformationAvailable);
+                run = new ArrayList<>();
+            }
+            run.add(column);
+        }
+        addStackedChart(charts, run, colorInformationAvailable);
+        return charts;
+    }
+
+    /** Adds {@code run} to {@code charts} when it is a chart (else drops it). */
+    private static void addStackedChart(List<List<LineChunk>> charts, List<List<LineChunk>> run,
+                                        boolean colorInformationAvailable) {
+        if (run.size() < MIN_BAR_COUNT) {
+            return;
+        }
+        // A table whose cells carry fills shares one row grid: every column carries the
+        // same set of segment boundaries, so the columns all have the same signature. A
+        // stacked chart has a different height in (nearly) every column, so the
+        // signatures differ. Reject the shared-grid case as a table, not a chart.
+        if (isSharedGrid(run)) {
+            return;
+        }
+        double minBaseline = Double.MAX_VALUE;
+        double maxBaseline = -Double.MAX_VALUE;
+        double minHeight = Double.MAX_VALUE;
+        double maxHeight = -Double.MAX_VALUE;
+        boolean mixedSeriesColumn = false;
+        for (List<LineChunk> column : run) {
+            BoundingBox columnBox = columnBoundingBox(column);
+            minBaseline = Math.min(minBaseline, columnBox.getBottomY());
+            maxBaseline = Math.max(maxBaseline, columnBox.getBottomY());
+            double height = columnBox.getHeight();
+            minHeight = Math.min(minHeight, height);
+            maxHeight = Math.max(maxHeight, height);
+            if (countDistinctColors(column) >= 2) {
+                mixedSeriesColumn = true;
+            }
+        }
+        // A stacked chart has at least one column that mixes two series colors; a set
+        // of single-colored columns with a shared baseline is an ordinary bar chart
+        // (handled by detectBarGroups) and is left alone here. When the source layer
+        // carries no color information the test is skipped (nothing to compare).
+        if (colorInformationAvailable && !mixedSeriesColumn) {
+            return;
+        }
+        if (maxBaseline - minBaseline > STACK_BASELINE_TOLERANCE) {
+            return;
+        }
+        double avgHeight = (minHeight + maxHeight) / 2.0;
+        if (avgHeight <= 0 || (maxHeight - minHeight) / avgHeight <= BAR_VALUE_VARIATION) {
+            return;
+        }
+        List<LineChunk> chart = new ArrayList<>();
+        for (List<LineChunk> column : run) {
+            chart.addAll(column);
+        }
+        charts.add(chart);
+    }
+
+    /** True when both boxes have (nearly) the same horizontal extent. */
+    private static boolean isSameColumn(BoundingBox a, BoundingBox b) {
+        return Math.abs(a.getLeftX() - b.getLeftX()) <= ADJACENCY_GAP
+                && Math.abs(a.getRightX() - b.getRightX()) <= ADJACENCY_GAP;
+    }
+
+    /**
+     * True when {@code column} is a stack: its segments are vertically contiguous
+     * (no gap larger than {@link #ADJACENCY_GAP}) and have similar widths.
+     */
+    private static boolean isColumnStack(List<LineChunk> column) {
+        if (column.isEmpty()) {
+            return false;
+        }
+        double width = column.get(0).getBoundingBox().getWidth();
+        for (LineChunk segment : column) {
+            BoundingBox box = segment.getBoundingBox();
+            if (box == null || box.isEmpty()) {
+                return false;
+            }
+            if (width > 0 && Math.abs(box.getWidth() - width) / width > BAR_WIDTH_VARIATION) {
+                return false;
+            }
+        }
+        List<LineChunk> byY = new ArrayList<>(column);
+        byY.sort(Comparator.comparingDouble(LineChunk::getBottomY));
+        for (int i = 1; i < byY.size(); i++) {
+            double gap = byY.get(i).getBoundingBox().getBottomY()
+                    - byY.get(i - 1).getBoundingBox().getTopY();
+            if (gap > ADJACENCY_GAP || gap < -ADJACENCY_GAP) {
+                // A real gap (or a full overlap) means these are not stacked segments.
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * True when {@code next} is the following column of the same chart: it lies to
+     * the right, separated by a positive gap, with a similar width.
+     */
+    private static boolean isNextColumnOfRun(BoundingBox previous, BoundingBox next) {
+        double gap = next.getLeftX() - previous.getRightX();
+        if (gap <= 0) {
+            return false;
+        }
+        double width = previous.getWidth();
+        return width <= 0 || Math.abs(next.getWidth() - width) / width <= BAR_WIDTH_VARIATION;
+    }
+
+    /** Number of distinct fill colors among the segments of one column. */
+    private static int countDistinctColors(List<LineChunk> column) {
+        Set<String> keys = new HashSet<>();
+        for (LineChunk segment : column) {
+            keys.add(colorKey(segment.getStrokeColor()));
+        }
+        return keys.size();
+    }
+
+    /**
+     * True when {@code columns} all carry (almost) the same set of segment y
+     * boundaries - the signature of a table whose filled cells share one row grid.
+     *
+     * <p>A stacked bar chart has a different height in nearly every column, so the
+     * column signatures differ; a table's cells align to the same rows, so every
+     * column carries the same boundaries. Rejecting this case stops a zebra-striped
+     * or otherwise filled table from being recognised as a stacked bar chart and then
+     * cropped into an image.</p>
+     */
+    private static boolean isSharedGrid(List<List<LineChunk>> columns) {
+        if (columns.size() < MIN_BAR_COUNT) {
+            return false;
+        }
+        Map<String, Integer> signatureCounts = new HashMap<>();
+        for (List<LineChunk> column : columns) {
+            List<Double> bounds = new ArrayList<>();
+            for (LineChunk segment : column) {
+                BoundingBox box = segment.getBoundingBox();
+                if (box == null || box.isEmpty()) {
+                    continue;
+                }
+                bounds.add(roundBound(box.getBottomY()));
+                bounds.add(roundBound(box.getTopY()));
+            }
+            bounds.sort(Double::compareTo);
+            StringBuilder signature = new StringBuilder();
+            for (Double value : bounds) {
+                signature.append(value).append(';');
+            }
+            signatureCounts.merge(signature.toString(), 1, Integer::sum);
+        }
+        int maxFrequency = 0;
+        for (int count : signatureCounts.values()) {
+            maxFrequency = Math.max(maxFrequency, count);
+        }
+        // Nearly every column sharing one boundary set => a table, not a chart.
+        return maxFrequency >= columns.size() - 1;
+    }
+
+    /** Rounds a coordinate to 0.5 pt so grid-aligned boundaries coincide. */
+    private static double roundBound(double value) {
+        return Math.round(value * 2.0) / 2.0;
+    }
+
+    private static BoundingBox columnBoundingBox(List<LineChunk> column) {
+        return clusterBoundingBox(column);
+    }
+
+    /**
      * Detects groups of rectangles that look like bar charts: aligned along a
      * baseline, similar widths/heights, and regularly spaced (gaps allowed).
      *
@@ -738,6 +1575,61 @@ public class ShapeRecognizer {
         boolean horizontalBarShape = candidateBox.getWidth() >= 2.0 * candidateBox.getHeight()
                 && firstBox.getWidth() >= 2.0 * firstBox.getHeight();
         return sameLeftEdge && sameHeight && reasonableVGap && horizontalBarShape;
+    }
+
+    /**
+     * Turns box-sized closed curve paths into {@link ShapeChunk#TYPE_RECTANGLE} nodes.
+     *
+     * <p>Rounded rectangles are the standard node shape of diagrams (AI infrastructure
+     * charts, card grids), but unlike straight rectangles they produce no line chunks:
+     * the chunk layer only exposes their text, so the whole diagram would otherwise
+     * stay in the text layer. The candidates come from the PDFBox path fallback and are
+     * therefore only trusted when several of them are present and none of them
+     * coincides with an already recognized solid shape (a pie wedge or a curve-shaped
+     * legend blob is not a node).</p>
+     *
+     * @param pageNumber             the 0-based page number
+     * @param curvedClosedPathBoxes  closed curve paths of the page (one box per
+     *                               subpath), or null
+     * @param existingShapes         shapes recognized so far, used to discard
+     *                               candidates that are pieces of them
+     * @return the node rectangles plus one compound group shape; never null
+     */
+    private static List<ShapeChunk> recognizeCurvedNodeBoxes(int pageNumber,
+                                                             List<BoundingBox> curvedClosedPathBoxes,
+                                                             List<ShapeChunk> existingShapes) {
+        if (curvedClosedPathBoxes == null || curvedClosedPathBoxes.size() < MIN_CURVED_NODE_COUNT) {
+            return Collections.emptyList();
+        }
+        List<BoundingBox> candidates = filterShapeCoincidentFills(curvedClosedPathBoxes, existingShapes);
+        if (candidates.size() < MIN_CURVED_NODE_COUNT) {
+            return Collections.emptyList();
+        }
+        List<ShapeChunk> shapes = new ArrayList<>();
+        List<BoundingBox> nodeBoxes = new ArrayList<>();
+        for (BoundingBox candidate : candidates) {
+            if (candidate == null || candidate.isEmpty()
+                    || candidate.getWidth() < CURVED_NODE_MIN_SIZE
+                    || candidate.getHeight() < CURVED_NODE_MIN_SIZE) {
+                continue;
+            }
+            nodeBoxes.add(new BoundingBox(candidate));
+            shapes.add(new ShapeChunk(new BoundingBox(candidate), ShapeChunk.TYPE_RECTANGLE,
+                    null, 1, Collections.singletonList(new BoundingBox(candidate))));
+        }
+        if (nodeBoxes.size() >= MIN_CURVED_NODE_COUNT) {
+            // A card grid draws every card as a separate subpath of one PDF path, so the
+            // individual nodes never overlap and the bbox-overlap grouping cannot see the
+            // grid. One extra compound shape spanning all nodes lets the grouping collect
+            // them into a single diagram region.
+            BoundingBox union = new BoundingBox(nodeBoxes.get(0));
+            for (BoundingBox box : nodeBoxes) {
+                union.union(box);
+            }
+            shapes.add(new ShapeChunk(union, ShapeChunk.TYPE_GROUP,
+                    null, nodeBoxes.size(), new ArrayList<>(nodeBoxes)));
+        }
+        return shapes;
     }
 
     private static List<ShapeChunk> recognizePolylines(int pageNumber, List<LineChunk> thinLines) {

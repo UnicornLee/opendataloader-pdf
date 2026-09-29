@@ -43,6 +43,17 @@ public class ShapeChunk extends InfoChunk {
     public static final String TYPE_PIE_CHART = "pie_chart";
     /** Connected line segments forming a polyline / line chart. */
     public static final String TYPE_POLYLINE = "polyline";
+    /**
+     * The data path of a line chart: a bent run of line segments spanning most of the
+     * plot area enclosed by an axis frame (see {@code ShapeRecognizer}).
+     *
+     * <p>Kept apart from {@link #TYPE_POLYLINE} because a plot has to be cropped as a
+     * chart (axes, tick labels, category labels and data labels included) rather than
+     * left in the text layer as a decorative line. {@code BarChartProcessor} renders any
+     * group carrying this type with the same region logic it uses for bar and pie
+     * charts.</p>
+     */
+    public static final String TYPE_LINE_CHART = "line_chart";
     /** A single line segment that connects two shapes, typically an arrow. */
     public static final String TYPE_ARROW = "arrow";
     /**

@@ -166,6 +166,57 @@ class BarChartProcessorTest {
     }
 
     @Test
+    void stackedBarChartIsNotVetoedAsTableGrid() {
+        List<IObject> pageContents = new ArrayList<>();
+        // Stacked bars in the shape of prospectus p111: two exact-tiling stacks plus
+        // baseline singles. The varying segment bottoms form >= 3 bottom-Y clusters,
+        // which looks like a multi-row table grid unless the stack chains are checked.
+        List<BoundingBox> comps = Arrays.asList(
+                new BoundingBox(0, 100, 100, 120, 130),   // stack 1 lower
+                new BoundingBox(0, 100, 130, 120, 170),   // stack 1 upper, bottom == lower top
+                new BoundingBox(0, 140, 100, 160, 140),   // stack 2 lower
+                new BoundingBox(0, 140, 140, 160, 200),   // stack 2 upper, bottom == lower top
+                new BoundingBox(0, 180, 100, 200, 150),
+                new BoundingBox(0, 220, 100, 240, 180),
+                new BoundingBox(0, 260, 100, 280, 160));
+        ShapeChunk stacked = new ShapeChunk(new BoundingBox(0, 100, 100, 280, 200),
+                ShapeChunk.TYPE_BAR_CHART, GRAY, 1, comps);
+        List<IObject> group = Collections.singletonList(stacked);
+        pageContents.addAll(group);
+
+        CapturingImagesUtils imagesUtils = new CapturingImagesUtils();
+        BarChartProcessor.processBarChartGroups(pageContents, Collections.singletonList(group), imagesUtils, 0);
+
+        Assertions.assertEquals(1, imagesUtils.saved.size(),
+                "Stacked bar chart must be screenshotted, not vetoed as a table grid");
+    }
+
+    @Test
+    void filledCellTableGridIsStillVetoed() {
+        List<IObject> pageContents = new ArrayList<>();
+        // 4 columns x 3 rows of filled cells separated by 2pt grid-line gaps
+        // (20230420 p137-style filled table that the guard protects from cropping).
+        List<BoundingBox> cells = new ArrayList<>();
+        for (int col = 0; col < 4; col++) {
+            double left = 100 + col * 50;
+            cells.add(new BoundingBox(0, left, 100, left + 40, 130));
+            cells.add(new BoundingBox(0, left, 132, left + 40, 162));   // 2pt gap above
+            cells.add(new BoundingBox(0, left, 164, left + 40, 200));   // 2pt gap above
+        }
+        ShapeChunk table = new ShapeChunk(new BoundingBox(0, 100, 100, 290, 200),
+                ShapeChunk.TYPE_BAR_CHART, GRAY, 1, cells);
+        List<IObject> group = Collections.singletonList(table);
+        pageContents.addAll(group);
+
+        CapturingImagesUtils imagesUtils = new CapturingImagesUtils();
+        BarChartProcessor.processBarChartGroups(pageContents, Collections.singletonList(group), imagesUtils, 0);
+
+        Assertions.assertEquals(0, imagesUtils.saved.size(),
+                "Filled-cell table grid must stay vetoed (no screenshot)");
+        Assertions.assertEquals(1, pageContents.size(), "Table contents should be untouched");
+    }
+
+    @Test
     void keepsDistantBarChartGroupsSeparate() {
         List<IObject> pageContents = new ArrayList<>();
         List<List<IObject>> grouped = new ArrayList<>();

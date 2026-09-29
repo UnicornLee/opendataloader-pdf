@@ -41,6 +41,17 @@ public class ContentFilterProcessor {
     private static final Logger LOGGER = Logger.getLogger(ContentFilterProcessor.class.getCanonicalName());
 
     /**
+     * Minimum share of the page height a decoration has to cover to count as a
+     * page-length strip (see {@link #isBackground}).
+     */
+    private static final double BACKGROUND_STRIP_MIN_HEIGHT_RATIO = 0.5;
+    /**
+     * Minimum share of the page width a page-length strip has to cover. Kept low: the
+     * strips that matter are narrow margin rules and sidebar bands.
+     */
+    private static final double BACKGROUND_STRIP_MIN_WIDTH_RATIO = 0.05;
+
+    /**
      * Filters and cleans page contents based on configuration.
      *
      * @param inputPdfName the path to the PDF file
@@ -130,7 +141,23 @@ public class ContentFilterProcessor {
         return (content.getBoundingBox().getWidth() > 0.5 * pageBoundingBox.getWidth() &&
             content.getBoundingBox().getHeight() > 0.1 * pageBoundingBox.getHeight()) ||
             (content.getBoundingBox().getWidth() > 0.1 * pageBoundingBox.getWidth() &&
-                content.getBoundingBox().getHeight() > 0.5 * pageBoundingBox.getHeight());
+                content.getBoundingBox().getHeight() > 0.5 * pageBoundingBox.getHeight()) ||
+            // A strip that spans most of the page height is a page decoration (a margin
+            // rule, a sidebar band, an invisible frame) even when it is narrower than the
+            // 10 % width limit of the clause above. Leaving such a strip in the page
+            // contents makes the chart / flowchart region grow across the whole page:
+            // measured 56.7 x 501.5 pt strip on a 595 x 794 pt page (9.5 % wide) that
+            // swallowed the entire text column of the page into one screenshot.
+            isPageHeightStrip(content.getBoundingBox(), pageBoundingBox);
+    }
+
+    /** True when {@code box} is a narrow strip spanning most of the page height. */
+    private static boolean isPageHeightStrip(BoundingBox box, BoundingBox pageBoundingBox) {
+        if (box == null || box.isEmpty() || pageBoundingBox == null || pageBoundingBox.isEmpty()) {
+            return false;
+        }
+        return box.getWidth() > BACKGROUND_STRIP_MIN_WIDTH_RATIO * pageBoundingBox.getWidth()
+            && box.getHeight() > BACKGROUND_STRIP_MIN_HEIGHT_RATIO * pageBoundingBox.getHeight();
     }
 
     private static void filterOutOfPageContents(int pageNumber, List<IObject> contents) {
