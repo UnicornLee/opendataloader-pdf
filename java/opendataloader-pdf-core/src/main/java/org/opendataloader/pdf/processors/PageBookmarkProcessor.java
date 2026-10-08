@@ -399,6 +399,30 @@ public class PageBookmarkProcessor {
     }
 
     /**
+     * Discards a page bookmark tree that holds a single top-level entry.
+     *
+     * <p>One lone top-level node is almost never a genuine document outline: it is
+     * either a body paragraph that merely starts with a numbering prefix or the
+     * title of a document without any per-page heading structure. Such a tree is
+     * dropped so the source is reported as empty instead of winning the quality
+     * selection purely because it is the only non-empty source.</p>
+     *
+     * @param bookmarks freshly extracted page bookmark tree, may be null
+     * @return an empty list when {@code bookmarks} holds exactly one top-level
+     *         entry, otherwise {@code bookmarks} unchanged
+     */
+    public static List<Bookmark> discardSoleTopLevelBookmark(List<Bookmark> bookmarks) {
+        if (bookmarks == null || bookmarks.size() != 1) {
+            return bookmarks;
+        }
+        Bookmark sole = bookmarks.get(0);
+        LOGGER.info(String.format(
+            "[PageBookmark] discarding page bookmarks: only one top-level entry (text=%s, page_num=%s)",
+            sole != null ? sole.getText() : null, sole != null ? sole.getPageNum() : null));
+        return Collections.emptyList();
+    }
+
+    /**
      * Builds the immediate children of an anchor bookmark emitted at the given
      * depth, reusing the exact candidate collection, cleaning and
      * level-selection pipeline of {@link #extractPageBookmarksFromJson}.

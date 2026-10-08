@@ -209,8 +209,9 @@ public class JsonWriter {
                 int catalogStartPage = catalogResult.getStartPage();
                 int catalogEndPage = catalogResult.getEndPage();
 
-                List<Bookmark> pageBookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(
-                    data, catalogStartPage, catalogEndPage);
+                List<Bookmark> pageBookmarks = PageBookmarkProcessor.discardSoleTopLevelBookmark(
+                    PageBookmarkProcessor.extractPageBookmarksFromJson(
+                        data, catalogStartPage, catalogEndPage));
 
                 CatalogBookmarkProcessor.fillCatalogChildrenFromPageData(
                     data, catalogStartPage, catalogEndPage, catalogBookmarks);
@@ -419,8 +420,9 @@ public class JsonWriter {
                     int catalogStartPage = catalogResult.getStartPage();
                     int catalogEndPage = catalogResult.getEndPage();
 
-                    List<Bookmark> pageBookmarks = PageBookmarkProcessor.extractPageBookmarksFromJson(
-                        data, catalogStartPage, catalogEndPage);
+                    List<Bookmark> pageBookmarks = PageBookmarkProcessor.discardSoleTopLevelBookmark(
+                        PageBookmarkProcessor.extractPageBookmarksFromJson(
+                            data, catalogStartPage, catalogEndPage));
 
                     // Complement missing L2/L3 sub-bookmarks in the catalog tree from
                     // the page bookmark candidates (sliced by anchor ranges).
