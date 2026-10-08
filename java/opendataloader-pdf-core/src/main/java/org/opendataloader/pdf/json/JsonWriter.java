@@ -1853,19 +1853,52 @@ public class JsonWriter {
     }
 
     /**
-     * Computes a representative font size for a single text line from its chunks:
-     * the unique mode of the chunks' font sizes (rounded to 3 decimals), otherwise
-     * their mean. Returns {@code 0.0} for an empty chunk list.
+     * Computes a representative font size for a single text line from its chunks.
+     *
+     * <p>Font sizes are collected per character rather than per chunk, so that a chunk's
+     * influence matches how much of the line it actually renders. Only characters that are
+     * Chinese characters, Latin letters or digits are counted first; this keeps low-sized
+     * leader artifacts (dot leaders such as {@code " . . ."}, whitespace and other
+     * punctuation) from dominating the result on table-of-contents lines. If the line has no
+     * such character at all, the sizes of all non-whitespace characters are used instead
+     * (whitespace is never counted). The representative value is the unique mode (rounded to
+     * 3 decimals) of the collected sizes, otherwise their mean. Returns {@code 0.0} for an
+     * empty chunk list.</p>
      */
     private static double computeLineFontSize(List<TextChunk> textChunks) {
         if (textChunks == null || textChunks.isEmpty()) {
             return 0.0;
         }
-        double[] sizes = new double[textChunks.size()];
-        for (int i = 0; i < sizes.length; i++) {
-            sizes[i] = textChunks.get(i).getFontSize();
+        List<Double> significantSizes = new ArrayList<>();
+        List<Double> allSizes = new ArrayList<>();
+        for (TextChunk chunk : textChunks) {
+            String value = chunk.getValue();
+            if (value == null || value.isEmpty()) {
+                continue;
+            }
+            double size = chunk.getFontSize();
+            for (int i = 0; i < value.length(); i++) {
+                char ch = value.charAt(i);
+                if (!Character.isWhitespace(ch)) {
+                    allSizes.add(size);
+                }
+                if (isFontSizingChar(ch)) {
+                    significantSizes.add(size);
+                }
+            }
         }
-        return computeFontSize(sizes);
+        return significantSizes.isEmpty()
+            ? computeFontSizeFromCollection(allSizes)
+            : computeFontSizeFromCollection(significantSizes);
+    }
+
+    /**
+     * Whether a character contributes to a line's representative font size: Chinese
+     * characters, Latin letters or digits. Leader dots, whitespace and other punctuation
+     * are excluded so they do not skew the font-size statistics.
+     */
+    private static boolean isFontSizingChar(char c) {
+        return Character.isLetter(c) || Character.isDigit(c);
     }
 
     /**
