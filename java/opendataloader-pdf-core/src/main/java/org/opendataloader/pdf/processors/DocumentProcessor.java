@@ -824,6 +824,12 @@ public class DocumentProcessor {
                     } else {
                         pageHaveFormulas[pageNumber] = false;
                     }
+                    // Vector line-art that no chart / flowchart pass claimed — company
+                    // logos, seals, decorative marks. Runs last so those passes get
+                    // first refusal, and before ConsecutiveImageProcessor so adjacent
+                    // logo and figure screenshots still merge.
+                    GraphicRegionProcessor.processGraphicRegions(pageContents, pageNumber, imagesUtils,
+                        collectRawLineChunks(pageNumber), pageWidths[pageNumber], pageHeights[pageNumber]);
                     ConsecutiveImageProcessor.processConsecutiveImages(pageContents, pageNumber, imagesUtils);
                 })
             ).get();
@@ -1626,12 +1632,13 @@ public class DocumentProcessor {
      * <p>Plain {@link LineChunk}s are dropped from {@code pageContents} earlier in the
      * pipeline, but the arrow-driven diagram growth needs them: they are what connects
      * an arrowhead to the node it points at. Reading them back from the page artifacts
-     * keeps the removal of the plain line layer intact.</p>
+     * keeps the removal of the plain line layer intact. {@link GraphicRegionProcessor}
+     * reuses the same read-back for its density gate.</p>
      *
      * @param pageNumber 0-based page number
      * @return the raw lines of the page; never null
      */
-    private static List<IObject> collectRawLineChunks(int pageNumber) {
+    static List<IObject> collectRawLineChunks(int pageNumber) {
         IDocument document = StaticContainers.getDocument();
         if (document == null) {
             return Collections.emptyList();
