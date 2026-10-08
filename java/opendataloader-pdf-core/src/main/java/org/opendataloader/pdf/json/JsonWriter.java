@@ -41,6 +41,7 @@ import org.opendataloader.pdf.processors.DocumentProcessor;
 import org.opendataloader.pdf.processors.PageBookmarkProcessor;
 import org.opendataloader.pdf.utils.HuaweiObsClient;
 import org.opendataloader.pdf.utils.ProcessingDeadline;
+import org.opendataloader.pdf.utils.ReadingOrderSortUtils;
 import org.opendataloader.pdf.utils.SmartTextJoiner;
 import org.verapdf.as.ASAtom;
 import org.verapdf.cos.COSDictionary;
@@ -1105,9 +1106,12 @@ public class JsonWriter {
                                     TableBorderCell cellItem = tableBorder.getRows()[n].getCells()[k];
                                     List<IObject> cellItemContents = flattenCellContents(cellItem.getContents(), url, pageNumber);
                                     if (!cellItemContents.isEmpty()) {
-                                        // Sort topY descending (PDF coords: larger topY = higher on page),
-                                        // so groups are built top-down to match reading order.
-                                        cellItemContents.sort(Comparator.comparingDouble(IObject::getTopY).reversed());
+                                        // Keep the flattened stream order (each paragraph line is already
+                                        // in the reading order the processors produced). Grouping lines by
+                                        // vertical overlap works directly on this order; sorting individual
+                                        // chunks by topY here would scramble same-line neighbours whose
+                                        // glyph heights differ (e.g. a narrow ")" beside a wide CJK run),
+                                        // which is what pushed the parenthesis to the end of the sentence.
                                         List<List<IObject>> cellItemGroups = groupChunksByLine(cellItemContents);
                                         boolean nextNewLine = false;
                                         for (List<IObject> group : cellItemGroups) {
@@ -1310,8 +1314,9 @@ public class JsonWriter {
      * minBottomY of the current group) stay together; non-text elements (images, sub-tables)
      * become single-element groups so they cannot be silently merged with text.
      *
-     * <p>Expects the input to be pre-sorted topY descending. Each emitted group is itself
-     * sorted leftX ascending before being returned.</p>
+     * <p>Expects the input in stream order (each visual line's chunks contiguous). Groups are
+     * collected top-down and, before being returned, ordered by vertical position and each group
+     * ordered horizontally by reading order (see {@link #flushGroupInReadingOrder}).</p>
      */
     private static List<List<IObject>> groupChunksByLine(List<IObject> contents) {
         List<List<IObject>> groups = new ArrayList<>();
@@ -1339,27 +1344,76 @@ public class JsonWriter {
                         groupMinBottomY = cellContent.getBottomY();
                     }
                 } else {
-                    flushGroupSortedByLeftX(currentGroup, groups);
+                    flushGroupInReadingOrder(currentGroup, groups);
                     currentGroup = new ArrayList<>();
                     currentGroup.add(cellContent);
                     groupMaxTopY = cellContent.getTopY();
                     groupMinBottomY = cellContent.getBottomY();
                 }
             } else {
-                flushGroupSortedByLeftX(currentGroup, groups);
+                flushGroupInReadingOrder(currentGroup, groups);
                 groups.add(Collections.singletonList(cellContent));
                 currentGroup = new ArrayList<>();
             }
         }
-        flushGroupSortedByLeftX(currentGroup, groups);
+        flushGroupInReadingOrder(currentGroup, groups);
+        // Order the visual lines top-down (larger topY = higher on page). This replaces the former
+        // per-chunk topY pre-sort: by reordering whole lines rather than individual chunks it keeps
+        // the vertical sequence correct without disturbing the stream order inside a line.
+        groups.sort(Comparator.comparingDouble(JsonWriter::getGroupMaxTopY).reversed());
         return groups;
     }
 
-    private static void flushGroupSortedByLeftX(List<IObject> group, List<List<IObject>> sink) {
+    /**
+     * Largest {@code topY} among a line group's elements, used to order groups top-down. Returns
+     * {@link Double#NEGATIVE_INFINITY} for an empty group so it sorts last.
+     */
+    private static double getGroupMaxTopY(List<IObject> group) {
+        double maxTopY = Double.NEGATIVE_INFINITY;
+        for (IObject cellContent : group) {
+            double topY = cellContent.getTopY();
+            if (Double.isFinite(topY) && topY > maxTopY) {
+                maxTopY = topY;
+            }
+        }
+        return maxTopY;
+    }
+
+    /**
+     * Orders one visual line's chunks by horizontal reading position and adds them to {@code sink}.
+     *
+     * <p>Uses the same left-edge clustering + stream-order logic as
+     * {@link org.opendataloader.pdf.processors.TextLineProcessor}, via {@link ReadingOrderSortUtils},
+     * instead of a strict {@code leftX} sort. A strict sort pushes a narrow glyph (for example a
+     * closing parenthesis drawn right after a URL) behind an adjacent wide CJK chunk whose em box
+     * starts slightly further left, so the parenthesis lands at the end of the sentence. Clustering
+     * ties left edges within one font-size-scaled tolerance into one cluster and keeps the flattened
+     * stream order inside it, which matches the reading order the processors already produced and
+     * turns the neighbour gap negative so no phantom space is synthesised.</p>
+     */
+    private static void flushGroupInReadingOrder(List<IObject> group, List<List<IObject>> sink) {
         if (!group.isEmpty()) {
-            group.sort(Comparator.comparingDouble(IObject::getLeftX));
+            ReadingOrderSortUtils.sortByReadingOrder(group, IObject::getLeftX, getGroupFontSize(group));
             sink.add(group);
         }
+    }
+
+    /**
+     * Representative font size of a line group, used to size the reading-order tie tolerance:
+     * the largest {@link TextChunk} font size in the group, or {@code 0.0} when it holds no text
+     * (the tolerance then falls back to {@link ReadingOrderSortUtils#X_TIE_MIN}).
+     */
+    private static double getGroupFontSize(List<IObject> group) {
+        double maxFontSize = 0.0;
+        for (IObject cellContent : group) {
+            if (cellContent instanceof TextChunk) {
+                double fontSize = ((TextChunk) cellContent).getFontSize();
+                if (fontSize > maxFontSize) {
+                    maxFontSize = fontSize;
+                }
+            }
+        }
+        return maxFontSize;
     }
 
     /**
