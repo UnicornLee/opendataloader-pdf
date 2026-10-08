@@ -1861,9 +1861,11 @@ public class JsonWriter {
      * leader artifacts (dot leaders such as {@code " . . ."}, whitespace and other
      * punctuation) from dominating the result on table-of-contents lines. If the line has no
      * such character at all, the sizes of all non-whitespace characters are used instead
-     * (whitespace is never counted). The representative value is the unique mode (rounded to
-     * 3 decimals) of the collected sizes, otherwise their mean. Returns {@code 0.0} for an
-     * empty chunk list.</p>
+     * (whitespace is never counted). As a last resort a line made up entirely of
+     * whitespace/empty chunks falls back to the per-chunk sizes, so a non-empty chunk list
+     * never yields {@code 0.0}. The representative value is the unique mode (rounded to
+     * 3 decimals) of the collected sizes, otherwise their mean. Returns {@code 0.0} only for
+     * an empty chunk list.</p>
      */
     private static double computeLineFontSize(List<TextChunk> textChunks) {
         if (textChunks == null || textChunks.isEmpty()) {
@@ -1887,9 +1889,20 @@ public class JsonWriter {
                 }
             }
         }
-        return significantSizes.isEmpty()
-            ? computeFontSizeFromCollection(allSizes)
-            : computeFontSizeFromCollection(significantSizes);
+        if (!significantSizes.isEmpty()) {
+            return computeFontSizeFromCollection(significantSizes);
+        }
+        if (!allSizes.isEmpty()) {
+            return computeFontSizeFromCollection(allSizes);
+        }
+        // Final guard: a line of only whitespace / empty chunks still carries real chunk
+        // font sizes. Fall back to the per-chunk view so a non-empty chunk list never
+        // collapses to 0.0 (which would otherwise pollute the paragraph-level aggregation).
+        double[] chunkSizes = new double[textChunks.size()];
+        for (int i = 0; i < chunkSizes.length; i++) {
+            chunkSizes[i] = textChunks.get(i).getFontSize();
+        }
+        return computeFontSize(chunkSizes);
     }
 
     /**
