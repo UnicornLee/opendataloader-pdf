@@ -694,6 +694,44 @@ public class PageBookmarkProcessorTest {
     }
 
     /**
+     * A page bookmark tree reduced to a single top-level entry is discarded, so the
+     * source no longer wins the quality selection just by being the only non-empty
+     * one (e.g. a body paragraph that merely starts with a numbering prefix).
+     */
+    @Test
+    public void testDiscardSoleTopLevelBookmark_singleRoot_isDiscarded() {
+        Bookmark sole = new Bookmark();
+        sole.setText("1.   該等數字乃按德安華所發佈的二零二五年規模溢價研究估計得出。");
+        sole.setPageNum(9);
+
+        List<Bookmark> discarded =
+            PageBookmarkProcessor.discardSoleTopLevelBookmark(new ArrayList<>(Arrays.asList(sole)));
+        Assertions.assertTrue(discarded.isEmpty(),
+            "A lone top-level page bookmark must be discarded");
+
+        Assertions.assertTrue(PageBookmarkProcessor.discardSoleTopLevelBookmark(null) == null,
+            "null input is returned unchanged");
+        Assertions.assertTrue(PageBookmarkProcessor.discardSoleTopLevelBookmark(new ArrayList<>()).isEmpty(),
+            "An already empty tree stays empty");
+    }
+
+    /**
+     * Two or more top-level entries — or a single entry that survived on its own
+     * merits — must pass through untouched; the rule only removes the 1-entry case.
+     */
+    @Test
+    public void testDiscardSoleTopLevelBookmark_multipleRoots_areKept() {
+        Bookmark first = new Bookmark();
+        first.setText("第1章 緒論");
+        Bookmark second = new Bookmark();
+        second.setText("第2章 方法");
+        List<Bookmark> roots = new ArrayList<>(Arrays.asList(first, second));
+
+        Assertions.assertSame(roots, PageBookmarkProcessor.discardSoleTopLevelBookmark(roots),
+            "Two top-level entries must be returned unchanged");
+    }
+
+    /**
      * Builds a JSON item for {@link PageBookmarkProcessor#extractPageBookmarksFromJson}.
      * y0 is chosen so that, within a page, items are read top-to-bottom in the
      * order they were added (ascending y0). Only the id and text differ per item.
