@@ -1702,7 +1702,7 @@ public class JsonWriter {
                 }
             }
             if ("".equals(val.trim())) {
-                text += getSpaceStr(chunk, haveChinese);
+                text += getSpaceStr(chunk, haveChinese, resolveSpaceThreshold(textChunks, i));
             } else if (GlobalConstant.SPECIAL_CHARACTER_ORIGIN.contains(val)) {
                 text += GlobalConstant.SPECIAL_CHARACTER_TARGET.get(GlobalConstant.SPECIAL_CHARACTER_ORIGIN.indexOf(val));
             } else {
@@ -1891,8 +1891,13 @@ public class JsonWriter {
 
     @NotNull
     private static String getSpaceStr(TextChunk chunk, boolean haveChinese) {
+        return getSpaceStr(chunk, haveChinese, 0.4);
+    }
+
+    @NotNull
+    private static String getSpaceStr(TextChunk chunk, boolean haveChinese, double lowThreshold) {
         double ratio = (chunk.getRightX() - chunk.getLeftX()) / chunk.getFontSize();
-        if (ratio < 0.4) {
+        if (ratio < lowThreshold) {
             if (haveChinese) {
                 return " ";
             } else {
@@ -1903,6 +1908,51 @@ public class JsonWriter {
         } else {
             return " ".repeat((int) Math.ceil(ratio));
         }
+    }
+
+    /**
+     * Relaxes a whitespace chunk's low space threshold from {@code 0.4} to {@code 0.2} when it
+     * sits on a letter/letter, letter/digit or digit/letter boundary (real word-internal gaps in
+     * Latin text such as {@code PCIe AEC}). Digit/digit boundaries keep {@code 0.4} so numeric
+     * runs stay joined; every other boundary (CJK, punctuation, symbols) keeps the original
+     * behavior.
+     */
+    private static double resolveSpaceThreshold(List<TextChunk> textChunks, int i) {
+        Character prev = neighborBoundaryChar(textChunks, i, -1);
+        Character next = neighborBoundaryChar(textChunks, i, 1);
+        if (prev == null || next == null) {
+            return 0.4;
+        }
+        boolean prevLetter = isLatinLetter(prev);
+        boolean nextLetter = isLatinLetter(next);
+        boolean prevDigit = Character.isDigit(prev);
+        boolean nextDigit = Character.isDigit(next);
+        boolean relax = (prevLetter && nextLetter)
+            || (prevLetter && nextDigit)
+            || (prevDigit && nextLetter);
+        return relax ? 0.2 : 0.4;
+    }
+
+    /**
+     * Returns the boundary character of the nearest non-whitespace text chunk on one side of the
+     * whitespace chunk at {@code index}: its last character when scanning left ({@code step < 0}),
+     * or its first character when scanning right ({@code step > 0}). Returns {@code null} if no
+     * non-whitespace chunk exists on that side.
+     */
+    private static Character neighborBoundaryChar(List<TextChunk> textChunks, int index, int step) {
+        for (int j = index + step; j >= 0 && j < textChunks.size(); j += step) {
+            String val = textChunks.get(j).getValue();
+            if (val == null || "".equals(val.trim())) {
+                continue;
+            }
+            String trimmed = val.trim();
+            return step < 0 ? trimmed.charAt(trimmed.length() - 1) : trimmed.charAt(0);
+        }
+        return null;
+    }
+
+    private static boolean isLatinLetter(char c) {
+        return Character.isLetter(c) && !isChinese(c);
     }
 
     private static String getSpaceStr(double width, double fontSize) {
