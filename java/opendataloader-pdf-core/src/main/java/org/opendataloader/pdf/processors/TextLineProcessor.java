@@ -16,6 +16,7 @@
 package org.opendataloader.pdf.processors;
 
 import org.opendataloader.pdf.custom.utils.CustomChunksMergeUtils;
+import org.opendataloader.pdf.utils.ReadingOrderSortUtils;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.SemanticTextNode;
 import org.verapdf.wcag.algorithms.entities.content.ImageChunk;
@@ -31,7 +32,6 @@ import org.verapdf.wcag.algorithms.semanticalgorithms.utils.TextChunkUtils;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
@@ -39,8 +39,6 @@ import java.util.Set;
 public class TextLineProcessor {
 
     private static final double ONE_LINE_PROBABILITY = 0.75;
-    private static final Comparator<TextChunk> TEXT_CHUNK_COMPARATOR =
-        Comparator.comparingDouble(o -> o.getBoundingBox().getLeftX());
 
     public static List<IObject> processTextLines(List<IObject> contents, String imagesDirectory) {
         List<IObject> newContents = new ArrayList<>();
@@ -118,7 +116,7 @@ public class TextLineProcessor {
             IObject content = newContents.get(i);
             if (content instanceof TextLine) {
                 TextLine textLine = (TextLine) content;
-                textLine.getTextChunks().sort(TEXT_CHUNK_COMPARATOR);
+                sortChunksByReadingOrder(textLine.getTextChunks(), textLine.getFontSize());
                 List<TextChunk> textChunks = textLine.getTextChunks();
                 String superscriptType = "";
                 double fontSize = 0.0;
@@ -268,13 +266,31 @@ public class TextLineProcessor {
             IObject content = newContents.get(i);
             if (content instanceof TextLine) {
                 TextLine textLine = (TextLine) content;
-                textLine.getTextChunks().sort(TEXT_CHUNK_COMPARATOR);
+                sortChunksByReadingOrder(textLine.getTextChunks(), textLine.getFontSize());
                 double threshold = textLine.getFontSize() * StaticContainers.getTextLineSpaceRatio();
                 newContents.set(i, getTextLineWithSpaces(textLine, threshold, chunksAfterWhitespace));
             }
         }
         linkTextLinesWithConnectedLineArtBullet(newContents);
         return newContents;
+    }
+
+    /**
+     * Orders a line's chunks by their horizontal reading position.
+     *
+     * <p>Delegates to {@link ReadingOrderSortUtils#sortByReadingOrder} so that
+     * {@link org.opendataloader.pdf.json.JsonWriter}, which re-flattens a table cell's chunks
+     * before assembling its text, produces exactly the same order as the paragraphs built here.
+     * Left edges within one tie tolerance cluster together and keep PDF stream order inside the
+     * cluster, which is what keeps a narrow glyph drawn beside a wide CJK glyph from being pushed
+     * behind the whole CJK run by a strict left-edge sort.</p>
+     *
+     * @param textChunks the line's chunks to order in place; on entry they are in stream order
+     * @param fontSize   the line's font size, used to size the tie tolerance
+     */
+    private static void sortChunksByReadingOrder(List<TextChunk> textChunks, double fontSize) {
+        ReadingOrderSortUtils.sortByReadingOrder(textChunks,
+            chunk -> chunk.getBoundingBox().getLeftX(), fontSize);
     }
 
     private static TextLine getTextLineWithSpaces(TextLine textLine, double threshold,

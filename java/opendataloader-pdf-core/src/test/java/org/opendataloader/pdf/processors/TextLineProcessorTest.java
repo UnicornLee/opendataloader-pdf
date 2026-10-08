@@ -151,4 +151,44 @@ public class TextLineProcessorTest {
             "There should be a space between chunks when there is a physical gap");
     }
 
+    /**
+     * Regression test for the phantom spaces in a line rendered as
+     * "[編纂（為其本身及代表]         [編纂]）".
+     *
+     * The em box of a full-width opening parenthesis starts slightly to the left of the closing
+     * square bracket drawn just before it (0.273pt in the sampled document), so a strict left-edge
+     * sort moved that bracket behind the whole CJK run. The distance the freed bracket then left
+     * behind was measured as a wide whitespace and turned into a run of spaces.
+     */
+    @Test
+    public void testProcessTextLinesKeepsBracketInsideCjkRunWhoseLeftEdgeOverlapsIt() {
+        StaticContainers.setIsIgnoreCharactersWithoutUnicode(false);
+        StaticContainers.setIsDataLoader(true);
+        List<IObject> contents = new ArrayList<>();
+
+        // Chunks arrive in PDF stream order: the bracket is drawn first, the CJK run second even
+        // though its left edge is further left, the next placeholder third.
+        TextChunk bracketChunk = new TextChunk(new BoundingBox(0, 210.618, 300.0, 212.78, 310.0),
+            "]", 6.5, 300.0);
+        TextChunk cjkChunk = new TextChunk(new BoundingBox(0, 210.345, 300.0, 266.0, 310.0),
+            "（為其本身及代表", 6.5, 300.0);
+        TextChunk placeholderChunk = new TextChunk(new BoundingBox(0, 266.57, 300.0, 290.0, 310.0),
+            "[編纂]）", 6.5, 300.0);
+
+        contents.add(bracketChunk);
+        contents.add(cjkChunk);
+        contents.add(placeholderChunk);
+
+        contents = TextLineProcessor.processTextLines(contents);
+
+        Assertions.assertEquals(1, contents.size());
+        Assertions.assertTrue(contents.get(0) instanceof TextLine);
+
+        TextLine textLine = (TextLine) contents.get(0);
+        // The bracket keeps the position the stream gave it, so the 53.79pt distance it used to
+        // leave behind never gets measured and no whitespace is invented for it.
+        Assertions.assertEquals("]（為其本身及代表[編纂]）", textLine.getValue(),
+            "Bracket should stay in stream order without a phantom space, but got: " + textLine.getValue());
+    }
+
 }
