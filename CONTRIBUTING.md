@@ -72,7 +72,12 @@ To suggest a new feature:
 
 4. **Build** the project:
 
-   **Prerequisites:** Java 11+, Maven, Python 3.10+, uv, Node.js 20+, pnpm
+   **Prerequisites:** Java 11+, Maven, Python 3.10+, uv, Node.js 24 (current active LTS), pnpm via `corepack enable pnpm`
+
+   Node 24 and pnpm 11.21.0 are what CI builds against. Enabling Corepack once
+   picks the pnpm version up from the `packageManager` field, so there is no
+   global install and no version to remember. Node must be >=22.13 — pnpm 11
+   refuses to install on anything older.
    See the [Development Workflow guide](https://opendataloader.org/docs/development-workflow) for OS-specific install instructions.
 
    ```bash
@@ -104,6 +109,8 @@ To suggest a new feature:
 - Write unit tests for any new or changed logic.
 - Run `./scripts/bench.sh` before submitting a PR — CI will fail if benchmark scores drop below thresholds.
 - Keep your changes minimal and focused.
+- Do not add MDX files. `content/docs/reference/` is generated at release time
+  and is not tracked.
 
 ## ✅ Commit Message Guidelines
 
@@ -118,6 +125,19 @@ Use the following format:
 - Add: New feature
 - Fix: Bug fix
 - Update: Code update
+
+## 🤖 Agent Skill Maintenance
+
+This repo ships an AI-agent skill under `skills/odl-pdf/`. It is a **version-independent procedure** — it reads the installed CLI's own `--help` at runtime and bakes no option name, value, or default into its prose, so renaming a flag or flipping a default does **not** require touching the skill.
+
+What still needs manual review when you change the CLI:
+
+- **Silent-failure behavior** (e.g. an enrichment that is skipped unless the whole document is routed to the backend; structured output that does not stream to stdout). If you add, remove, or change such behavior, update the hazard principles and the release-review checklist in `skills/odl-pdf-maintenance/MAINTAINING.md`.
+- The **version-coupling lint** (`skills/odl-pdf-maintenance/sync-skill-refs.py`, run in CI) fails the build if a version number or an option name is ever baked into the skill. If it fails, fix the skill text — do not add to its allowlist.
+
+The `skills/odl-pdf-maintenance/` directory is developer-only and is **not** part of the installable skill.
+
+---
 
 ## 📝 CLA / DCO Requirements
 

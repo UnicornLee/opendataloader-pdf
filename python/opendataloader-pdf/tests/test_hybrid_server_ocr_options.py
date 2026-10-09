@@ -445,3 +445,93 @@ def test_main_skips_engine_check_when_no_ocr(monkeypatch, caplog):
 
     hybrid_server.main()  # must not raise SystemExit
     assert called["which"] is False
+
+
+def test_every_cli_engine_choice_has_a_probe_branch():
+    """Each `--ocr-engine` choice must be recognized by the availability probe.
+
+    The CLI derives its choices from docling's factory, so a docling upgrade
+    that registers a new engine kind widens the CLI surface on its own. Without
+    a matching probe branch that engine parses, then fails closed at startup on
+    the probe's fallthrough — a selectable option that can never run. docling
+    2.124.0 added `nemotron-ocr` exactly this way.
+    """
+    from docling.models.factories import get_ocr_factory
+
+    choices = sorted(
+        set(get_ocr_factory(allow_external_plugins=False).registered_kind)
+        - hybrid_server._OCR_ENGINE_DENYLIST
+    )
+    unprobed = []
+    for kind in choices:
+        _, message = hybrid_server._check_ocr_engine_available(kind)
+        if "is not recognized by the availability probe" in message:
+            unprobed.append(kind)
+
+    assert not unprobed, (
+        f"engine kinds exposed by the CLI with no probe branch: {unprobed}. "
+        "Add a branch in `_check_ocr_engine_available()`, or add the kind to "
+        "`_OCR_ENGINE_DENYLIST` if it is unsuitable for hybrid local mode."
+    )
+
+
+def test_converter_restricts_input_to_pdf():
+    """The converter must enable PDF only, not every format docling knows.
+
+    `format_options` overrides options for the formats it lists; it does not
+    restrict input. Without `allowed_formats` docling enables all of them, so an
+    office document reaching this PDF-only server is sniffed by content and
+    parsed by that format's backend — the `.pdf` temp-file suffix does not stop
+    it. docling 2.124.0 knows 31 formats, up from 17 in 2.94.0.
+    """
+    from docling.datamodel.base_models import InputFormat
+
+    with patch("docling.document_converter.DocumentConverter") as mock_dc:
+        mock_dc.return_value = object()
+        hybrid_server.create_converter()
+
+    kwargs = mock_dc.call_args.kwargs
+    assert kwargs.get("allowed_formats") == [InputFormat.PDF], (
+        "create_converter must pass allowed_formats=[InputFormat.PDF]; "
+        f"got {kwargs.get('allowed_formats')!r}"
+    )
+
+
+def test_heading_hierarchy_defaults_off():
+    """No flag -> heading-hierarchy stage stays disabled, matching docling's own default."""
+    opts = _capture_pipeline_options()
+    assert opts.heading_hierarchy_options.enabled is False
+
+
+def test_heading_hierarchy_enabled_when_requested():
+    """`heading_hierarchy=True` reaches docling's pipeline options (#441).
+
+    Without it every section_header comes back at level 1, because the layout
+    model labels the region without a depth.
+    """
+    opts = _capture_pipeline_options(heading_hierarchy=True)
+    assert opts.heading_hierarchy_options.enabled is True
+
+
+def test_heading_hierarchy_keeps_inference_signals_on():
+    """Enabling the stage leaves docling's outline/numbering/style signals in place."""
+    opts = _capture_pipeline_options(heading_hierarchy=True)
+    hh = opts.heading_hierarchy_options
+    assert hh.use_bookmarks is True
+    assert hh.use_numbering is True
+    assert hh.use_style is True
+
+
+def test_heading_hierarchy_keeps_parsed_pages_for_style_inference():
+    """The style tier needs the parsed cells, which docling drops by default.
+
+    Without `generate_parsed_pages` docling skips style inference silently, so
+    only numbered headings get a depth — an unnumbered `Abstract` or `References`
+    stays at level 1 next to the document title, which is the #441 symptom.
+    """
+    assert _capture_pipeline_options(heading_hierarchy=True).generate_parsed_pages is True
+
+
+def test_parsed_pages_not_generated_when_hierarchy_off():
+    """Keeping the cells costs memory per page, so don't pay it when the stage is off."""
+    assert _capture_pipeline_options().generate_parsed_pages is False

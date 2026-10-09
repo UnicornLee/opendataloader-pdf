@@ -18,7 +18,6 @@ package org.opendataloader.pdf.processors;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.opendataloader.pdf.api.Config;
-import org.opendataloader.pdf.hybrid.HancomAISchemaTransformer;
 import org.opendataloader.pdf.hybrid.HybridClient.HybridRequest;
 import org.opendataloader.pdf.hybrid.HybridClient.OutputFormat;
 import org.opendataloader.pdf.hybrid.HybridConfig;
@@ -339,10 +338,10 @@ public class HybridDocumentProcessorTest {
     @Test
     public void testDoclingBackendEnabled() {
         Config config = new Config();
-        config.setHybrid("docling");
+        config.setHybrid("docling-fast");
 
         Assertions.assertTrue(config.isHybridEnabled());
-        Assertions.assertEquals("docling", config.getHybrid());
+        Assertions.assertEquals("docling-fast", config.getHybrid());
     }
 
     @Test
@@ -350,31 +349,45 @@ public class HybridDocumentProcessorTest {
         HybridConfig config = new HybridConfig();
 
         // docling uses same URL as docling-fast
-        Assertions.assertEquals(HybridConfig.DOCLING_FAST_DEFAULT_URL, config.getEffectiveUrl("docling"));
+        Assertions.assertEquals(HybridConfig.DOCLING_FAST_DEFAULT_URL, config.getEffectiveUrl("docling-fast"));
         Assertions.assertEquals(HybridConfig.DOCLING_FAST_DEFAULT_URL, config.getEffectiveUrl("docling-fast"));
     }
-
+    /** The backend size holds when the document is longer than one chunk. */
     @Test
-    public void testHancomAIBackendEnabled() {
-        Config config = new Config();
-        config.setHybrid("hancom-ai");
-
-        Assertions.assertTrue(config.isHybridEnabled());
-        Assertions.assertEquals("hancom-ai", config.getHybrid());
+    public void testEffectiveChunkSize_keepsBackendSizeForLongDocuments() {
+        Assertions.assertEquals(HybridConfig.DEFAULT_CHUNK_SIZE,
+                HybridDocumentProcessor.effectiveChunkSize(500, HybridConfig.DEFAULT_CHUNK_SIZE));
     }
 
+    /** A configured chunk size smaller than the default bounds the request. */
     @Test
-    public void testCreateTransformerReturnsHancomAISchemaTransformer() throws Exception {
-        Config config = new Config();
-        config.setHybrid("hancom-ai");
+    public void testEffectiveChunkSize_usesConfiguredSize() {
+        Assertions.assertEquals(10,
+                HybridDocumentProcessor.effectiveChunkSize(500, 10));
+        Assertions.assertEquals(200,
+                HybridDocumentProcessor.effectiveChunkSize(500, 200));
+    }
 
-        // createTransformer is private static — use reflection to verify it returns the correct type
-        java.lang.reflect.Method method = HybridDocumentProcessor.class.getDeclaredMethod("createTransformer", Config.class);
-        method.setAccessible(true);
-        HybridSchemaTransformer transformer = (HybridSchemaTransformer) method.invoke(null, config);
+    /** The chunk size never exceeds the page count. */
+    @Test
+    public void testEffectiveChunkSize_cappedAtPageCount() {
+        Assertions.assertEquals(5,
+                HybridDocumentProcessor.effectiveChunkSize(5, 10));
+    }
 
-        Assertions.assertNotNull(transformer);
-        Assertions.assertInstanceOf(HancomAISchemaTransformer.class, transformer);
+    /** An empty page set must still yield a positive step rather than 0. */
+    @Test
+    public void testEffectiveChunkSize_neverZero() {
+        Assertions.assertEquals(1, HybridDocumentProcessor.effectiveChunkSize(0, HybridConfig.DEFAULT_CHUNK_SIZE));
+        Assertions.assertEquals(1, HybridDocumentProcessor.effectiveChunkSize(0, 10));
+    }
+
+    /** A non-positive configured chunk size must still yield a positive step. */
+    @Test
+    public void testEffectiveChunkSize_nonPositiveConfiguredSizeClamped() {
+        Assertions.assertEquals(1, HybridDocumentProcessor.effectiveChunkSize(500, 0));
+        Assertions.assertEquals(1, HybridDocumentProcessor.effectiveChunkSize(500, -5));
+        Assertions.assertEquals(1, HybridDocumentProcessor.effectiveChunkSize(0, 0));
     }
 
     // ===== Backend Chunk Splitting Tests =====
@@ -392,35 +405,35 @@ public class HybridDocumentProcessorTest {
     @Test
     public void testChunkSplitting_zeroPages() {
         List<List<Integer>> chunks = splitIntoChunks(new HashSet<>(),
-                HybridDocumentProcessor.BACKEND_CHUNK_SIZE);
+                HybridConfig.DEFAULT_CHUNK_SIZE);
         Assertions.assertTrue(chunks.isEmpty());
     }
 
     @Test
     public void testChunkSplitting_exactlyChunkSize() {
         Set<Integer> pages = new HashSet<>();
-        for (int i = 0; i < HybridDocumentProcessor.BACKEND_CHUNK_SIZE; i++) {
+        for (int i = 0; i < HybridConfig.DEFAULT_CHUNK_SIZE; i++) {
             pages.add(i);
         }
         List<List<Integer>> chunks = splitIntoChunks(pages,
-                HybridDocumentProcessor.BACKEND_CHUNK_SIZE);
+                HybridConfig.DEFAULT_CHUNK_SIZE);
 
         Assertions.assertEquals(1, chunks.size());
-        Assertions.assertEquals(HybridDocumentProcessor.BACKEND_CHUNK_SIZE, chunks.get(0).size());
+        Assertions.assertEquals(HybridConfig.DEFAULT_CHUNK_SIZE, chunks.get(0).size());
     }
 
     @Test
     public void testChunkSplitting_chunkSizePlusOne() {
-        int size = HybridDocumentProcessor.BACKEND_CHUNK_SIZE + 1;
+        int size = HybridConfig.DEFAULT_CHUNK_SIZE + 1;
         Set<Integer> pages = new HashSet<>();
         for (int i = 0; i < size; i++) {
             pages.add(i);
         }
         List<List<Integer>> chunks = splitIntoChunks(pages,
-                HybridDocumentProcessor.BACKEND_CHUNK_SIZE);
+                HybridConfig.DEFAULT_CHUNK_SIZE);
 
         Assertions.assertEquals(2, chunks.size());
-        Assertions.assertEquals(HybridDocumentProcessor.BACKEND_CHUNK_SIZE, chunks.get(0).size());
+        Assertions.assertEquals(HybridConfig.DEFAULT_CHUNK_SIZE, chunks.get(0).size());
         Assertions.assertEquals(1, chunks.get(1).size());
     }
 
@@ -429,7 +442,7 @@ public class HybridDocumentProcessorTest {
         Set<Integer> pages = new HashSet<>();
         pages.add(42);
         List<List<Integer>> chunks = splitIntoChunks(pages,
-                HybridDocumentProcessor.BACKEND_CHUNK_SIZE);
+                HybridConfig.DEFAULT_CHUNK_SIZE);
 
         Assertions.assertEquals(1, chunks.size());
         Assertions.assertEquals(1, chunks.get(0).size());
@@ -445,10 +458,10 @@ public class HybridDocumentProcessorTest {
         }
         // 60 pages total → 2 chunks (50 + 10)
         List<List<Integer>> chunks = splitIntoChunks(pages,
-                HybridDocumentProcessor.BACKEND_CHUNK_SIZE);
+                HybridConfig.DEFAULT_CHUNK_SIZE);
 
         Assertions.assertEquals(2, chunks.size());
-        Assertions.assertEquals(HybridDocumentProcessor.BACKEND_CHUNK_SIZE, chunks.get(0).size());
+        Assertions.assertEquals(HybridConfig.DEFAULT_CHUNK_SIZE, chunks.get(0).size());
         Assertions.assertEquals(10, chunks.get(1).size());
 
         // Verify sorted order
@@ -468,7 +481,7 @@ public class HybridDocumentProcessorTest {
             pages.add(i);
         }
         List<List<Integer>> chunks = splitIntoChunks(pages,
-                HybridDocumentProcessor.BACKEND_CHUNK_SIZE);
+                HybridConfig.DEFAULT_CHUNK_SIZE);
 
         Assertions.assertEquals(4, chunks.size()); // 50 + 50 + 50 + 4
         Assertions.assertEquals(50, chunks.get(0).size());

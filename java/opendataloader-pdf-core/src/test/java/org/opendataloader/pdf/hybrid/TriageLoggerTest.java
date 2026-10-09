@@ -51,10 +51,10 @@ public class TriageLoggerTest {
     public void testCreateTriageJsonWithEmptyResults() throws IOException {
         Map<Integer, TriageResult> triageResults = new HashMap<>();
 
-        ObjectNode json = triageLogger.createTriageJson("test.pdf", "docling", triageResults);
+        ObjectNode json = triageLogger.createTriageJson("test.pdf", "docling-fast", triageResults);
 
         Assertions.assertEquals("test.pdf", json.get("document").asText());
-        Assertions.assertEquals("docling", json.get("hybrid").asText());
+        Assertions.assertEquals("docling-fast", json.get("hybrid").asText());
         Assertions.assertEquals(0, json.get("triage").size());
         Assertions.assertEquals(0, json.get("summary").get("totalPages").asInt());
         Assertions.assertEquals(0, json.get("summary").get("javaPages").asInt());
@@ -70,10 +70,10 @@ public class TriageLoggerTest {
         triageResults.put(0, TriageResult.java(0, 0.95, signals1));
         triageResults.put(1, TriageResult.backend(1, 0.82, signals2));
 
-        ObjectNode json = triageLogger.createTriageJson("example.pdf", "docling", triageResults);
+        ObjectNode json = triageLogger.createTriageJson("example.pdf", "docling-fast", triageResults);
 
         Assertions.assertEquals("example.pdf", json.get("document").asText());
-        Assertions.assertEquals("docling", json.get("hybrid").asText());
+        Assertions.assertEquals("docling-fast", json.get("hybrid").asText());
 
         // Check triage array
         JsonNode triageArray = json.get("triage");
@@ -117,17 +117,34 @@ public class TriageLoggerTest {
     }
 
     @Test
+    public void testSignalsIncludeScannedPageFields() {
+        Map<Integer, TriageResult> triageResults = new HashMap<>();
+        TriageSignals signals = new TriageSignals(0, 3, 0.0, 0, false, false,
+            0, 0, 0, false, false, false, false,
+            0, 0, 0.0, false, 1.0, 0.707, 1);
+        triageResults.put(0, TriageResult.backend(0, 0.9, signals));
+
+        ObjectNode json = triageLogger.createTriageJson("scan.pdf", "docling-fast", triageResults);
+        JsonNode signalsJson = json.get("triage").get(0).get("signals");
+
+        Assertions.assertEquals(1, signalsJson.get("nonWhitespaceTextChunkCount").asInt());
+        Assertions.assertEquals(1.0, signalsJson.get("largeImageRatio").asDouble(), 0.001);
+        Assertions.assertEquals(0.707, signalsJson.get("largeImageAspectRatio").asDouble(), 0.001);
+        Assertions.assertTrue(signalsJson.get("likelyScannedPage").asBoolean());
+    }
+
+    @Test
     public void testToJsonString() throws IOException {
         Map<Integer, TriageResult> triageResults = new HashMap<>();
         TriageSignals signals = TriageSignals.empty();
         triageResults.put(0, TriageResult.java(0, 0.9, signals));
 
-        String jsonString = triageLogger.toJsonString("test.pdf", "docling", triageResults);
+        String jsonString = triageLogger.toJsonString("test.pdf", "docling-fast", triageResults);
 
         // Verify it's valid JSON
         JsonNode json = objectMapper.readTree(jsonString);
         Assertions.assertEquals("test.pdf", json.get("document").asText());
-        Assertions.assertEquals("docling", json.get("hybrid").asText());
+        Assertions.assertEquals("docling-fast", json.get("hybrid").asText());
     }
 
     @Test
@@ -137,7 +154,7 @@ public class TriageLoggerTest {
         triageResults.put(0, TriageResult.backend(0, 0.85, signals));
 
         StringWriter writer = new StringWriter();
-        triageLogger.logToWriter(writer, "output.pdf", "docling", triageResults);
+        triageLogger.logToWriter(writer, "output.pdf", "docling-fast", triageResults);
 
         String jsonString = writer.toString();
         JsonNode json = objectMapper.readTree(jsonString);
@@ -158,7 +175,7 @@ public class TriageLoggerTest {
         triageResults.put(1, TriageResult.backend(1, 0.95, signals2));
         triageResults.put(2, TriageResult.java(2, 0.88, signals3));
 
-        triageLogger.logToFile(tempDir, "document.pdf", "docling", triageResults);
+        triageLogger.logToFile(tempDir, "document.pdf", "docling-fast", triageResults);
 
         // Verify file was created
         Path outputPath = tempDir.resolve(TriageLogger.DEFAULT_FILENAME);
@@ -169,7 +186,7 @@ public class TriageLoggerTest {
         JsonNode json = objectMapper.readTree(content);
 
         Assertions.assertEquals("document.pdf", json.get("document").asText());
-        Assertions.assertEquals("docling", json.get("hybrid").asText());
+        Assertions.assertEquals("docling-fast", json.get("hybrid").asText());
         Assertions.assertEquals(3, json.get("triage").size());
         Assertions.assertEquals(3, json.get("summary").get("totalPages").asInt());
         Assertions.assertEquals(2, json.get("summary").get("javaPages").asInt());
@@ -188,7 +205,7 @@ public class TriageLoggerTest {
         triageResults.put(1, TriageResult.java(1, 0.9, signals));
         triageResults.put(3, TriageResult.backend(3, 0.85, signals));
 
-        ObjectNode json = triageLogger.createTriageJson("test.pdf", "docling", triageResults);
+        ObjectNode json = triageLogger.createTriageJson("test.pdf", "docling-fast", triageResults);
         JsonNode triageArray = json.get("triage");
 
         // Verify pages are in ascending order (1-indexed)
@@ -206,11 +223,8 @@ public class TriageLoggerTest {
         triageResults.put(0, TriageResult.java(0, 0.9, signals));
 
         // Test with different backends
-        ObjectNode doclingJson = triageLogger.createTriageJson("test.pdf", "docling", triageResults);
-        Assertions.assertEquals("docling", doclingJson.get("hybrid").asText());
-
-        ObjectNode hancomJson = triageLogger.createTriageJson("test.pdf", "hancom", triageResults);
-        Assertions.assertEquals("hancom", hancomJson.get("hybrid").asText());
+        ObjectNode doclingFastJson = triageLogger.createTriageJson("test.pdf", "docling-fast", triageResults);
+        Assertions.assertEquals("docling-fast", doclingFastJson.get("hybrid").asText());
 
         ObjectNode azureJson = triageLogger.createTriageJson("test.pdf", "azure", triageResults);
         Assertions.assertEquals("azure", azureJson.get("hybrid").asText());
@@ -225,7 +239,7 @@ public class TriageLoggerTest {
             triageResults.put(i, TriageResult.java(i, 0.9, signals));
         }
 
-        ObjectNode json = triageLogger.createTriageJson("test.pdf", "docling", triageResults);
+        ObjectNode json = triageLogger.createTriageJson("test.pdf", "docling-fast", triageResults);
         JsonNode summary = json.get("summary");
 
         Assertions.assertEquals(5, summary.get("totalPages").asInt());
@@ -242,7 +256,7 @@ public class TriageLoggerTest {
             triageResults.put(i, TriageResult.backend(i, 0.9, signals));
         }
 
-        ObjectNode json = triageLogger.createTriageJson("test.pdf", "docling", triageResults);
+        ObjectNode json = triageLogger.createTriageJson("test.pdf", "docling-fast", triageResults);
         JsonNode summary = json.get("summary");
 
         Assertions.assertEquals(3, summary.get("totalPages").asInt());

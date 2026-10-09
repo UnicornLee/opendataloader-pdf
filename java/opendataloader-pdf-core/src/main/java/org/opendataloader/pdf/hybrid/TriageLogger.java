@@ -40,7 +40,7 @@ import java.util.stream.Collectors;
  * <pre>
  * {
  *   "document": "example.pdf",
- *   "hybrid": "docling",
+ *   "hybrid": "docling-fast",
  *   "triage": [
  *     {
  *       "page": 1,
@@ -52,7 +52,11 @@ import java.util.stream.Collectors;
  *         "lineToTextRatio": 0.04,
  *         "alignedLineGroups": 0,
  *         "hasTableBorder": false,
- *         "hasSuspiciousPattern": false
+ *         "hasSuspiciousPattern": false,
+ *         "nonWhitespaceTextChunkCount": 45,
+ *         "largeImageRatio": 0.0,
+ *         "largeImageAspectRatio": 0.0,
+ *         "likelyScannedPage": false
  *       }
  *     }
  *   ],
@@ -86,7 +90,7 @@ public class TriageLogger {
      *
      * @param outputDir      The output directory path.
      * @param documentName   The name of the processed document.
-     * @param hybridBackend  The hybrid backend used (e.g., "docling").
+     * @param hybridBackend  The hybrid backend used (e.g., "docling-fast").
      * @param triageResults  Map of page number to triage result.
      * @throws IOException If writing the file fails.
      */
@@ -113,7 +117,7 @@ public class TriageLogger {
      *
      * @param writer         The Writer to write to.
      * @param documentName   The name of the processed document.
-     * @param hybridBackend  The hybrid backend used (e.g., "docling").
+     * @param hybridBackend  The hybrid backend used (e.g., "docling-fast").
      * @param triageResults  Map of page number to triage result.
      * @throws IOException If writing fails.
      */
@@ -202,6 +206,10 @@ public class TriageLogger {
         signalsNode.put("alignedLineGroups", signals.getAlignedLineGroups());
         signalsNode.put("hasTableBorder", signals.hasTableBorder());
         signalsNode.put("hasSuspiciousPattern", signals.hasSuspiciousPattern());
+        signalsNode.put("nonWhitespaceTextChunkCount", signals.getNonWhitespaceTextChunkCount());
+        signalsNode.put("largeImageRatio", signals.getLargeImageRatio());
+        signalsNode.put("largeImageAspectRatio", signals.getLargeImageAspectRatio());
+        signalsNode.put("likelyScannedPage", signals.isLikelyScannedPage());
         return signalsNode;
     }
 

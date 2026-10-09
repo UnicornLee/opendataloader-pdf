@@ -26,9 +26,13 @@ import org.verapdf.wcag.algorithms.semanticalgorithms.utils.TextChunkUtils;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 public class TextProcessor {
+
+    private static final Logger LOGGER = Logger.getLogger(TextProcessor.class.getName());
 
     private static final double MIN_TEXT_INTERSECTION_PERCENT = 0.5;
     private static final double MAX_TOP_DECORATION_IMAGE_EPSILON = 0.3;
@@ -37,6 +41,7 @@ public class TextProcessor {
     private static final double MAX_RIGHT_DECORATION_IMAGE_EPSILON = 1.5;
     private static final double NEIGHBORS_TEXT_CHUNKS_EPSILON = 0.1;
     private static final double TEXT_MIN_HEIGHT = 1;
+    private static final double TEXT_MIN_FONT_SIZE = 5;
 
     public static void replaceUndefinedCharacters(List<IObject> contents, String replacementCharacterString) {
         if (ChunkParser.REPLACEMENT_CHARACTER_STRING.equals(replacementCharacterString)) {
@@ -78,8 +83,12 @@ public class TextProcessor {
             IObject object = contents.get(i);
             if (object instanceof TextChunk) {
                 TextChunk textChunk = ((TextChunk) object);
-                if (textChunk.getBoundingBox().getHeight() <= TEXT_MIN_HEIGHT) {
+                if (textChunk.getBoundingBox().getHeight() <= TEXT_MIN_HEIGHT &&
+                    textChunk.getFontSize() <= TEXT_MIN_FONT_SIZE) {
                     contents.set(i, null);
+                    if (textChunk.getBoundingBox().getHeight() == 0 || textChunk.getFontSize() == 0) {
+                        LOGGER.log(Level.WARNING, "Text with zero height or zero font size on page {0} has been filtered out", textChunk.getPageNumber());
+                    }
                 }
             }
         }

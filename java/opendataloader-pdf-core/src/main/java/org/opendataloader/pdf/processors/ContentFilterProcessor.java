@@ -82,7 +82,9 @@ public class ContentFilterProcessor {
                 new Object[]{pageNumber + 1, replacementCharRatio});
         }
         TextProcessor.replaceUndefinedCharacters(pageContents, config.getReplaceInvalidChars());
-        processBackgrounds(pageNumber, pageContents);
+        if (config.getFilterConfig().isFilterBackgrounds()) {
+            processBackgrounds(pageNumber, pageContents);
+        }
         return pageContents;
     }
 
@@ -106,7 +108,7 @@ public class ContentFilterProcessor {
             }
         }
         if (!backgrounds.isEmpty()) {
-            LOGGER.log(Level.WARNING, "Detected background on page " + pageNumber);
+            LOGGER.log(Level.WARNING, "Detected background on page " + (pageNumber + 1));
             contents.removeAll(backgrounds);
         }
     }

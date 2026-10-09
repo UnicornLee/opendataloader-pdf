@@ -40,18 +40,8 @@ public class Config {
 
     /** Hybrid mode: off (Java-only processing, no external dependency). */
     public static final String HYBRID_OFF = "off";
-    /** Hybrid mode: docling backend (Docling FastAPI server). */
-    public static final String HYBRID_DOCLING = "docling";
-    /** Hybrid mode: docling-fast backend (deprecated alias for docling). */
+    /** Hybrid mode: docling-fast backend (docling-fast-server). */
     public static final String HYBRID_DOCLING_FAST = "docling-fast";
-    /** Hybrid mode: hancom backend (Hancom Document AI). */
-    public static final String HYBRID_HANCOM = "hancom";
-    /** Hybrid mode: hancom-ai backend (Hancom AI HOCR SDK — individual modules). */
-    public static final String HYBRID_HANCOM_AI = "hancom-ai";
-    /** Hybrid mode: azure backend (Azure Document Intelligence). */
-    public static final String HYBRID_AZURE = "azure";
-    /** Hybrid mode: google backend (Google Document AI). */
-    public static final String HYBRID_GOOGLE = "google";
     private static Set<String> hybridOptions = new HashSet<>();
 
     /** Hybrid triage mode: auto (dynamic triage based on page content). */
@@ -83,6 +73,7 @@ public class Config {
     private String imageOutput = IMAGE_OUTPUT_EXTERNAL;
     private String imageFormat = IMAGE_FORMAT_PNG;
     private String imageDir;
+    private Double imageResolution;
     private String pages;
     private List<Integer> cachedPageNumbers;
     private final FilterConfig filterConfig = new FilterConfig();
@@ -90,6 +81,7 @@ public class Config {
     private final HybridConfig hybridConfig = new HybridConfig();
     private boolean includeHeaderFooter = false;
     private boolean detectStrikethrough = false;
+    private Double spaceRatio;
 
     /** Table detection method: default (border-based detection). */
     public static final String TABLE_METHOD_DEFAULT = "default";
@@ -122,11 +114,7 @@ public class Config {
         imageOutputOptions.add(IMAGE_OUTPUT_EMBEDDED);
         imageOutputOptions.add(IMAGE_OUTPUT_EXTERNAL);
         hybridOptions.add(HYBRID_OFF);
-        hybridOptions.add(HYBRID_DOCLING);
-        hybridOptions.add(HYBRID_DOCLING_FAST);  // deprecated alias
-        hybridOptions.add(HYBRID_HANCOM);
-        hybridOptions.add(HYBRID_HANCOM_AI);
-        // azure, google added when implemented
+        hybridOptions.add(HYBRID_DOCLING_FAST);
         hybridModeOptions.add(HYBRID_MODE_AUTO);
         hybridModeOptions.add(HYBRID_MODE_FULL);
     }
@@ -374,6 +362,24 @@ public class Config {
      */
     public void setUseStructTree(boolean useStructTree) {
         this.useStructTree = useStructTree;
+    }
+
+    /**
+     * Gets space ratio for TextLines parsing.
+     *
+     * @return textLineSpaceRatio.
+     */
+    public Double getSpaceRatio() {
+        return spaceRatio;
+    }
+
+    /**
+     * Sets space ratio for TextLines parsing.
+     *
+     * @param spaceRatio The space ratio (default 0.17).
+     */
+    public void setSpaceRatio(Double spaceRatio) {
+        this.spaceRatio = spaceRatio;
     }
 
     /**
@@ -656,6 +662,24 @@ public class Config {
         }
     }
 
+    /**
+     * Gets the resolution for extracted images.
+     *
+     * @return The integer value of resolution or null for default.
+     */
+    public Double getImageResolution() {
+        return imageResolution;
+    }
+
+    /**
+     * Sets the resolution for extracted images.
+     *
+     * @param imageResolution The resolution value.
+     */
+    public void setImageResolution(Double imageResolution) {
+        this.imageResolution = imageResolution;
+    }
+
     private static final String INVALID_PAGE_RANGE_FORMAT = "Invalid page range format: '%s'. Expected format: 1,3,5-7";
     /** Split limit to preserve trailing empty strings (e.g., "5-" splits to ["5", ""]). */
     private static final int SPLIT_KEEP_EMPTY_TRAILING = -1;
@@ -766,7 +790,7 @@ public class Config {
     /**
      * Gets the hybrid backend name.
      *
-     * @return The hybrid backend (off, docling, hancom, azure, google).
+     * @return The hybrid backend (off or docling-fast).
      */
     public String getHybrid() {
         return hybrid;
@@ -775,7 +799,7 @@ public class Config {
     /**
      * Sets the hybrid backend.
      *
-     * @param hybrid The hybrid backend (off, docling, hancom, azure, google).
+     * @param hybrid The hybrid backend (off or docling-fast).
      * @throws IllegalArgumentException if the backend is not supported.
      */
     public void setHybrid(String hybrid) {

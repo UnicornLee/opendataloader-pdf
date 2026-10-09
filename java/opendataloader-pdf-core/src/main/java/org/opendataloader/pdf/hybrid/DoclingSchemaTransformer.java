@@ -73,7 +73,7 @@ public class DoclingSchemaTransformer implements HybridSchemaTransformer {
 
     private static final Logger LOGGER = Logger.getLogger(DoclingSchemaTransformer.class.getCanonicalName());
 
-    private static final String BACKEND_TYPE = "docling";
+    private static final String BACKEND_TYPE = "docling-fast";
 
     // Picture index counter — accumulates across transform() calls on the same instance
     // to ensure document-unique indices when processing chunked responses (#352).
@@ -88,6 +88,13 @@ public class DoclingSchemaTransformer implements HybridSchemaTransformer {
     private static final String LABEL_PAGE_FOOTER = "page_footer";
     private static final String LABEL_LIST_ITEM = "list_item";
     private static final String LABEL_FORMULA = "formula";
+
+    // Docling section_header depth, carried as a top-level field on the text node
+    private static final String FIELD_LEVEL = "level";
+    private static final int DEFAULT_HEADING_LEVEL = 1;
+    private static final int MIN_HEADING_LEVEL = 1;
+    // Markdown stops at H6, so deeper levels are clamped rather than emitted
+    private static final int MAX_HEADING_LEVEL = 6;
 
     // Docling coordinate origins
     private static final String COORD_ORIGIN_BOTTOMLEFT = "BOTTOMLEFT";
@@ -302,12 +309,19 @@ public class DoclingSchemaTransformer implements HybridSchemaTransformer {
      * Creates a SemanticHeading from Docling section_header.
      */
     private SemanticHeading createHeading(String text, BoundingBox bbox, JsonNode textNode) {
-        int level = 1; // Default level
-
-        // Try to extract level from node metadata
-        JsonNode meta = textNode.get("meta");
-        if (meta != null && meta.has("level")) {
-            level = meta.get("level").asInt(1);
+        // Docling carries the depth as a top-level `level` on the text node. It is
+        // 1 for every heading unless the server runs with --heading-hierarchy, which
+        // infers the depth from the PDF outline, section numbering or visual style.
+        // Reading a nested `meta.level` instead left every heading at 1 (#441).
+        int level = DEFAULT_HEADING_LEVEL;
+        JsonNode levelNode = textNode.get(FIELD_LEVEL);
+        // isInt() alone would reject a value docling could widen to later — 2.0 or
+        // "2" — and drop it back to 1, which is the flat hierarchy this fixes.
+        if (levelNode != null && levelNode.canConvertToInt()) {
+            // Docling caps its own inference at 6 but allows 1..100 in the schema,
+            // and Markdown has no heading past H6.
+            level = Math.min(Math.max(levelNode.asInt(DEFAULT_HEADING_LEVEL), MIN_HEADING_LEVEL),
+                MAX_HEADING_LEVEL);
         }
 
         // Create a text chunk and wrap in TextLine
@@ -377,7 +391,6 @@ public class DoclingSchemaTransformer implements HybridSchemaTransformer {
         // Get bounding box
         BoundingBox bbox = extractBoundingBox(firstProv.get("bbox"), pageIndex, pageHeights.get(pageNo));
 
-        // Extract description from annotations (if available)
         String description = extractPictureDescription(pictureNode);
 
         // Create SemanticPicture with description
@@ -388,14 +401,31 @@ public class DoclingSchemaTransformer implements HybridSchemaTransformer {
     }
 
     /**
-     * Extracts picture description from annotations array.
+     * Reads the description from {@code meta.description}, falling back to the legacy
+     * {@code annotations} entry.
      *
-     * <p>Docling stores picture descriptions in the annotations array with kind="description".
+     * <p>Docling writes the text to {@code meta.description} always and to the
+     * {@code annotations} array while that field survives; the array is marked for removal.
+     *
+     * <p>docling-core's own readers never need the fallback, because loading a document
+     * promotes a legacy description into {@code meta.description} first. This parser reads the
+     * JSON directly and skips that step, so the fallback is where it does the same promotion --
+     * per field, since a {@code meta} node can carry a classification and no description.
      *
      * @param pictureNode The picture JSON node
      * @return The description text, or null if not available
      */
     private String extractPictureDescription(JsonNode pictureNode) {
+        JsonNode meta = pictureNode.get("meta");
+        if (meta != null) {
+            JsonNode descriptionField = meta.get("description");
+            String description = getTextValue(descriptionField, "text");
+            // Docling writes both locations, so an empty one here leaves the array as the only
+            // place a real description could be.
+            if (description != null && !description.isEmpty()) {
+                return description;
+            }
+        }
         JsonNode annotations = pictureNode.get("annotations");
         if (annotations != null && annotations.isArray()) {
             for (JsonNode annotation : annotations) {

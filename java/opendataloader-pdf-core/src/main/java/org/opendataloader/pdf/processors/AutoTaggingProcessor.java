@@ -12,7 +12,6 @@ import org.verapdf.cos.*;
 
 import org.verapdf.gf.model.factory.chunks.GraphicsState;
 import org.verapdf.gf.model.impl.operator.textshow.PUAHelper;
-import org.verapdf.gf.model.impl.sa.util.ResourceHandler;
 import org.verapdf.pd.*;
 import org.verapdf.pd.actions.PDAction;
 import org.verapdf.pd.form.PDAcroForm;
@@ -57,8 +56,13 @@ public class AutoTaggingProcessor {
     private static final String ANNOTATION_REPLACEMENT_TEXT = "Annotation";
     // Namespace for PDF 2.0-only structure types (FENote, etc.), created in createStructTreeRoot.
     private static COSObject pdf2_0Namespace;
-    // Caption elements keyed by their linked content ID (Raman's approach from #377)
-    private static final Map<Long, SemanticCaption> structElementIdToCaptionMap = new HashMap<>();
+    // Caption elements keyed by their linked content ID (Raman's approach from #377).
+    // A list, not a single caption: a float can legitimately carry one caption
+    // above it and one below — a figure titled "Figure 3.3 ..." over the image
+    // with "Source: ..." under it is ordinary. A plain put kept only the last of
+    // them and silently deleted the other's text.
+    private static final Map<Long, List<SemanticCaption>> structElementIdToCaptionMap = new HashMap<>();
+    private static Map<SemanticHeading, Integer> normalizedLevels = new IdentityHashMap<>();
     private static boolean isPDF2_0 = false;
     private static final Map<BoundingBox, PDAnnotation> annotationBBoxesMap = new LinkedHashMap<>();
     private static int currentStructParent = 0;
@@ -86,6 +90,7 @@ public class AutoTaggingProcessor {
         pageNumberToFirstStructElement.clear();
         structElementIdToCaptionMap.clear();
         annotationBBoxesMap.clear();
+        normalizedLevels.clear();
         currentStructParent = 0;
         imageChunkFigureCounter = 0;
         footnoteCounter = 0;
@@ -135,7 +140,7 @@ public class AutoTaggingProcessor {
                 cosDocument.addChangedObject(page.getObject());
             }
             COSObject contentsObject = page.getKey(ASAtom.CONTENTS);
-            ResourceHandler resourceHandler = ResourceHandler.getInstance(page.getResources());
+            PDResourcesHandler resourceHandler = PDResourcesHandler.getInstance(page.getResources(), page.isInheritedResources());
             List<Object> processedTokens = new ChunksWriter(new GraphicsState(resourceHandler),
                 resourceHandler).processTokens(ChunksWriter.getTokens(page.getContent()), operatorStreamKey);
             if (processedTokens.size() <= MAX_TOKENS_PER_STREAM) {
@@ -207,19 +212,28 @@ public class AutoTaggingProcessor {
         structTreeRoot.setKey(ASAtom.PARENT_TREE, parentTree);
         COSObject nums = COSArray.construct();
         parentTree.setKey(ASAtom.NUMS, nums);
-        int nextKey = 0;
+
+        // A number tree's keys must ascend (ISO 32000-1 7.9.7), because a reader
+        // binary-searches /Nums. Page keys and annotation keys are allocated
+        // from one counter and interleave, so writing each group in its own pass
+        // emitted descending runs: the search then missed entries that were
+        // present, and Acrobat showed no structure tag for the page's content.
+        // Collect both groups, then write once in key order. The spec constrains
+        // the emitted order, not the allocation order, so nothing upstream of
+        // here changes.
+        Map<Integer, COSObject> byKey = new TreeMap<>();
         for (Map.Entry<OperatorStreamKey, List<COSObject>> entry : structParents.entrySet()) {
-            int key = structParentsIntegers.get(entry.getKey());
-            nums.add(COSInteger.construct(key));
             COSObject array = COSArray.construct();
             for (COSObject structParent : entry.getValue()) {
                 array.add(structParent);
             }
-            nums.add(array);
-            if (key >= nextKey) nextKey = key + 1;
+            byKey.put(structParentsIntegers.get(entry.getKey()), array);
         }
-        // Add single-entry annotations (Link annotations) to parent tree
-        for (Map.Entry<Integer, COSObject> entry : annotationStructParents.entrySet()) {
+        // Single-entry annotations (Link annotations).
+        byKey.putAll(annotationStructParents);
+
+        int nextKey = 0;
+        for (Map.Entry<Integer, COSObject> entry : byKey.entrySet()) {
             nums.add(COSInteger.construct(entry.getKey()));
             nums.add(entry.getValue());
             if (entry.getKey() >= nextKey) nextKey = entry.getKey() + 1;
@@ -260,11 +274,11 @@ public class AutoTaggingProcessor {
     public static COSObject createStructureTreeElements(PDDocument document, List<List<IObject>> contents,
                                                         COSObject structTreeRoot, COSDocument cosDocument) {
         COSObject seDocument = addStructElement(structTreeRoot, cosDocument, TaggedPDFConstants.DOCUMENT, null);
-        Map<SemanticHeading, Integer> normalizedLevels = buildNormalizedHeadingLevels(contents);
+        normalizedLevels = buildNormalizedHeadingLevels(contents);
         for (int pageNumber = 0; pageNumber < contents.size(); pageNumber++) {
             processAnnotations(document, cosDocument, pageNumber);
             List<IObject> pageContents = contents.get(pageNumber);
-            addKids(pageContents, seDocument, cosDocument, normalizedLevels);
+            addKids(pageContents, seDocument, cosDocument);
             processAnnotations(cosDocument, seDocument, pageNumber);
         }
         return seDocument;
@@ -275,13 +289,14 @@ public class AutoTaggingProcessor {
      * linked float (Figure/Table/List) via addCaptionIfPresent().
      * Based on Raman Kakhnovich's approach from origin/auto_tagging #377.
      */
-    private static void addKids(List<IObject> contents, COSObject parentStructElem, COSDocument cosDocument,
-                                 Map<SemanticHeading, Integer> normalizedLevels) {
+    private static void addKids(List<IObject> contents, COSObject parentStructElem, COSDocument cosDocument) {
         // First pass: collect Caption → linkedContentId mappings
         for (IObject content : contents) {
             if (content instanceof SemanticCaption) {
-                structElementIdToCaptionMap.put(
-                    ((SemanticCaption) content).getLinkedContentId(), (SemanticCaption) content);
+                SemanticCaption caption = (SemanticCaption) content;
+                structElementIdToCaptionMap
+                    .computeIfAbsent(caption.getLinkedContentId(), key -> new ArrayList<>())
+                    .add(caption);
             }
         }
         // Second pass: create struct elements (skipping Captions — they are attached by addCaptionIfPresent)
@@ -289,18 +304,8 @@ public class AutoTaggingProcessor {
             if (content instanceof SemanticCaption) {
                 continue;
             }
-            if (content instanceof SemanticHeading && normalizedLevels != null) {
-                createHeadingStructElem((SemanticHeading) content, parentStructElem, cosDocument,
-                    normalizedLevels.get(content));
-            } else {
-                createStructElem(content, parentStructElem, cosDocument);
-            }
+            createStructElem(content, parentStructElem, cosDocument);
         }
-    }
-
-    /** Overload for nested contexts (list items, table cells) where heading normalization is not applicable. */
-    private static void addKids(List<IObject> contents, COSObject parentStructElem, COSDocument cosDocument) {
-        addKids(contents, parentStructElem, cosDocument, null);
     }
 
     /**
@@ -308,12 +313,70 @@ public class AutoTaggingProcessor {
      * of the struct element based on spatial position.
      */
     private static void addCaptionIfPresent(IObject content, COSObject linkedObject, COSDocument cosDocument) {
-        Long linkedContentId = content.getRecognizedStructureId();
-        if (linkedContentId != null && structElementIdToCaptionMap.containsKey(linkedContentId)) {
-            SemanticCaption caption = structElementIdToCaptionMap.get(linkedContentId);
-            boolean isFirst = isCaptionFirstChild(caption.getBoundingBox(), content.getBoundingBox());
-            createCaptionStructElem(caption, linkedObject, cosDocument, isFirst);
+        addCaptionIfPresent(content, linkedObject, cosDocument, linkedObject);
+    }
+
+    /**
+     * As above, but putting the Caption under {@code captionParent}.
+     *
+     * <p>They differ only for a captioned figure, which is wrapped in a Sect so
+     * the Figure and Caption are siblings. Table and L keep the caption as their
+     * own child: ISO 32000-1 Table 337 lists Caption among their permitted
+     * children, which is the {@code <table><caption>} shape, and a table's
+     * caption is not competing with an /Alt the way a figure's is.
+     */
+    private static void addCaptionIfPresent(IObject content, COSObject linkedObject, COSDocument cosDocument,
+                                            COSObject captionParent) {
+        List<SemanticCaption> captions = captionsFor(content);
+        if (captions.isEmpty()) {
+            return;
         }
+        // At most one caption on each side. PDF/UA-2 8.2.5.27.1 is checked as
+        // kidsStandardTypes.indexOf('&Caption&') < 0 — the joined child types may
+        // not contain a Caption with a sibling on both sides. So Caption/Figure,
+        // Figure/Caption and Caption/Figure/Caption all pass, while two captions
+        // on the same side do not. A caller that supplies several per side is
+        // asking for a tree this rule rejects, so the extras are dropped here
+        // rather than written out to fail validation.
+        SemanticCaption above = null;
+        SemanticCaption below = null;
+        for (SemanticCaption caption : captions) {
+            if (isCaptionFirstChild(caption.getBoundingBox(), content.getBoundingBox())) {
+                if (above == null) {
+                    above = caption;
+                }
+            } else if (below == null) {
+                below = caption;
+            }
+        }
+        // Below first: each insertion is relative to linkedObject, so placing the
+        // trailing caption before the leading one keeps both on the right side of
+        // it regardless of insertion order.
+        if (below != null) {
+            addOneCaption(below, linkedObject, cosDocument, captionParent, false);
+        }
+        if (above != null) {
+            addOneCaption(above, linkedObject, cosDocument, captionParent, true);
+        }
+    }
+
+    private static void addOneCaption(SemanticCaption caption, COSObject linkedObject,
+                                      COSDocument cosDocument, COSObject captionParent,
+                                      boolean isFirst) {
+        if (captionParent == linkedObject) {
+            createCaptionStructElem(caption, captionParent, cosDocument, isFirst);
+        } else {
+            createCaptionStructElemBeside(caption, captionParent, linkedObject, cosDocument, isFirst);
+        }
+    }
+
+    /** The Captions linked to this element, empty when it has none. */
+    private static List<SemanticCaption> captionsFor(IObject content) {
+        Long linkedContentId = content.getRecognizedStructureId();
+        if (linkedContentId == null) {
+            return Collections.emptyList();
+        }
+        return structElementIdToCaptionMap.getOrDefault(linkedContentId, Collections.emptyList());
     }
 
     /**
@@ -343,9 +406,7 @@ public class AutoTaggingProcessor {
         List<SemanticHeading> headings = new ArrayList<>();
         for (List<IObject> page : contents) {
             for (IObject obj : page) {
-                if (obj instanceof SemanticHeading) {
-                    headings.add((SemanticHeading) obj);
-                }
+                collectHeadings(obj, headings);
             }
         }
         Map<SemanticHeading, Integer> result = new IdentityHashMap<>();
@@ -373,6 +434,42 @@ public class AutoTaggingProcessor {
         return result;
     }
 
+    private static void collectHeadings(IObject object, List<SemanticHeading> headings) {
+        if (object instanceof SemanticHeading) {
+            headings.add((SemanticHeading) object);
+        }
+        if (object instanceof PDFList) {
+            for (ListItem item : ((PDFList) object).getListItems()) {
+                checkKids(item.getContents(), headings);
+            }
+        } else if (object instanceof SemanticTOC) {
+            checkKids(((SemanticTOC) object).getTOCItems(), headings);
+        } else if (object instanceof SemanticTOCI) {
+            checkKids(((SemanticTOCI) object).getContents(), headings);
+        } else if (object instanceof TableBorder) {
+            TableBorder table = (TableBorder) object;
+            if (table.isTextBlock()) {
+                checkKids(table.getCell(0,0).getContents(), headings);
+            } else if (!table.isOneCellTable()) {
+                for (int rowNumber = 0; rowNumber < table.getNumberOfRows(); rowNumber++) {
+                    TableBorderRow row = table.getRow(rowNumber);
+                    for (int colNumber = 0; colNumber < table.getNumberOfColumns(); colNumber++) {
+                        TableBorderCell cell = row.getCell(colNumber);
+                        if (cell.getRowNumber() == rowNumber && cell.getColNumber() == colNumber) {
+                            checkKids(cell.getContents(), headings);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static void checkKids(List<IObject> kids, List<SemanticHeading> out) {
+        for (IObject kid: kids) {
+            collectHeadings(kid, out);
+        }
+    }
+
     private static boolean needToAddAnnotationToStructTree(PDAnnotation annotation, PDPage page, BoundingBox boundingBox) {
         //PDF/UA-1 rule 7.18.2-1 / PDF/UA-2 rule 8.9.2.4.15-1
         if (ASAtom.TRAP_NET.equals(annotation.getSubtype())) {
@@ -395,7 +492,7 @@ public class AutoTaggingProcessor {
         } else {
             //PDF/UA-1 rules 7.18.1-1, 7.18.4-1, 7.18.5-1
             return !ASAtom.PRINTER_MARK.equals(annotation.getSubtype()) &&
-                !PDAnnotation.isOutsideCropBox(page, annotation) && PDAnnotation.isVisibleAnnotation(annotation);
+                !Boolean.TRUE.equals(PDAnnotation.isOutsideCropBox(page, annotation)) && PDAnnotation.isVisibleAnnotation(annotation);
         }
     }
 
@@ -680,7 +777,7 @@ public class AutoTaggingProcessor {
         if (object instanceof SemanticHeading) {
             // Fallback: heading inside a nested context (list/table) — use original level
             createHeadingStructElem((SemanticHeading) object, parentStructElem, cosDocument,
-                    ((SemanticHeading) object).getHeadingLevel());
+                    normalizedLevels.get(object));
         } else if (object instanceof SemanticFootnote) {
             createFootnoteStructElem((SemanticFootnote) object, parentStructElem, cosDocument);
         } else if (object instanceof SemanticParagraph) {
@@ -772,12 +869,78 @@ public class AutoTaggingProcessor {
         processTextNode(caption, captionObject);
     }
 
+    /**
+     * Creates a Caption as {@code parent}'s child, next to {@code sibling}.
+     *
+     * <p>{@code isFirstChild} on addStructElement cannot express this: it inserts
+     * at index 0 of the parent, which is only the same thing while the parent
+     * holds nothing else. For a figure's Sect that is true today, but the
+     * placement has to follow the sibling rather than the parent's start —
+     * otherwise adding anything else to the Sect silently moves the caption away
+     * from its figure, and reading order is the entire reason its position
+     * matters. 8.2.5.27.1 also wants Caption first or last among its siblings.
+     */
+    private static void createCaptionStructElemBeside(SemanticCaption caption, COSObject parent,
+                                                      COSObject sibling, COSDocument cosDocument,
+                                                      boolean before) {
+        COSObject captionObject = addStructElement(parent, cosDocument, TaggedPDFConstants.CAPTION,
+            caption.getPageNumber());
+        COSObject kids = parent.getKey(ASAtom.K);
+        if (kids.getType() == COSObjType.COS_ARRAY) {
+            // Identity, not equals. COSIndirect.equals compares getDirect(), and
+            // COSDictionary.equals is a deep key-set-and-values comparison, so two
+            // struct elements built the same way — same /S, /Type and /Pg, which is
+            // exactly what two Figures on one page look like before their kids are
+            // attached — compare equal. A value search then returns the first of
+            // them and the caption is inserted beside the wrong sibling.
+            int siblingIndex = -1;
+            for (int i = 0; i < kids.size(); i++) {
+                if (kids.at(i) == sibling) {
+                    siblingIndex = i;
+                    break;
+                }
+            }
+            if (siblingIndex >= 0) {
+                // addStructElement appended it; move it to the wanted slot. The
+                // caption is last, so removing it cannot shift the sibling.
+                kids.remove(kids.size() - 1);
+                kids.insert(before ? siblingIndex : siblingIndex + 1, captionObject);
+            }
+        }
+        processTextNode(caption, captionObject);
+    }
+
     private static void createFigureStructElem(ImageChunk image, COSObject parent, COSDocument cosDocument) {
         createFigureStructElemReturning(image, parent, cosDocument);
     }
 
     private static COSObject createFigureStructElemReturning(ImageChunk image, COSObject parent, COSDocument cosDocument) {
-        COSObject figureObject = addStructElement(parent, cosDocument, TaggedPDFConstants.FIGURE, image.getPageNumber());
+        // A captioned figure is wrapped so the Figure and its Caption are
+        // siblings rather than the caption living inside the figure. Nesting is
+        // legal — PDF/UA-2 does not list Caption among Figure's forbidden
+        // children — but it puts the caption's text in the figure's subtree,
+        // where ISO 32000-1 14.9.4 makes the figure's own /Alt stand in for
+        // everything below it, and readers disagree about which to announce.
+        //
+        // Sect, not Div. Caption is forbidden under 33 element types including
+        // Document, so lifting it to the figure's parent unwrapped fails Table 5
+        // Document-Caption.1 on any document whose figures sit at the top level.
+        // Div looked like the fix and is not: veraPDF's
+        // PDStructElem.isPassThroughTag treats Div, Part and NonStruct as
+        // transparent, and parentStandardType walks past them, so a Caption
+        // inside a Div still reports Document as its parent. Verified by
+        // building it — correct tree, correct /P pointers, same failure. Sect is
+        // absent from that list and forbids neither Caption nor Figure.
+        //
+        // Only captioned figures are wrapped: an extra level around a bare
+        // figure would add depth that carries no grouping.
+        COSObject figureParent = parent;
+        if (!captionsFor(image).isEmpty()) {
+            figureParent = addStructElement(parent, cosDocument, TaggedPDFConstants.SECT,
+                image.getPageNumber());
+            cosDocument.addChangedObject(figureParent);
+        }
+        COSObject figureObject = addStructElement(figureParent, cosDocument, TaggedPDFConstants.FIGURE, image.getPageNumber());
         double[] bbox = {image.getLeftX(), image.getBottomY(), image.getRightX(), image.getTopY()};
         addAttributeToStructElem(figureObject, ASAtom.LAYOUT, ASAtom.BBOX, COSArray.construct(4, bbox));
         // PDF/UA-1 rule 7.3-1 / PDF/UA-2 rule 8.2.5.28.2-1: every Figure must
@@ -800,7 +963,8 @@ public class AutoTaggingProcessor {
         setStringEntry(altText, figureObject, IMAGE_REPLACEMENT_TEXT, ASAtom.ALT, true);
         cosDocument.addChangedObject(figureObject);
         processImageNode(image, figureObject);
-        addCaptionIfPresent(image, figureObject, cosDocument);
+        // Into the Sect when there is one, so the caption lands beside the figure.
+        addCaptionIfPresent(image, figureObject, cosDocument, figureParent);
         return figureObject;
     }
 
@@ -831,11 +995,30 @@ public class AutoTaggingProcessor {
         // null into NONE so the hasLabel promotion and COSName.construct below
         // never receive null.
         if (numbering == null || numbering == ASAtom.NONE) {
-            boolean hasLabel = false;
-            for (ListItem item : list.getListItems()) {
-                if (item.getLabelLength() > 0) { hasLabel = true; break; }
+            boolean hasLabel;
+            ListItem first = list.getListItems().get(0);
+            hasLabel = first.getLabelLength() > 0;
+            if (hasLabel) {
+                if (list.getListItems().size() == 1) {
+                    numbering = ASAtom.UNORDERED;
+                } else {
+                    ListItem second = list.getListItems().get(1);
+                    if (Objects.equals(first.getLabelText(), second.getLabelText())) {
+                        numbering = ASAtom.UNORDERED;
+                    } else {
+                        numbering = ASAtom.ORDERED;
+                    }
+                }
+            } else {
+                numbering = ASAtom.NONE;
             }
-            numbering = hasLabel ? ASAtom.ORDERED : ASAtom.NONE;
+        }
+        if (!isPDF2_0) {
+            if (numbering == ASAtom.UNORDERED) {
+                numbering = ASAtom.DISC;
+            } else if (numbering == ASAtom.ORDERED || numbering == ASAtom.DESCRIPTION) {
+                numbering = ASAtom.NONE;
+            }
         }
         addAttributeToStructElem(listObject, ASAtom.LIST, ASAtom.LIST_NUMBERING, COSName.construct(numbering));
 
@@ -871,6 +1054,7 @@ public class AutoTaggingProcessor {
             } else if (child instanceof SemanticTOCI) {
                 SemanticTOCI tocItem = ((SemanticTOCI)child);
                 COSObject tocItemObject = addStructElement(tocObject, cosDocument, TaggedPDFConstants.TOCI, child.getPageNumber());
+                tocItemObject.setKey(ASAtom.REF, COSArray.construct());
                 SemanticTextNode tocItemTextNode = new SemanticTextNode();
                 for (TextLine line : tocItem.getLines()) {
                     tocItemTextNode.add(line);
@@ -940,7 +1124,7 @@ public class AutoTaggingProcessor {
         addCaptionIfPresent(table, partObject, cosDocument);
     }
 
-    private static void addAttributeToStructElem(COSObject structElement, ASAtom ownerASAtom, ASAtom attributeName,
+    public static void addAttributeToStructElem(COSObject structElement, ASAtom ownerASAtom, ASAtom attributeName,
                                                  COSObject attributeValue) {
         COSObject aObject = structElement.getKey(ASAtom.A);
         COSObject owner = COSName.construct(ownerASAtom);

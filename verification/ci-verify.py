@@ -78,14 +78,13 @@ COVERED_OPTIONS = {
     "--image-output", "--image-format", "--image-dir",
     "--markdown-with-html",
     "--markdown-page-separator", "--text-page-separator", "--html-page-separator",
+    "--image-resolution", "--space-ratio",
 }
 
 HYBRID_OPTIONS = {
     "--hybrid", "--hybrid-mode", "--hybrid-timeout",
     "--hybrid-fallback", "--hybrid-url",
-    "--hybrid-hancom-ai-regionlist-strategy",
-    "--hybrid-hancom-ai-ocr-strategy",
-    "--hybrid-hancom-ai-image-cache",
+    "--hybrid-chunk-size",
 }
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,16 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# One release at a time, whatever the tag: two overlapping runs would each bump
+# main from their own tag, and the one that finished second would decide.
+#
+# queue: max, because the default keeps one run pending and cancels it when the
+# next arrives — a third tag would drop the second tag's release entirely.
+concurrency:
+  group: release
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   # =================================================================
   # 0. PREFLIGHT — verify deploy credentials authenticate BEFORE the
@@ -44,10 +54,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
 
+      # A refname may contain `$(`, a backtick and `;`, and later steps
+      # interpolate VERSION into shell commands, so git's own rules are not a
+      # validation layer.
       - name: Initialize VERSION
         run: |
+          set -euo pipefail
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
+            v="${GITHUB_REF_NAME#v}"
+            [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] \
+              || { echo "::error::tag '${GITHUB_REF_NAME}' is not vN.N.N[-suffix]" >&2; exit 1; }
+            echo "VERSION=$v" >> $GITHUB_ENV
           else
             echo "VERSION=0.0.0" >> $GITHUB_ENV
           fi
@@ -75,13 +92,11 @@ jobs:
       - name: Set up Node.js and pnpm
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install pnpm
         uses: pnpm/action-setup@v6
-        with:
-          version: 9
 
       # =================================================================
       # 2. BUILD & TEST
@@ -165,25 +180,99 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # =================================================================
-      # 6. SYNC DOCS TO HOMEPAGE (only on tag push)
-      # =================================================================
+  # Siblings, both gated on a release that published everything. Neither is a
+  # step of that job any more: as steps, whichever ran first could skip the
+  # other by failing, and the bump's `actions: write` sat in a job holding
+  # every deploy credential.
+  docs:
+    needs: release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read   # the docs go to the homepage repository, not to this one
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
       - name: Generate reference docs
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         run: |
           mkdir -p content/docs/reference
           node scripts/generate-options.mjs
           node scripts/generate-schema.mjs
 
-      - name: Push reference docs to homepage
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-        # Pinned to v1.7.3 for security - verify before updating
-        uses: cpina/github-action-push-to-another-repository@55306faa4ed53b815ae49e564af8cfb359d32ae2  # v1.7.3
+      # A first-party checkout rather than a third-party push action: the
+      # token then reaches only GitHub's own code, as a header instead of in
+      # a clone URL, and the post-job step removes it.
+      - name: Check out homepage
+        uses: actions/checkout@v7
         with:
-          source-directory: 'content/docs/reference'
-          destination-github-username: 'opendataloader-project'
-          destination-repository-name: 'opendataloader.org'
-          target-directory: 'apps/v1/content/docs/reference'
-          target-branch: main
+          repository: 'opendataloader-project/opendataloader.org'
+          # develop is where site work lands before fast-forwarding into
+          # staging, then main; only those two deploy.
+          ref: 'develop'
+          token: ${{ secrets.HOMEPAGE_SYNC_TOKEN }}
+          path: homepage
+
+      - name: Push reference docs to homepage
+        working-directory: homepage
+        run: |
+          target=apps/web/content/docs/reference
+          rm -rf "$target"
+          cp -R ../content/docs/reference "$target"
+          git add -A "$target"
+          if git diff --cached --quiet; then
+            echo "Reference docs unchanged; nothing to push."
+            exit 0
+          fi
+          git config user.name opendataloader-bot
+          git config user.email open.dataloader@hancom.com
+          git commit -q -m "docs(reference): sync from opendataloader-pdf ${GITHUB_REF_NAME}" \
+            -m "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+          # Site work also lands on develop, so it may have moved since the checkout.
+          git push origin HEAD || { git pull -q --rebase origin develop && git push origin HEAD; }
+
+  # Without this, the next push to main would republish a snapshot under a
+  # coordinate that is now a release. After the publishes, never before: a bump
+  # ahead of a failed deploy would leave main claiming a release that does not
+  # exist.
+  bump:
+    needs: release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # push the bump branch
+      pull-requests: write   # open and merge the bump's pull request
+      actions: write         # dispatch snapshot.yml
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      # set-dev-version.sh writes the Java version with `mvn versions:set` and
+      # the Node one with `pnpm version`; the Python manifests it edits as text.
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Begin the next development version
         env:
-          API_TOKEN_GITHUB: ${{ secrets.HOMEPAGE_SYNC_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASED_TAG: ${{ github.ref_name }}
+        run: ./scripts/open-version-bump-pr.sh

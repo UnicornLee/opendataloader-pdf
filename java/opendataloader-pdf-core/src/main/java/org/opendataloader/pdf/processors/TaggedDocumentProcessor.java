@@ -4,7 +4,10 @@ import org.opendataloader.pdf.api.Config;
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.entities.EnrichedImageChunk;
 import org.opendataloader.pdf.entities.SemanticFootnote;
+import org.verapdf.as.ASAtom;
 import org.verapdf.gf.model.impl.sa.GFSANode;
+import org.verapdf.gf.model.impl.sa.structelems.GFSAL;
+import org.verapdf.tools.AttributeHelper;
 import org.verapdf.wcag.algorithms.entities.*;
 import org.verapdf.wcag.algorithms.entities.content.ImageChunk;
 import org.verapdf.wcag.algorithms.entities.content.TextBlock;
@@ -52,7 +55,6 @@ public class TaggedDocumentProcessor {
             if (!shouldProcessPage(pageNumber)) {
                 continue;
             }
-            DocumentProcessor.setIDs(artifacts.get(pageNumber));
             contents.get(pageNumber).addAll(artifacts.get(pageNumber));
         }
         for (int pageNumber = 0; pageNumber < totalPages; pageNumber++) {
@@ -61,6 +63,7 @@ public class TaggedDocumentProcessor {
             }
             List<IObject> pageContents = TextLineProcessor.processTextLines(contents.get(pageNumber));
             contents.set(pageNumber, ParagraphProcessor.processParagraphs(pageContents));
+            DocumentProcessor.setIDs(contents.get(pageNumber));
         }
         return contents;
     }
@@ -147,13 +150,15 @@ public class TaggedDocumentProcessor {
     private static void addObjectToContent(IObject object) {
         Integer pageNumber = object.getPageNumber();
         if (pageNumber != null && shouldProcessPage(pageNumber)) {
+            if (!(object instanceof TextChunk) && object.getRecognizedStructureId() == null) {
+                object.setRecognizedStructureId(StaticLayoutContainers.incrementContentId());
+            }
             if (contentsStack.isEmpty()) {
                 contents.get(pageNumber).add(object);
             } else {
                 contentsStack.peek().add(object);
             }
         }
-        object.setRecognizedStructureId(StaticLayoutContainers.incrementContentId());
     }
 
     private static void processParagraph(INode paragraph) {
@@ -196,6 +201,9 @@ public class TaggedDocumentProcessor {
 
     private static void processList(INode node) {
         PDFList list = new PDFList();
+        GFSAL gfsal = (GFSAL) ((GFSANode) node).getStructElem();
+        String listNumbering = AttributeHelper.getListNumbering(gfsal.getStructElemDictionary().getObject());
+        list.setNumberingStyle(ListProcessor.getNumberingStyle(ASAtom.getASAtom(listNumbering)));
         list.setBoundingBox(new MultiBoundingBox());
         for (INode child : node.getChildren()) {
             if (child.getInitialSemanticType() == SemanticType.LIST) {
@@ -225,7 +233,6 @@ public class TaggedDocumentProcessor {
                 listItem.getContents().add(content);
             }
         }
-        listItem.setRecognizedStructureId(StaticLayoutContainers.incrementContentId());
         return listItem;
     }
 
@@ -300,6 +307,7 @@ public class TaggedDocumentProcessor {
         }
         TableBorder tableBorder = new TableBorder(tableBoundingBox, createRowsForTable(table, numberOfRows, numberOfColumns),
             numberOfRows, numberOfColumns);
+        tableBorder.setRecognizedStructureId(null);
         setBoundingBoxesForTableRowsAndTableCells(tableBorder);
         addObjectToContent(tableBorder);
     }
@@ -364,14 +372,15 @@ public class TaggedDocumentProcessor {
             }
         }
         if (!textBlock.isEmpty()) {
-            cell.getContents().add(ParagraphProcessor.createParagraphFromTextBlock(textBlock));
+            SemanticParagraph newParagraph = ParagraphProcessor.createParagraphFromTextBlock(textBlock);
+            newParagraph.setRecognizedStructureId(StaticLayoutContainers.incrementContentId());
+            cell.getContents().add(newParagraph);
         }
         BoundingBox cellBoundingBox = new MultiBoundingBox();
         for (IObject content : cell.getContents()) {
             cellBoundingBox.union(content.getBoundingBox());
         }
         cell.setBoundingBox(cellBoundingBox);
-        cell.setRecognizedStructureId(StaticLayoutContainers.incrementContentId());
     }
 
     private static void processChildContents(INode elem, List<IObject> contents) {
@@ -393,7 +402,6 @@ public class TaggedDocumentProcessor {
                 if (rows[rowNumber].getCell(colNumber) == null) {
                     TableBorderCell cell = new TableBorderCell(rowNumber, colNumber, 1, 1, 0L);
                     cell.setSemanticType(SemanticType.TABLE_CELL);
-                    cell.setRecognizedStructureId(StaticLayoutContainers.incrementContentId());
                     rows[rowNumber].getCells()[colNumber] = cell;
                 }
             }
@@ -463,7 +471,6 @@ public class TaggedDocumentProcessor {
                 tocItem.getContents().add(content);
             }
         }
-        tocItem.setRecognizedStructureId(StaticLayoutContainers.incrementContentId());
         return tocItem;
     }
 

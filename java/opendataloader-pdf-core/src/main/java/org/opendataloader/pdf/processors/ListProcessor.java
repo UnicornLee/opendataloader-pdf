@@ -15,6 +15,7 @@
  */
 package org.opendataloader.pdf.processors;
 
+import org.opendataloader.pdf.containers.StaticLayoutContainers;
 import org.opendataloader.pdf.utils.BulletedParagraphUtils;
 import org.verapdf.as.ASAtom;
 import org.verapdf.wcag.algorithms.entities.INode;
@@ -30,6 +31,9 @@ import org.verapdf.wcag.algorithms.entities.lists.PDFList;
 import org.verapdf.wcag.algorithms.entities.lists.TextListInterval;
 import org.verapdf.wcag.algorithms.entities.lists.info.ListItemInfo;
 import org.verapdf.wcag.algorithms.entities.lists.info.ListItemTextInfo;
+import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorder;
+import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorderCell;
+import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorderRow;
 import org.verapdf.wcag.algorithms.semanticalgorithms.utils.ChunksMergeUtils;
 import org.verapdf.wcag.algorithms.semanticalgorithms.utils.ListLabelsUtils;
 import org.verapdf.wcag.algorithms.semanticalgorithms.utils.ListUtils;
@@ -50,6 +54,7 @@ public class ListProcessor {
     private static final double LIST_ITEM_BASELINE_DIFFERENCE = 1.2;
     private static final double LIST_ITEM_X_INTERVAL_RATIO = 0.3;
     private static final Pattern ATTACHMENTS_PATTERN = Pattern.compile("^붙\\s*임\\s*(?=.)");
+    private static final Pattern DOUBLE_PATTERN = Pattern.compile("\\d+\\.\\d+");
 
     /**
      * Maximum number of intervals to scan backward when matching a TextLine to an existing list.
@@ -57,24 +62,44 @@ public class ListProcessor {
      */
     private static final int MAX_LIST_INTERVAL_LOOKBACK = 500;
 
-    private static final Map<String, ASAtom> listNumberingMap = new HashMap<>();
+    private static final Map<String, ASAtom> numberingStyleToListNumbering = new HashMap<>();
+    private static final Map<ASAtom, String> listNumberingToNumberingStyle = new HashMap<>();
 
     static {
-        listNumberingMap.put(NumberingStyleNames.ENGLISH_LETTERS, ASAtom.ORDERED);
-        listNumberingMap.put(NumberingStyleNames.ENGLISH_LETTERS_UPPER_CASE, ASAtom.UPPER_ALPHA);
-        listNumberingMap.put(NumberingStyleNames.ENGLISH_LETTERS_LOWER_CASE, ASAtom.LOWER_ALPHA);
-        listNumberingMap.put(NumberingStyleNames.ROMAN_NUMBERS_LOWER_CASE, ASAtom.LOWER_ROMAN);
-        listNumberingMap.put(NumberingStyleNames.ROMAN_NUMBERS, ASAtom.ORDERED);
-        listNumberingMap.put(NumberingStyleNames.ROMAN_NUMBERS_UPPER_CASE, ASAtom.UPPER_ROMAN);
-        listNumberingMap.put(NumberingStyleNames.KOREAN_LETTERS, ASAtom.ORDERED);
-        listNumberingMap.put(NumberingStyleNames.ARABIC_NUMBERS, ASAtom.DECIMAL);
-        listNumberingMap.put(NumberingStyleNames.CIRCLED_ARABIC_NUMBERS, ASAtom.ORDERED);
-        listNumberingMap.put(NumberingStyleNames.UNORDERED,ASAtom.UNORDERED);
-        listNumberingMap.put(NumberingStyleNames.UNKNOWN, ASAtom.NONE);
+        numberingStyleToListNumbering.put(NumberingStyleNames.ENGLISH_LETTERS, ASAtom.ORDERED);
+        numberingStyleToListNumbering.put(NumberingStyleNames.ENGLISH_LETTERS_UPPER_CASE, ASAtom.UPPER_ALPHA);
+        numberingStyleToListNumbering.put(NumberingStyleNames.ENGLISH_LETTERS_LOWER_CASE, ASAtom.LOWER_ALPHA);
+        numberingStyleToListNumbering.put(NumberingStyleNames.ROMAN_NUMBERS_LOWER_CASE, ASAtom.LOWER_ROMAN);
+        numberingStyleToListNumbering.put(NumberingStyleNames.ROMAN_NUMBERS, ASAtom.ORDERED);
+        numberingStyleToListNumbering.put(NumberingStyleNames.ROMAN_NUMBERS_UPPER_CASE, ASAtom.UPPER_ROMAN);
+        numberingStyleToListNumbering.put(NumberingStyleNames.KOREAN_LETTERS, ASAtom.ORDERED);
+        numberingStyleToListNumbering.put(NumberingStyleNames.ARABIC_NUMBERS, ASAtom.DECIMAL);
+        numberingStyleToListNumbering.put(NumberingStyleNames.CIRCLED_ARABIC_NUMBERS, ASAtom.ORDERED);
+        numberingStyleToListNumbering.put(NumberingStyleNames.UNORDERED,ASAtom.UNORDERED);
+        numberingStyleToListNumbering.put(NumberingStyleNames.UNKNOWN, ASAtom.NONE);
+        numberingStyleToListNumbering.put(NumberingStyleNames.ORDERED, ASAtom.ORDERED);
+        numberingStyleToListNumbering.put(NumberingStyleNames.DESCRIPTION, ASAtom.DESCRIPTION);
+
+        listNumberingToNumberingStyle.put(ASAtom.UPPER_ALPHA, NumberingStyleNames.ENGLISH_LETTERS_UPPER_CASE);
+        listNumberingToNumberingStyle.put(ASAtom.LOWER_ALPHA,  NumberingStyleNames.ENGLISH_LETTERS_LOWER_CASE);
+        listNumberingToNumberingStyle.put(ASAtom.UPPER_ROMAN, NumberingStyleNames.ROMAN_NUMBERS_UPPER_CASE);
+        listNumberingToNumberingStyle.put(ASAtom.LOWER_ROMAN, NumberingStyleNames.ROMAN_NUMBERS_LOWER_CASE);
+        listNumberingToNumberingStyle.put(ASAtom.DECIMAL, NumberingStyleNames.ARABIC_NUMBERS);
+        listNumberingToNumberingStyle.put(ASAtom.CIRCLE, NumberingStyleNames.UNORDERED);
+        listNumberingToNumberingStyle.put(ASAtom.DISC, NumberingStyleNames.UNORDERED);
+        listNumberingToNumberingStyle.put(ASAtom.SQUARE, NumberingStyleNames.UNORDERED);
+        listNumberingToNumberingStyle.put(ASAtom.UNORDERED, NumberingStyleNames.UNORDERED);
+        listNumberingToNumberingStyle.put(ASAtom.ORDERED, NumberingStyleNames.ORDERED);
+        listNumberingToNumberingStyle.put(ASAtom.NONE, NumberingStyleNames.UNKNOWN);
+        listNumberingToNumberingStyle.put(ASAtom.DESCRIPTION, NumberingStyleNames.DESCRIPTION);
     }
 
     public static ASAtom getListNumbering(String numberingStyle) {
-        return listNumberingMap.get(numberingStyle);
+        return numberingStyleToListNumbering.get(numberingStyle);
+    }
+
+    public static String getNumberingStyle(ASAtom listNumbering) {
+        return listNumberingToNumberingStyle.get(listNumbering);
     }
 
     public static void processLists(List<List<IObject>> contents, boolean isTableCell) {
@@ -124,7 +149,6 @@ public class ListProcessor {
     private static List<IObject> processListItemContent(List<IObject> contents) {
         List<IObject> newContents = ParagraphProcessor.processParagraphs(contents);
         newContents = ListProcessor.processListsFromTextNodes(newContents);
-        DocumentProcessor.setIDs(newContents);
         List<List<IObject>> contentsList = new ArrayList<>(1);
         contentsList.add(newContents);
         ListProcessor.checkNeighborLists(contentsList);
@@ -133,7 +157,7 @@ public class ListProcessor {
     }
 
     private static void processTextNodeListItemContent(List<IObject> contents) {
-        DocumentProcessor.setIDs(contents);
+        DocumentProcessor.setIDs(contents, true);
     }
 
     private static List<TextListInterval> getTextLabelListIntervals(List<List<IObject>> contents) {
@@ -192,7 +216,7 @@ public class ListProcessor {
                 }
             } catch (StringIndexOutOfBoundsException e) {
                 // Malformed label cannot be matched; treat as new list (isSingle remains true)
-                LOGGER.log(Level.WARNING, "Malformed list label, starting new list: " + listItemTextInfo.getListItemValue().getValue(), e);
+                LOGGER.log(Level.WARNING, "Malformed list label, starting new list: " + listItemTextInfo.getListItemValue().getValue());
                 break;
             }
             if (shouldHaveSameLeftDifference && !NodeUtils.areCloseNumbers(previousLeftDifference, leftDifference)) {
@@ -234,6 +258,10 @@ public class ListProcessor {
     }
 
     private static PDFList calculateList(TextListInterval interval, int startIndex, int endIndex, List<IObject> pageContents) {
+        return calculateList(interval, startIndex, endIndex, pageContents, false);
+    }
+
+    private static PDFList calculateList(TextListInterval interval, int startIndex, int endIndex, List<IObject> pageContents, boolean isHybrid) {
         PDFList list = new PDFList();
         list.setNumberingStyle(interval.getNumberingStyle());
         list.setCommonPrefix(interval.getCommonPrefix());
@@ -264,6 +292,9 @@ public class ListProcessor {
                 addContentToLastPageListItem(nextIndex, currentInfo, pageContents, listItem);
             }
             listItem.setLabelLength(currentInfo.getLabelLength());
+            if (isHybrid) {
+                listItem.setRecognizedStructureId(StaticLayoutContainers.incrementContentId());
+            }
             list.add(listItem);
         }
         if (list.getListItems().isEmpty()) {
@@ -378,6 +409,10 @@ public class ListProcessor {
     }
 
     public static List<IObject> processListsFromTextNodes(List<IObject> contents) {
+        return processListsFromTextNodes(contents, false);
+    }
+
+    public static List<IObject> processListsFromTextNodes(List<IObject> contents, boolean isHybrid) {
         List<SemanticTextNode> textNodes = new ArrayList<>();
         List<Integer> textNodesIndexes = new ArrayList<>();
         for (int index = 0; index < contents.size(); index++) {
@@ -397,9 +432,11 @@ public class ListProcessor {
                 continue;
             }
             textListInterval.setCommonSuffixLengthToAllInfos();
-            PDFList list = calculateList(textListInterval, 0, interval.getNumberOfListItems() - 1, contents);
-            for (ListItem listItem : list.getListItems()) {
-                processTextNodeListItemContent(listItem.getContents());
+            PDFList list = calculateList(textListInterval, 0, interval.getNumberOfListItems() - 1, contents, isHybrid);
+            if (isHybrid) {
+                for (ListItem listItem : list.getListItems()) {
+                    processTextNodeListItemContent(listItem.getContents());
+                }
             }
         }
         return DocumentProcessor.removeNullObjectsFromList(contents);
@@ -433,7 +470,7 @@ public class ListProcessor {
     private static boolean isDoubles(TextListInterval interval) {
         for (ListItemTextInfo listItemTextInfo : interval.getListItemsInfos()) {
             if (listItemTextInfo != null) {
-                if (!listItemTextInfo.getListItemValue().getValue().matches("^\\d+\\.\\d+$")) {
+                if (!DOUBLE_PATTERN.matcher(listItemTextInfo.getListItemValue().getValue()).matches()) {
                     return false;
                 }
             } else {
@@ -443,12 +480,31 @@ public class ListProcessor {
         return true;
     }
 
+    public static void checkNeighborListsInTable(TableBorder tableBorder) {
+        for (int rowNumber = 0; rowNumber < tableBorder.getNumberOfRows(); rowNumber++) {
+            TableBorderRow row = tableBorder.getRow(rowNumber);
+            for (int colNumber = 0; colNumber < tableBorder.getNumberOfColumns(); colNumber++) {
+                TableBorderCell tableBorderCell = row.getCell(colNumber);
+                if (tableBorderCell.getRowNumber() == rowNumber && tableBorderCell.getColNumber() == colNumber) {
+                    List<List<IObject>> contentsList = new ArrayList<>(1);
+                    contentsList.add(tableBorderCell.getContents());
+                    checkNeighborLists(contentsList);
+                    tableBorderCell.setContents(contentsList.get(0));
+                }
+            }
+        }
+    }
+
     public static void checkNeighborLists(List<List<IObject>> contents) {
         PDFList previousList = null;
         SemanticTextNode middleContent = null;
         for (List<IObject> pageContents : contents) {
             DocumentProcessor.setIndexesForContentsList(pageContents);
             for (IObject content : pageContents) {
+                if (content instanceof TableBorder) {
+                    TableBorder tableBorder = (TableBorder) content;
+                    checkNeighborListsInTable(tableBorder);
+                }
                 if (content instanceof PDFList) {
                     PDFList currentList = (PDFList) content;
                     if (previousList != null) {
