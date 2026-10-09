@@ -58,10 +58,22 @@
         <maven.compiler.source>11</maven.compiler.source>
         <maven.compiler.target>11</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <verapdf.version>1.31.99</verapdf.version>
-        <!-- Removal prohibited. wcag-validation declares this as a range, so
-             identical commits resolve to differing versions without the pin. -->
-        <verapdf.wcag.algs.version>1.31.33</verapdf.wcag.algs.version>
+        <!-- Consumed from the valueonline forks (branch valueonline-20260722 of
+             veraPDF-validation and veraPDF-wcag-algs), built with mvn install to
+             the local repository. The -valueonline suffix keeps these private
+             builds from colliding with the identically-versioned upstream
+             releases on vera-dev, so Maven can only resolve them from the fork. -->
+        <verapdf.version>1.31.99-valueonline</verapdf.version>
+        <verapdf.wcag.algs.version>1.31.33-valueonline</verapdf.wcag.algs.version>
+        <!-- The fork's released validation pom still references parser, pdf-model,
+             core and verapdf-xmp-core as the range [1.31.0,1.32.0-RC) (it does not
+             substitute fixed versions), which ban-dynamic-versions rejects. These
+             are the concrete versions the fork resolved against; the direct
+             dependencyManagement entries below pin them so the imported BOM's
+             ranges are overridden (a direct entry beats an imported one). -->
+        <verapdf.parser.version>1.31.62</verapdf.parser.version>
+        <verapdf.pdfmodel.version>1.31.14</verapdf.pdfmodel.version>
+        <verapdf.library.version>1.31.45</verapdf.library.version>
         <!-- Bump only on a wcag-algorithms bump: vera classes require the
              PDFBox they were built against. Verification is samples/pdf with
              -f pdf included; tests pass either way. -->
@@ -124,19 +136,13 @@
                 </exclusions>
             </dependency>
             <!--
-              veraPDF ships no BOM, but its released `validation` parent is
-              packaging=pom and carries a dependencyManagement for parser,
-              pdf-model, core and verapdf-xmp-core. Those entries reference
-              properties, and the same pom defines those properties as fixed
-              versions - veraPDF's source tree states them as ranges, which its
-              release process substitutes. Importing this pom therefore lets the
-              modules below declare those artifacts without a version, keeping
-              the combination vera released as the single source of truth rather
-              than four numbers copied into this file.
-
-              Only wcag-algorithms stays a range in the released pom, which is
-              why it is pinned separately above. That pin is what keeps the
-              enforcer rule below satisfied.
+              Import the fork's released `validation` parent (packaging=pom) so
+              the modules below can declare validation-model, wcag-validation and
+              wcag-algorithms against a single ${verapdf.version}. Note: this
+              released pom does NOT substitute fixed versions for parser,
+              pdf-model, core and verapdf-xmp-core - it still states them as the
+              range [1.31.0,1.32.0-RC) - so those four are pinned explicitly just
+              below, which overrides the imported ranges.
             -->
             <dependency>
                 <groupId>org.verapdf</groupId>
@@ -144,6 +150,29 @@
                 <version>${verapdf.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
+            </dependency>
+            <!-- Pinned to override the [1.31.0,1.32.0-RC) ranges the imported
+                 validation pom carries for these (see verapdf.*.version above);
+                 without them ban-dynamic-versions fails the build. -->
+            <dependency>
+                <groupId>org.verapdf</groupId>
+                <artifactId>parser</artifactId>
+                <version>${verapdf.parser.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.verapdf</groupId>
+                <artifactId>pdf-model</artifactId>
+                <version>${verapdf.pdfmodel.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.verapdf</groupId>
+                <artifactId>core</artifactId>
+                <version>${verapdf.library.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.verapdf</groupId>
+                <artifactId>verapdf-xmp-core</artifactId>
+                <version>${verapdf.library.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.apache.pdfbox</groupId>
