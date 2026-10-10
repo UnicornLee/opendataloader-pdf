@@ -227,6 +227,20 @@
             <name>Vera development</name>
             <url>https://artifactory.openpreservation.org/artifactory/vera-dev</url>
         </repository>
+        <repository>
+            <releases>
+                <enabled>true</enabled>
+                <updatePolicy>always</updatePolicy>
+                <checksumPolicy>fail</checksumPolicy>
+            </releases>
+            <snapshots>
+                <enabled>true</enabled>
+                <updatePolicy>always</updatePolicy>
+                <checksumPolicy>fail</checksumPolicy>
+            </snapshots>
+            <id>stock-nexus</id>
+            <url>https://nexus.valueonline.cn/repository/maven-releases/</url>
+        </repository>
     </repositories>
     <pluginRepositories>
         <pluginRepository>
