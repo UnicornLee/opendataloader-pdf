@@ -1,7 +1,7 @@
 # 2026-10-10 — PDF 解析 JSON 新增文档级 `header_and_footer` 字段（页眉页脚文本收集 + 页码忽略）
 
 > 任务：在每页 JSON 序列化链路中收集页眉/页脚文本，输出一个 map 字段 `header_and_footer`（含 `header`/`footer` 两个 key）。
-> 需求经三次演进：① 最初"每页一个"→ ② 页码识别规则按真实语料两轮扩展 → ③ 最终改为"整个文件一个、与 `data` 同级"。
+> 需求经四次演进：① 最初"每页一个"→ ② 页码识别规则按真实语料两轮扩展 → ③ 改为"整个文件一个、与 `data` 同级"（已提交 `35a1057`）→ ④ 追加"带繁体字页码信息所在行整行忽略"（含 `頁` 码点修正，见 §3.8）。
 > 回归样本（`docs/pdf/` 选 5 份）：`201501131782598903817032205.pdf`、`20260507AN202606291826520711.pdf`、`202302281677505819604328.pdf`、`202609301790668003861064835.pdf`、`200910301782365038553054634.pdf`
 > 涉及文件（生产改动仅 2 个）：
 >
@@ -9,7 +9,7 @@
 > - `java/.../pdf/json/JsonWriter.java`（新增 4 个 import + 6 个方法/常量 + 1 处顶层调用）
 >
 > 核心类 `SemanticHeaderOrFooter` / `TextLine` / `SemanticTextNode` / `TextColumn` / `TextBlock` / `PDFList` / `ListItem` 均在依赖库 **veraPDF-wcag-algs**（本工作区非源码，只读）。
-> 状态：**已实现并通过 5 份真实 PDF 全文回归（`ISSUES FOUND: False`），临时文件已清理，未 git 提交**。
+> 状态：**① ~ ③（文档级字段）已提交 `35a1057`；④（繁体页码整行忽略 + 码点修正）为 `JsonWriter.java` 上未提交改动，已用真实 PDF 验证通过、临时文件已清理**。
 
 ---
 
@@ -101,6 +101,17 @@ Collections.reverse(pageContents);   // → topY 降序 = 视觉从上到下
 
 > 注意：`writeHeaderAndFooterField` 会对 `contents.get(pageNumber)` **原地再排一次序**；`writePageToGenerator` 之前也排过，排序幂等，不冲突。
 
+### 3.8 追加需求：繁体页码整行忽略（`20260703…` 样本）—— 码点取证的必要性
+用户给出 `docs/pdf/202607031785475239781003380.pdf`：页脚每行为 `第 1 頁 共 6 頁 …… v 1.3.0`，要求"带繁体字页码信息所在的行"整行忽略。
+
+**从现象到根因的完整定位**：
+1. 现象：这类行未被忽略。初判——"整行须为纯页码"这条规则太严，行尾挂了版本号 `v 1.3.0`，`isPageNumber` 的 full-match 失败。
+2. 加规则：新增 `CJK_PAGE_MARKER_PATTERN = 第[0-9０-９]+[页頁]`，在 `isPageNumber` 里对去空白文本做 `find()`（**包含即视为页码行**），且只作用于页脚（`ignorePageNumber=true` 分支），页眉不受影响。
+3. 重跑**仍未忽略** → 用 Python 逐字符打印码点取证，挖出真正的坑：**这份 PDF 里繁体 `頁` 的码点是 `U+9801`，而代码里（含原 `PAGE_NUMBER_PATTERN`）一直把它写成 `\u9805`——但 `U+9805` 其实是 `項`！** 于是连纯 `第1頁` 都匹配不到（中间的空白是普通 `U+0020`，能被 `\s` 去掉，非空白问题）。
+4. 修正：所有表示繁体"頁"的 `\u9805` → `\u9801`（共 6 处：原正则分支 2 + 新常量 1 + javadoc 3）。重跑后页脚 6 行整行丢弃，`header_and_footer` 仅剩 `header=FF305`。
+
+> 附带修正：`PAGE_NUMBER_PATTERN` 的 `第\d+[页頁]` 分支此前因错用 `\u9805` 同样匹配不到真实繁体页码，本次一并纠正——属纯 bugfix，对早前 5 份拉丁/数字页码样本无行为变化。
+
 ---
 
 ## 4. 最终实现要点
@@ -124,13 +135,18 @@ import org.verapdf.wcag.algorithms.entities.lists.ListItem;
 ```java
 private static final int HEADER_MAX_TOTAL_LENGTH = 500;
 private static final int FOOTER_MAX_TOTAL_LENGTH = 400;
-// 源码中 unicode 用 \u00b7 \u2013 \u2014 \u7b2c \u9875 \u9805 \u5171 \u2116 转义书写
+// 源码中 unicode 用 \u00b7 \u2013 \u2014 \u7b2c \u9875(页) \u9801(頁) \u5171 \u2116 转义书写；
+// ⚠️ 繁体"頁"是 U+9801，不是 U+9805（后者是"項"）——曾写错导致繁体页码匹配不到，见 §3.8
 private static final Pattern PAGE_NUMBER_PATTERN = Pattern.compile(
         "^(?:\\d+(?:[./-]\\d+)*|"
         + "[-_.\u00b7\u2013\u2014]+[0-9ivxlcdm]+(?:[./-][0-9ivxlcdm]+)*[-_.\u00b7\u2013\u2014]+|"
-        + "\u7b2c\\d+[\u9875\u9805](?:\u5171\\d+[\u9875\u9805])?|"
+        + "\u7b2c\\d+[\u9875\u9801](?:\u5171\\d+[\u9875\u9801])?|"
         + "(?:page|no|\u2116)\\d+)$",
         Pattern.CASE_INSENSITIVE);
+
+// §3.8 追加：页脚行只要*包含*CJK 页码标记即整行忽略（可带版本号等尾部修饰）
+private static final Pattern CJK_PAGE_MARKER_PATTERN = Pattern.compile(
+        "\u7b2c[0-9\uff10-\uff19]+[\u9875\u9801]");
 ```
 
 ### 4.4 文档级聚合方法
@@ -196,7 +212,9 @@ private static void appendHeaderOrFooterLines(SemanticHeaderOrFooter hf, List<St
 }
 
 private static boolean isPageNumber(String text) {
-    return PAGE_NUMBER_PATTERN.matcher(text.replaceAll("\\s+", "")).matches();  // 去空格后匹配
+    String compact = text.replaceAll("\\s+", "");
+    return PAGE_NUMBER_PATTERN.matcher(compact).matches()        // 整行是纯页码
+            || CJK_PAGE_MARKER_PATTERN.matcher(compact).find();   // 或含 CJK 页码标记（繁体页码整行忽略，§3.8）
 }
 ```
 
@@ -227,6 +245,7 @@ jsonGenerator.writeEndObject();
 | 20230228… | 765 | 1 条（公司名 + 招股意向书） | 0（`1-1-1` 类页脚已忽略） |
 | 20260930… | 2 | 1 条（证券代码：600420 … 公告编号：2026-063） | 0 |
 | 20091030… | 537 | 0 | 8 条（`–EGM-1–`… 附录标签） |
+| 20260703…（§3.8 追加，6 页） | 6 | 1 条（`FF305`） | 0（`第N頁共6頁 … v1.3.0` 繁体页码整行忽略） |
 
 **最终 `ISSUES FOUND: False`。**
 
@@ -250,7 +269,7 @@ jsonGenerator.writeEndObject();
 
 1. **章节标签 vs 页码的边界**：`–S-1–`、`–EGM-1–` 这类含非罗马字母的"章节-页码"标签当前**保留**（判定为页脚附加信息，非纯页码）。若业务希望一并忽略，需引入"字母前缀 + 数字"的更宽分支，但要防止误吞真实页脚说明文字。
 2. **`PAGE_NUMBER_PATTERN` 的 `[0-9ivxlcdm]` 罗马字符集**：只覆盖小写罗马字母（配 `CASE_INSENSITIVE` 等效覆盖大写），未含 `s`（如某些页码用 `S` 表 section）——`–S-1–` 正因 `S` 不在集合内而保留，与"章节标签保留"目标巧合一致。
-3. **改动尚未 git 提交**：工作区当前仅 `JsonName.java` + `JsonWriter.java` 两处正式改动，需按项目提交规范入库。
+3. **提交状态**：文档级字段主体（`JsonName.java` + `JsonWriter.java`）已提交 `35a1057`；§3.8 的繁体页码整行忽略 + 码点修正目前为 `JsonWriter.java` 上的未提交改动，需按项目规范入库。
 4. **长度上限（500/400）与"宽松页码"是样本驱动经验值**：跨更杂语料（超长页眉、多段页脚）可能需再调。
 
 ---
@@ -262,6 +281,8 @@ jsonGenerator.writeEndObject();
 3. **识别类规则（页码）要"跑语料"而非"拍脑袋"**：宽松规格下，数字序列、装饰罗马、字母数字混合三类都是回归里一版版补出来的；一次性写死大概率漏。
 4. **字段从逐页升到文档级是"聚合 + 位置"双重改造**：不只是把方法挪个地方——要把逐页的局部 list/seen/length 提升为跨页共享累加器，并把写出点移到 `data` 数组之外、顶层对象闭合之前，同时用 try/catch 隔离以免破坏整棵树。
 5. **收尾纪律**：临时 runner/脚本/classpath/输出目录全部删除，`DebugSample` 的调试路径改动 `git checkout` 还原，`git status` 只留正式改动文件——保证交付面干净可审。
+6. **CJK 正则的汉字码点必须实测反查，绝不能凭记忆写 `\uXXXX`**：`頁`=U+9801 被误写成 `\u9805`（其实是`項`），导致繁体页码长期匹配不到；形近字（頁/項/……）是高危坑。遇到"正则莫名不命中 CJK"时，第一步是用 Python `ord()` 打印目标文本的逐字符真实码点，而不是反复调逻辑。
+7. **忽略判定分两档**：拉丁/数字页码走"整行 full-match"（保守，避免误吞含数字的真实页脚），CJK 页码走"包含即忽略"（find，因页脚常与版本号/共N页等修饰混排）——两类语义不同，不能用同一种匹配模式硬套。
 
 ---
 

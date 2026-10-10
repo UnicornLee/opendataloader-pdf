@@ -615,9 +615,19 @@ public class JsonWriter {
     private static final Pattern PAGE_NUMBER_PATTERN = Pattern.compile(
             "^(?:\\d+(?:[./-]\\d+)*|"
             + "[-_.\u00b7\u2013\u2014]+[0-9ivxlcdm]+(?:[./-][0-9ivxlcdm]+)*[-_.\u00b7\u2013\u2014]+|"
-            + "\u7b2c\\d+[\u9875\u9805](?:\u5171\\d+[\u9875\u9805])?|"
+            + "\u7b2c\\d+[\u9875\u9801](?:\u5171\\d+[\u9875\u9801])?|"
             + "(?:page|no|\u2116)\\d+)$",
             Pattern.CASE_INSENSITIVE);
+
+    /**
+     * A CJK page-number marker ({@code \u7b2c\u9875} / {@code \u7b2c\u9801}, i.e. {@code \u7b2c1\u9875} /
+     * {@code \u7b2c1\u9801}) that may sit inside a longer footer line
+     * ({@code \u7b2c 1 \u9801 \u5171 6 \u9801   v 1.3.0}). Used as a {@code find} search so a footer line is
+     * treated as page-number info whenever it <em>contains</em> such a marker, even when decorated
+     * with a trailing version stamp. Digits may be half- or full-width.
+     */
+    private static final Pattern CJK_PAGE_MARKER_PATTERN = Pattern.compile(
+            "\u7b2c[0-9\uff10-\uff19]+[\u9875\u9801]");
 
     /**
      * Collects document-wide header/footer text and writes a single top-level
@@ -735,12 +745,20 @@ public class JsonWriter {
     }
 
     /**
-     * Whether {@code text} is only a page number (see {@link #PAGE_NUMBER_PATTERN}). Comparison
-     * is done after removing all whitespace so decorated / spaced forms such as {@code "- 1 -"}
-     * and {@code "Page 1"} match.
+     * Whether {@code text} counts as page-number info and should therefore be dropped from the
+     * footer. Comparison is done after removing all whitespace. Two ways to qualify:
+     * <ul>
+     *   <li>the whole line is only a page number (see {@link #PAGE_NUMBER_PATTERN}), e.g.
+     *       {@code "- 1 -"}, {@code "Page 1"}; or</li>
+     *   <li>the line contains a CJK page marker (see {@link #CJK_PAGE_MARKER_PATTERN}), e.g.
+     *       {@code "\u7b2c 1 \u9801 \u5171 6 \u9801  v 1.3.0"} — the entire decorated footer line is
+     *       dropped because it carries a (traditional-)Chinese page number.</li>
+     * </ul>
      */
     private static boolean isPageNumber(String text) {
-        return PAGE_NUMBER_PATTERN.matcher(text.replaceAll("\\s+", "")).matches();
+        String compact = text.replaceAll("\\s+", "");
+        return PAGE_NUMBER_PATTERN.matcher(compact).matches()
+                || CJK_PAGE_MARKER_PATTERN.matcher(compact).find();
     }
 
     /**
