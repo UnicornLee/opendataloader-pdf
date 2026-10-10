@@ -1872,34 +1872,59 @@ public class JsonWriter {
      * never yields {@code 0.0}. The representative value is the unique mode (rounded to
      * 3 decimals) of the collected sizes, otherwise their mean. Returns {@code 0.0} only for
      * an empty chunk list.</p>
+     *
+     * <p>Superscript/subscript markers (角标) are excluded from the main statistic: a chunk
+     * that {@link org.opendataloader.pdf.processors.TextLineProcessor} has wrapped in {@code <sup>}/{@code <sub>} tags contributes
+     * its sizes to a separate pool that is only used when the whole line consists of such
+     * markers. This prevents a small footnote marker drawn beside a large title (e.g.
+     * {@code "預 期 時 間 表<sup>(1)</sup>"}) from pulling the line's reported font size down.
+     * The tag markup characters themselves never count.</p>
      */
     private static double computeLineFontSize(List<TextChunk> textChunks) {
         if (textChunks == null || textChunks.isEmpty()) {
             return 0.0;
         }
         List<Double> significantSizes = new ArrayList<>();
+        List<Double> scriptSignificantSizes = new ArrayList<>();
         List<Double> allSizes = new ArrayList<>();
+        List<Double> scriptAllSizes = new ArrayList<>();
         for (TextChunk chunk : textChunks) {
             String value = chunk.getValue();
             if (value == null || value.isEmpty()) {
                 continue;
             }
+            boolean isScript = isScriptChunk(value);
+            String display = stripScriptTags(value);
             double size = chunk.getFontSize();
-            for (int i = 0; i < value.length(); i++) {
-                char ch = value.charAt(i);
+            for (int i = 0; i < display.length(); i++) {
+                char ch = display.charAt(i);
                 if (!Character.isWhitespace(ch)) {
-                    allSizes.add(size);
+                    if (isScript) {
+                        scriptAllSizes.add(size);
+                    } else {
+                        allSizes.add(size);
+                    }
                 }
                 if (isFontSizingChar(ch)) {
-                    significantSizes.add(size);
+                    if (isScript) {
+                        scriptSignificantSizes.add(size);
+                    } else {
+                        significantSizes.add(size);
+                    }
                 }
             }
         }
         if (!significantSizes.isEmpty()) {
             return computeFontSizeFromCollection(significantSizes);
         }
+        if (!scriptSignificantSizes.isEmpty()) {
+            return computeFontSizeFromCollection(scriptSignificantSizes);
+        }
         if (!allSizes.isEmpty()) {
             return computeFontSizeFromCollection(allSizes);
+        }
+        if (!scriptAllSizes.isEmpty()) {
+            return computeFontSizeFromCollection(scriptAllSizes);
         }
         // Final guard: a line of only whitespace / empty chunks still carries real chunk
         // font sizes. Fall back to the per-chunk view so a non-empty chunk list never
@@ -1918,6 +1943,27 @@ public class JsonWriter {
      */
     private static boolean isFontSizingChar(char c) {
         return Character.isLetter(c) || Character.isDigit(c);
+    }
+
+    /**
+     * Whether {@link org.opendataloader.pdf.processors.TextLineProcessor} has marked this chunk as a superscript/subscript
+     * (角标) by wrapping its value in {@code <sup>}/{@code <sub>} tags.
+     */
+    private static boolean isScriptChunk(String value) {
+        return value.startsWith("<sup>") || value.startsWith("<sub>");
+    }
+
+    /**
+     * Removes the {@code <sup>}/{@code </sup>}/{@code <sub>}/{@code </sub>} markup from a chunk
+     * value, leaving only the visible characters so the tag letters (s/u/p) never contribute to
+     * font-size statistics.
+     */
+    private static String stripScriptTags(String value) {
+        if (value.indexOf('<') < 0) {
+            return value;
+        }
+        return value.replace("<sup>", "").replace("</sup>", "")
+            .replace("<sub>", "").replace("</sub>", "");
     }
 
     /**

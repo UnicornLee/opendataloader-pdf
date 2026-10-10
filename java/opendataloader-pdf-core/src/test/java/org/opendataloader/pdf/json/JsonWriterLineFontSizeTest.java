@@ -94,6 +94,45 @@ class JsonWriterLineFontSizeTest {
         assertEquals(8.0, computeLineFontSize(line));
     }
 
+    /**
+     * A title carrying a footnote superscript on its right, e.g. {@code 預 期 時 間 表<sup>(1)</sup>}:
+     * the five title characters are drawn at 16.0 while the marker is a small 8.0. Before the fix the
+     * {@code <sup>}/{@code </sup>} markup's letters (s/u/p) were counted as content at 8.0, giving the
+     * marker seven characters against the title's five and flipping the mode down to 8.0. Now the tag
+     * letters are stripped and the whole marker is excluded from the main statistic, so the line
+     * resolves to the title size 16.0.
+     */
+    @Test
+    void superscriptMarkerIsIgnoredForATitleLine() throws Exception {
+        List<TextChunk> line = Arrays.asList(
+            chunk("預 期 時 間 表", 16.0),
+            chunk("<sup>( 1 )</sup>", 8.0));
+        assertEquals(16.0, computeLineFontSize(line));
+    }
+
+    /**
+     * Same exclusion applies to a subscript marker sitting beside normal content.
+     */
+    @Test
+    void subscriptMarkerIsIgnoredForATitleLine() throws Exception {
+        List<TextChunk> line = Arrays.asList(
+            chunk("化 學 式", 16.0),
+            chunk("<sub>( 2 )</sub>", 8.0));
+        assertEquals(16.0, computeLineFontSize(line));
+    }
+
+    /**
+     * When the entire line is nothing but a superscript marker, that marker is all the line has, so
+     * its own size (8.0) must still be reported rather than collapsing to 0.0.
+     */
+    @Test
+    void lineMadeEntirelyOfSuperscriptKeepsTheMarkerSize() throws Exception {
+        List<TextChunk> line = new ArrayList<>();
+        line.add(chunk(" ", 16.0));
+        line.add(chunk("<sup>( 1 )</sup>", 8.0));
+        assertEquals(8.0, computeLineFontSize(line));
+    }
+
     private static double computeLineFontSize(List<TextChunk> line) throws Exception {
         Method method = JsonWriter.class.getDeclaredMethod("computeLineFontSize", List.class);
         method.setAccessible(true);
