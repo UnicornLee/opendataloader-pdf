@@ -116,10 +116,10 @@ public class PaddleOcrProcessor {
     }
 
     public static void main(String[] args) {
-        String pdfPath = "D:\\Code\\JavaCode\\opendataloader-pdf\\docs\\pdf\\202609081788825839483050125.pdf";
-        String paddleUrl = "http://192.168.1.193:8088/layout-parsing";
+        String pdfPath = "D:\\Code\\JavaCode\\opendataloader-pdf\\docs\\pdf\\202609011788275402820062798.pdf";
+        String paddleUrl = "http://192.168.1.233:8088/layout-parsing";
         try {
-            File singlePageImageFile = StreamTableProcessor.extractSinglePageImage(pdfPath, 15);
+            File singlePageImageFile = StreamTableProcessor.extractSinglePageImage(pdfPath, 8);
             TextInOcrAnalysisResultDto resultDto = getPaddleResponse(singlePageImageFile, 1, paddleUrl);
             PageItemResultDto pageItemResultDto = PaddleOcrResultUtils.generateJsonResultByTextInOcrAnalysisResultDto(
                 singlePageImageFile, resultDto, 1000.0, 1000.0, 0);

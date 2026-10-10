@@ -642,6 +642,32 @@ public class DocumentProcessor {
                 imagesUtils.write(contents);
             }
 
+            // De-rotate sideways body text before the line/paragraph grouping below. The
+            // rotated runs arrive with a ~90-degree slant and their reading axis on Y; Loop 2/3
+            // group text assuming a horizontal reading axis with vertical stacking, which merges
+            // the (Y-overlapping) sideways rows into one crammed block. Flattening them into an
+            // upright frame here lets the normal grouping produce one line per source row. The
+            // flattened body is longer than the portrait page (its reading axis was the page's
+            // vertical extent), so the page frame is widened to host it and the wider width is
+            // published to the JSON writer (which reads the live crop box) via a per-run registry.
+            // Pages without a dominant rotated run are left untouched.
+            rotatedPageWidths.get().clear();
+            for (int pageNumber = 0; pageNumber < totalPages; pageNumber++) {
+                if (!shouldProcessPage(pageNumber, pagesToProcess)) {
+                    continue;
+                }
+                double[] flattened = RotationProcessor.processRotation(contents.get(pageNumber),
+                    pageWidths[pageNumber]);
+                if (flattened != null) {
+                    // The de-rotated body is wider than the portrait page (its reading axis was
+                    // the page's vertical extent), so widen the page frame to match; the block is
+                    // re-anchored at its original top (see RotationProcessor), so it still fits
+                    // within the true page height — leave pageHeights untouched.
+                    pageWidths[pageNumber] = flattened[0];
+                    rotatedPageWidths.get().put(pageNumber, flattened[0]);
+                }
+            }
+
             // Loop 2: TableBorder + TextLine per-page + StreamTable detection (parallelized)
             final String finalImagesDirectory = absoluteImagesDirectory;
             pool.submit(() ->
@@ -1879,6 +1905,29 @@ public class DocumentProcessor {
             this.imageWidth = imageWidth;
             this.imageHeight = imageHeight;
         }
+    }
+
+    /**
+     * Per-run registry of pages whose frame was widened by the de-rotation pass. The rotation
+     * pass and the JSON writer run on the same calling thread (processFileWithResult drives
+     * extractContents then generateCustomOutputs sequentially), so a ThreadLocal scoped to that
+     * thread is naturally reset per document (cleared at the start of the rotation loop) and never
+     * leaks across concurrently processed files on other threads.
+     */
+    private static final ThreadLocal<Map<Integer, Double>> rotatedPageWidths =
+        ThreadLocal.withInitial(HashMap::new);
+
+    /**
+     * Returns the widened page width recorded for a de-rotated page, or {@code null} when the
+     * page kept its native crop-box width (no rotation, or a non-JSON output path). Readers that
+     * emit the page frame (the JSON writer) use this instead of the live crop box so the reported
+     * width and margins match the coordinates the de-rotated content was flattened into.
+     *
+     * @param pageNumber the page number (0-indexed)
+     * @return the widened width in points, or {@code null} when none was registered
+     */
+    public static Double getRotatedPageWidth(int pageNumber) {
+        return rotatedPageWidths.get().get(pageNumber);
     }
 
     /**

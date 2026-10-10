@@ -530,6 +530,12 @@ public class JsonWriter {
         BoundingBox pageBoundingBox = DocumentProcessor.getPageBoundingBox(pageNumber);
         double width = pageBoundingBox.getWidth();
         double height = pageBoundingBox.getHeight();
+        // A de-rotated page's frame was widened to host its sideways body; report that widened
+        // width (and derive margins from it) so the emitted box matches the flattened coordinates.
+        Double widenedWidth = DocumentProcessor.getRotatedPageWidth(pageNumber);
+        if (widenedWidth != null && widenedWidth > width) {
+            width = widenedWidth;
+        }
         pageGenerator.writeNumberField(JsonName.WIDTH, width);
         pageGenerator.writeNumberField(JsonName.HEIGHT, height);
         pageGenerator.writeBooleanField(JsonName.IS_OCR, false);
