@@ -57,14 +57,18 @@ import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.SemanticCaption;
 import org.verapdf.wcag.algorithms.entities.SemanticHeaderOrFooter;
 import org.verapdf.wcag.algorithms.entities.SemanticHeading;
+import org.verapdf.wcag.algorithms.entities.SemanticTextNode;
 import org.verapdf.wcag.algorithms.entities.SemanticTOC;
 import org.verapdf.wcag.algorithms.entities.SemanticTOCI;
 import org.verapdf.wcag.algorithms.entities.content.ImageChunk;
 import org.verapdf.wcag.algorithms.entities.content.LineArtChunk;
 import org.verapdf.wcag.algorithms.entities.content.TextChunk;
+import org.verapdf.wcag.algorithms.entities.content.TextColumn;
+import org.verapdf.wcag.algorithms.entities.content.TextBlock;
 import org.verapdf.wcag.algorithms.entities.content.TextLine;
 import org.verapdf.wcag.algorithms.entities.geometry.BoundingBox;
 import org.verapdf.wcag.algorithms.entities.lists.PDFList;
+import org.verapdf.wcag.algorithms.entities.lists.ListItem;
 import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorder;
 import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorderCell;
 import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorderRow;
@@ -367,6 +371,17 @@ public class JsonWriter {
                 SerializerUtil.clearElementMetadata();
             }
 
+            // Document-level header/footer summary, written as a single top-level field
+            // alongside data. Failures here must not corrupt the object structure.
+            try {
+                writeHeaderAndFooterField(jsonGenerator, contents,
+                    StaticContainers.getDocument().getNumberOfPages());
+            } catch (Exception hfEx) {
+                LOGGER.log(Level.WARNING,
+                    inputPdfName + " - Error when generating header_and_footer: "
+                        + hfEx.getClass().getSimpleName() + ": " + hfEx.getMessage(), hfEx);
+            }
+
             jsonGenerator.writeEndObject();
             LOGGER.log(Level.INFO, "Created {0}", jsonFileName);
         } catch (Exception ex) {
@@ -575,6 +590,169 @@ public class JsonWriter {
         generateJsonPageContentData(url, pageNumber, includeHeaderFooter, height, pageContents, pageGenerator);
         pageGenerator.writeEndArray();
         pageGenerator.writeEndObject();
+    }
+
+    /**
+     * Maximum total character length (original text, spaces included) accumulated for the
+     * collected {@code header} lines of a page.
+     */
+    private static final int HEADER_MAX_TOTAL_LENGTH = 500;
+
+    /**
+     * Maximum total character length (original text, spaces included) accumulated for the
+     * collected {@code footer} lines of a page.
+     */
+    private static final int FOOTER_MAX_TOTAL_LENGTH = 400;
+
+    /**
+     * Matches a whitespace-free line that is just a page number: a digit sequence optionally joined
+     * by {@code . / -} ({@code 3}, {@code 3/128}, {@code 1-1-2}), a decorated page label wrapped by
+     * punctuation on both ends whose body is digits / roman-numeral letters joined by {@code . / -}
+     * ({@code -1-}, {@code .1.}, {@code —1—}, {@code –i–}, {@code –II–}, {@code –I-1–}),
+     * a CJK page marker ({@code 第1页}, {@code 第1页共128页}) or a Latin page label
+     * ({@code page1}, {@code no1}, {@code №1}). Case-insensitive.
+     */
+    private static final Pattern PAGE_NUMBER_PATTERN = Pattern.compile(
+            "^(?:\\d+(?:[./-]\\d+)*|"
+            + "[-_.\u00b7\u2013\u2014]+[0-9ivxlcdm]+(?:[./-][0-9ivxlcdm]+)*[-_.\u00b7\u2013\u2014]+|"
+            + "\u7b2c\\d+[\u9875\u9805](?:\u5171\\d+[\u9875\u9805])?|"
+            + "(?:page|no|\u2116)\\d+)$",
+            Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Collects document-wide header/footer text and writes a single top-level
+     * {@code header_and_footer} map field (sibling of {@code data}).
+     *
+     * <p>For every page the contents are sorted top-to-bottom, so the header is the first element
+     * and the footer the last when they are {@link SemanticHeaderOrFooter} wrappers. Their
+     * {@link TextLine}s are turned into strings and accumulated into two document-level lists,
+     * de-duplicated across the whole document (ignoring whitespace) and capped by total length
+     * ({@link #HEADER_MAX_TOTAL_LENGTH} / {@link #FOOTER_MAX_TOTAL_LENGTH}). Footer lines that are
+     * only a page number are dropped. The field is omitted entirely when both lists end up empty.</p>
+     */
+    private static void writeHeaderAndFooterField(JsonGenerator jsonGenerator, List<List<IObject>> contents,
+                                                  int numberOfPages) throws IOException {
+        List<String> header = new ArrayList<>();
+        List<String> footer = new ArrayList<>();
+        Set<String> headerSeen = new HashSet<>();
+        Set<String> footerSeen = new HashSet<>();
+        int[] headerLength = {0};
+        int[] footerLength = {0};
+        for (int pageNumber = 0; pageNumber < numberOfPages && pageNumber < contents.size(); pageNumber++) {
+            List<IObject> pageContents = contents.get(pageNumber);
+            if (pageContents == null || pageContents.isEmpty()) {
+                continue;
+            }
+            pageContents.sort(Comparator.comparingDouble(IObject::getTopY));
+            Collections.reverse(pageContents);
+            int size = pageContents.size();
+            IObject first = pageContents.get(0);
+            if (first instanceof SemanticHeaderOrFooter) {
+                appendHeaderOrFooterLines((SemanticHeaderOrFooter) first, header, headerSeen,
+                    headerLength, HEADER_MAX_TOTAL_LENGTH, false);
+            }
+            if (size > 1) {
+                IObject last = pageContents.get(size - 1);
+                if (last instanceof SemanticHeaderOrFooter) {
+                    appendHeaderOrFooterLines((SemanticHeaderOrFooter) last, footer, footerSeen,
+                        footerLength, FOOTER_MAX_TOTAL_LENGTH, true);
+                }
+            }
+        }
+        if (header.isEmpty() && footer.isEmpty()) {
+            return;
+        }
+        jsonGenerator.writeObjectFieldStart(JsonName.HEADER_AND_FOOTER);
+        if (!header.isEmpty()) {
+            writeStringArrayField(jsonGenerator, JsonName.HEADER_AND_FOOTER_HEADER, header);
+        }
+        if (!footer.isEmpty()) {
+            writeStringArrayField(jsonGenerator, JsonName.HEADER_AND_FOOTER_FOOTER, footer);
+        }
+        jsonGenerator.writeEndObject();
+    }
+
+    /**
+     * Recursively gathers every {@link TextLine} reachable from a header/footer wrapper, so the
+     * raw lines of a tagged document and the paragraph/list/heading wrappers of an untagged one
+     * are handled uniformly.
+     */
+    private static void collectTextLines(IObject obj, List<TextLine> sink) {
+        if (obj instanceof TextLine) {
+            sink.add((TextLine) obj);
+        } else if (obj instanceof SemanticTextNode) {
+            for (TextColumn column : ((SemanticTextNode) obj).getColumns()) {
+                sink.addAll(column.getLines());
+            }
+        } else if (obj instanceof TextBlock) {
+            sink.addAll(((TextBlock) obj).getLines());
+        } else if (obj instanceof SemanticHeaderOrFooter) {
+            for (IObject content : ((SemanticHeaderOrFooter) obj).getContents()) {
+                collectTextLines(content, sink);
+            }
+        } else if (obj instanceof PDFList) {
+            for (ListItem item : ((PDFList) obj).getListItems()) {
+                collectTextLines(item, sink);
+            }
+        }
+    }
+
+    /**
+     * Appends one header/footer wrapper's lines to a document-level list.
+     *
+     * @param headerOrFooter   the wrapper to read
+     * @param result           document-level list that receives the kept line texts, in reading order
+     * @param seen             whitespace-free keys already present, used to de-duplicate
+     * @param totalLength      single-element holder for the summed original (space-included) length
+     *                         of the kept lines; a line is skipped once adding it would exceed
+     *                         {@code maxTotalLength}
+     * @param maxTotalLength   cap on the summed original length of the kept lines
+     * @param ignorePageNumber when true, lines that are only a page number are skipped
+     */
+    private static void appendHeaderOrFooterLines(SemanticHeaderOrFooter headerOrFooter,
+                                                  List<String> result, Set<String> seen, int[] totalLength,
+                                                  int maxTotalLength, boolean ignorePageNumber) {
+        List<TextLine> lines = new ArrayList<>();
+        collectTextLines(headerOrFooter, lines);
+        for (TextLine line : lines) {
+            String text = getText(line.getTextChunks());
+            if (text == null || text.trim().isEmpty()) {
+                continue;
+            }
+            if (ignorePageNumber && isPageNumber(text)) {
+                continue;
+            }
+            String dedupKey = text.replaceAll("\\s+", "");
+            if (dedupKey.isEmpty() || !seen.add(dedupKey)) {
+                continue;
+            }
+            if (totalLength[0] + text.length() > maxTotalLength) {
+                return;
+            }
+            result.add(text);
+            totalLength[0] += text.length();
+        }
+    }
+
+    /**
+     * Whether {@code text} is only a page number (see {@link #PAGE_NUMBER_PATTERN}). Comparison
+     * is done after removing all whitespace so decorated / spaced forms such as {@code "- 1 -"}
+     * and {@code "Page 1"} match.
+     */
+    private static boolean isPageNumber(String text) {
+        return PAGE_NUMBER_PATTERN.matcher(text.replaceAll("\\s+", "")).matches();
+    }
+
+    /**
+     * Writes a list of strings as a JSON array field.
+     */
+    private static void writeStringArrayField(JsonGenerator gen, String fieldName, List<String> values)
+            throws IOException {
+        gen.writeArrayFieldStart(fieldName);
+        for (String value : values) {
+            gen.writeString(value);
+        }
+        gen.writeEndArray();
     }
 
     /**

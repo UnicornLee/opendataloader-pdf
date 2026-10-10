@@ -82,6 +82,9 @@ public class JsonName {
     public static final String MARGIN_BOTTOM = "margin_bottom";
     public static final String HEADER_POS = "header_pos";
     public static final String FOOTER_POS = "footer_pos";
+    public static final String HEADER_AND_FOOTER = "header_and_footer";
+    public static final String HEADER_AND_FOOTER_HEADER = "header";
+    public static final String HEADER_AND_FOOTER_FOOTER = "footer";
     public static final String ITEM_TYPE = "item_type";
     public static final String FONT_UNDERLINE_SIZE = "font_size";
     public static final String IS_THIRD_PARTY = "is_third_party";
