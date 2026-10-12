@@ -27,6 +27,7 @@ import org.verapdf.wcag.algorithms.entities.geometry.BoundingBox;
 import org.verapdf.wcag.algorithms.semanticalgorithms.containers.StaticContainers;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.logging.Level;
@@ -97,6 +98,23 @@ import java.util.logging.Logger;
  *       {@link #TEXT_VETO_MIN_OVERLAP_SHARE}).</li>
  * </ol>
  *
+ * <h2>Fragment clustering</h2>
+ * <p>Every gate above measures <em>one</em> {@code LineArtChunk}, but a tagged PDF
+ * wraps each part of a logo lockup in its own marked group, so the lockup reaches
+ * this processor as several small boxes. Measured on a three-page announcement
+ * that compares the old and the new company logo: the old lockup arrived as
+ * <ul>
+ *   <li>a 43.9 x 49.2 pt pictorial mark (3 raw lines, 3 shape components),</li>
+ *   <li>a 23.5 x 23.9 pt glyph outline (below {@link #MIN_REGION_WIDTH}), and</li>
+ *   <li>a 124.3 x 44.7 pt wordmark (6 raw lines, 1 shape component),</li>
+ * </ul>
+ * and each fragment was vetoed on its own while the whole lockup — 170.6 x 50.2 pt
+ * with 10 raw lines inside — passes every gate. Closely placed boxes are
+ * therefore agglomerated into one region before the gates are applied
+ * ({@link #clusterFragments}); the envelope is judged first and, when it is
+ * vetoed, the members fall back to being judged individually, so a region that
+ * is captured today is never lost by the clustering.</p>
+ *
  * <h2>Position in the pipeline</h2>
  * <p>Runs at the end of Loop 4, after the chart and flowchart passes (which
  * consume the regions they own) and before
@@ -156,6 +174,24 @@ public final class GraphicRegionProcessor {
      */
     private static final double TEXT_VETO_MIN_OVERLAP_SHARE = 0.05;
 
+    /**
+     * Smallest gap (pt) at which two line-art boxes are still fragments of one
+     * graphic. A lockup's mark, wordmark and glyph outlines sit within a few points
+     * of each other; the measured old logo separated them by 2.4 - 3.1 pt.
+     */
+    private static final double FRAGMENT_GAP_MIN = 6.0;
+    /**
+     * Gap tolerance as a share of the smaller fragment's short side, on top of
+     * {@link #FRAGMENT_GAP_MIN}: a large mark may keep a wider distance to its
+     * wordmark than two small glyphs do.
+     */
+    private static final double FRAGMENT_GAP_RATIO = 0.25;
+    /**
+     * Share of the smaller box an envelope may cover before it is considered to
+     * have grown over a raster image rather than around vector art.
+     */
+    private static final double IMAGE_VETO_MIN_OVERLAP_SHARE = 0.05;
+
     private GraphicRegionProcessor() {
     }
 
@@ -195,25 +231,186 @@ public final class GraphicRegionProcessor {
         // Top-to-bottom so a page with several graphics reports and captures them
         // in reading order.
         candidates.sort(Comparator.comparingDouble(IObject::getTopY).reversed());
+        List<List<LineArtChunk>> clusters = clusterFragments(candidates, pageWidth, pageHeight);
 
         List<String> skipped = new ArrayList<>();
-        for (LineArtChunk candidate : candidates) {
-            // A previous capture may already have removed this chunk.
-            if (!pageContents.contains(candidate)) {
-                continue;
+        for (List<LineArtChunk> cluster : clusters) {
+            if (cluster.size() > 1) {
+                // Judge the lockup as a whole first: individually vetoed fragments often
+                // add up to a region that clears the density gate.
+                BoundingBox envelope = unionBox(cluster);
+                String envelopeVeto = envelopeVetoReason(envelope, pageContents, rawLines,
+                    pageWidth, pageHeight);
+                if (envelopeVeto == null) {
+                    captureRegion(pageContents, cluster, envelope, imagesUtils, pageNumber);
+                    continue;
+                }
+                skipped.add(describe(envelope) + " (cluster of " + cluster.size()
+                    + ": " + envelopeVeto + ")");
+                // Fall through: a fragment that passes on its own is still worth capturing.
             }
-            BoundingBox box = candidate.getBoundingBox();
-            String veto = findVetoReason(box, pageContents, rawLines, pageWidth, pageHeight);
-            if (veto != null) {
-                skipped.add(describe(box) + " (" + veto + ")");
-                continue;
+            for (LineArtChunk candidate : cluster) {
+                // A previous capture may already have removed this chunk.
+                if (!pageContents.contains(candidate)) {
+                    continue;
+                }
+                BoundingBox box = candidate.getBoundingBox();
+                String veto = findVetoReason(box, pageContents, rawLines, pageWidth, pageHeight);
+                if (veto != null) {
+                    if (cluster.size() == 1) {
+                        skipped.add(describe(box) + " (" + veto + ")");
+                    }
+                    continue;
+                }
+                captureRegion(pageContents, Collections.singletonList(candidate), box,
+                    imagesUtils, pageNumber);
             }
-            captureRegion(pageContents, candidate, box, imagesUtils, pageNumber);
         }
         if (!skipped.isEmpty()) {
             LOGGER.log(Level.INFO, "Page {0}: skipped {1} vector line-art region(s): {2}",
                 new Object[]{pageNumber + 1, skipped.size(), String.join("; ", skipped)});
         }
+    }
+
+    /**
+     * Agglomerates the page's line-art boxes into lockups.
+     *
+     * <p>Boxes are walked top-to-bottom and appended to the first existing cluster
+     * whose envelope still touches them ({@link #fragmentsTouch}); a box that touches
+     * none opens a cluster of its own. Growth is refused as soon as the resulting
+     * envelope stops looking like a graphic ({@link #passesGeometryGates}), which is
+     * what keeps a page of table rules — itself one long chain of touching boxes —
+     * from being folded into a single page-spanning region.</p>
+     *
+     * @param candidates the page's line-art boxes, sorted top-to-bottom
+     * @return one list per lockup, never empty, order preserved
+     */
+    private static List<List<LineArtChunk>> clusterFragments(List<LineArtChunk> candidates,
+                                                             double pageWidth, double pageHeight) {
+        List<List<LineArtChunk>> clusters = new ArrayList<>();
+        List<BoundingBox> envelopes = new ArrayList<>();
+        for (LineArtChunk candidate : candidates) {
+            BoundingBox box = candidate.getBoundingBox();
+            if (box == null || box.isEmpty()) {
+                continue;
+            }
+            boolean appended = false;
+            for (int i = 0; i < clusters.size(); i++) {
+                BoundingBox envelope = envelopes.get(i);
+                if (!fragmentsTouch(envelope, box) || !passesGeometryGates(unionBox(envelope, box),
+                    pageWidth, pageHeight)) {
+                    continue;
+                }
+                clusters.get(i).add(candidate);
+                envelopes.set(i, unionBox(envelope, box));
+                appended = true;
+                break;
+            }
+            if (!appended) {
+                List<LineArtChunk> cluster = new ArrayList<>();
+                cluster.add(candidate);
+                clusters.add(cluster);
+                envelopes.add(new BoundingBox(box));
+            }
+        }
+        return clusters;
+    }
+
+    /**
+     * Why the envelope of a multi-fragment lockup must not be captured, or {@code null}
+     * when it may. Adds {@link #overlapsImage} to the regular gates: unlike a single
+     * box, an envelope is grown by design, so it has to be checked for reaching into a
+     * neighbouring raster figure — whose {@link ImageChunk} stays in the text flow and
+     * would then be rendered twice.
+     */
+    private static String envelopeVetoReason(BoundingBox envelope, List<IObject> pageContents,
+                                             List<IObject> rawLines, double pageWidth,
+                                             double pageHeight) {
+        if (envelope == null) {
+            return "empty bounding box";
+        }
+        String veto = findVetoReason(envelope, pageContents, rawLines, pageWidth, pageHeight);
+        if (veto != null) {
+            return veto;
+        }
+        if (overlapsImage(envelope, pageContents)) {
+            return "envelope reaches into a raster image";
+        }
+        return null;
+    }
+
+    /**
+     * True when an {@link ImageChunk} sits (nearly) inside {@code box}, i.e. when
+     * cropping {@code box} would duplicate content the page already reports as an image.
+     */
+    private static boolean overlapsImage(BoundingBox box, List<IObject> pageContents) {
+        for (IObject content : pageContents) {
+            if (!(content instanceof ImageChunk)) {
+                continue;
+            }
+            BoundingBox imageBox = content.getBoundingBox();
+            if (imageBox == null || imageBox.isEmpty() || !box.overlaps(imageBox)) {
+                continue;
+            }
+            BoundingBox intersection = box.cross(imageBox);
+            double smaller = Math.min(box.getArea(), imageBox.getArea());
+            if (intersection != null && smaller > 0
+                && intersection.getArea() / smaller > IMAGE_VETO_MIN_OVERLAP_SHARE) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Cheap geometry gates shared by the clustering and {@link #findVetoReason}: a box
+     * that fails them can never be captured, so the clustering must not grow one.
+     */
+    private static boolean passesGeometryGates(BoundingBox box, double pageWidth, double pageHeight) {
+        if (box == null || box.isEmpty()) {
+            return false;
+        }
+        double width = box.getWidth();
+        double height = box.getHeight();
+        if (width < MIN_REGION_WIDTH || height < MIN_REGION_HEIGHT) {
+            return false;
+        }
+        if (Math.max(width / height, height / width) > MAX_ASPECT_RATIO) {
+            return false;
+        }
+        if (pageWidth > 0 && pageHeight > 0) {
+            double share = box.getArea() / (pageWidth * pageHeight);
+            return !Double.isFinite(share) || share <= MAX_PAGE_AREA_RATIO;
+        }
+        return true;
+    }
+
+    /**
+     * True when {@code a} and {@code b} overlap once both are widened by the fragment
+     * gap tolerance, so two pieces of one lockup are recognised across the hairline
+     * between a mark and its wordmark.
+     */
+    private static boolean fragmentsTouch(BoundingBox a, BoundingBox b) {
+        double tolerance = Math.max(FRAGMENT_GAP_MIN,
+            FRAGMENT_GAP_RATIO * Math.min(Math.min(a.getWidth(), a.getHeight()),
+                Math.min(b.getWidth(), b.getHeight())));
+        return a.getLeftX() - tolerance <= b.getRightX()
+            && b.getLeftX() - tolerance <= a.getRightX()
+            && a.getBottomY() - tolerance <= b.getTopY()
+            && b.getBottomY() - tolerance <= a.getTopY();
+    }
+
+    private static BoundingBox unionBox(List<LineArtChunk> cluster) {
+        BoundingBox union = null;
+        for (LineArtChunk member : cluster) {
+            union = union == null ? new BoundingBox(member.getBoundingBox())
+                : union.union(member.getBoundingBox());
+        }
+        return union;
+    }
+
+    private static BoundingBox unionBox(BoundingBox a, BoundingBox b) {
+        return new BoundingBox(a).union(b);
     }
 
     /**
@@ -412,17 +609,17 @@ public final class GraphicRegionProcessor {
     }
 
     /**
-     * Screenshots the region and swaps it for the resulting {@link ImageChunk}: the
-     * {@link LineArtChunk} and every {@link ShapeChunk} the crop fully covers are
-     * removed (neither reaches the JSON otherwise), then the image is inserted in
-     * top-to-bottom order.
+     * Screenshots the region and swaps it for the resulting {@link ImageChunk}: every
+     * {@link LineArtChunk} of the region and every {@link ShapeChunk} the crop fully
+     * covers are removed (neither reaches the JSON otherwise), then the image is
+     * inserted in top-to-bottom order.
      */
-    private static void captureRegion(List<IObject> pageContents, LineArtChunk lineArt,
+    private static void captureRegion(List<IObject> pageContents, List<LineArtChunk> lineArt,
                                       BoundingBox box, ImagesUtils imagesUtils, int pageNumber) {
         ImageChunk imageChunk = new ImageChunk(new BoundingBox(box));
         imagesUtils.saveImageChunk(imageChunk);
 
-        pageContents.remove(lineArt);
+        pageContents.removeAll(lineArt);
         pageContents.removeIf(content -> {
             if (!(content instanceof ShapeChunk)) {
                 return false;

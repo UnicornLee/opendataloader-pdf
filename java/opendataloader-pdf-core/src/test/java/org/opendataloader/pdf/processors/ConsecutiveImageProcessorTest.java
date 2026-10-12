@@ -55,9 +55,9 @@ class ConsecutiveImageProcessorTest {
 
     @Test
     void mergesSideBySideImages() {
-        // Overlapping vertical extents (negative gap) always merge.
+        // Fragments of one figure: overlapping vertical extents and touching edges.
         ImageChunk left = new ImageChunk(new BoundingBox(0, 100, 100, 190, 200));
-        ImageChunk right = new ImageChunk(new BoundingBox(0, 200, 100, 290, 200));
+        ImageChunk right = new ImageChunk(new BoundingBox(0, 192, 100, 290, 200));
         List<IObject> pageContents = new ArrayList<>(List.of(left, right));
 
         CapturingImagesUtils imagesUtils = new CapturingImagesUtils();
@@ -67,6 +67,50 @@ class ConsecutiveImageProcessorTest {
         BoundingBox bbox = imagesUtils.saved.get(0).getBoundingBox();
         Assertions.assertEquals(100.0, bbox.getLeftX(), 0.0001);
         Assertions.assertEquals(290.0, bbox.getRightX(), 0.0001);
+    }
+
+    @Test
+    void mergesSideBySideLogosOfOneComparison() {
+        // Measured on an announcement comparing the old and the new company logo.
+        // The right-hand logo is itself stored as two tiles, the second only 31.3 pt
+        // wide; the 77.6 pt gutter to the left logo is 1.5 short sides of the figure
+        // collected so far, so all three chunks become the single comparison figure
+        // the page lays them out as.
+        ImageChunk newLogoLeft = new ImageChunk(new BoundingBox(0, 340.3, 495.7, 464.8, 550.1));
+        ImageChunk newLogoRight = new ImageChunk(new BoundingBox(0, 464.6, 495.7, 495.9, 550.1));
+        ImageChunk oldLogo = new ImageChunk(new BoundingBox(0, 92.1, 495.4, 262.7, 545.6));
+        List<IObject> pageContents = new ArrayList<>(List.of(newLogoLeft, newLogoRight, oldLogo));
+
+        CapturingImagesUtils imagesUtils = new CapturingImagesUtils();
+        ConsecutiveImageProcessor.processConsecutiveImages(pageContents, 0, imagesUtils);
+
+        Assertions.assertEquals(1, imagesUtils.saved.size());
+        Assertions.assertEquals(1, pageContents.size());
+        BoundingBox bbox = imagesUtils.saved.get(0).getBoundingBox();
+        Assertions.assertEquals(92.1, bbox.getLeftX(), 0.0001);
+        Assertions.assertEquals(495.9, bbox.getRightX(), 0.0001);
+        Assertions.assertEquals(495.4, bbox.getBottomY(), 0.0001);
+        Assertions.assertEquals(550.1, bbox.getTopY(), 0.0001);
+    }
+
+    @Test
+    void keepsDistantSideBySideImagesSeparate() {
+        // Measured on a page carrying the two crop marks of a print line: two 14 pt
+        // marks at opposite ends of a 550 pt band. Their vertical extents overlap, so
+        // only the horizontal check keeps them apart — and it has to scale with the
+        // boxes, because a 521.6 pt gutter between two 14 pt marks is 37 short sides
+        // while the same absolute distance between two 50 pt logos is 1.5.
+        ImageChunk left = new ImageChunk(new BoundingBox(0, 22.7, 495.4, 36.9, 509.5));
+        ImageChunk right = new ImageChunk(new BoundingBox(0, 558.5, 495.4, 572.9, 509.3));
+        List<IObject> pageContents = new ArrayList<>(List.of(left, right));
+
+        CapturingImagesUtils imagesUtils = new CapturingImagesUtils();
+        ConsecutiveImageProcessor.processConsecutiveImages(pageContents, 0, imagesUtils);
+
+        Assertions.assertEquals(0, imagesUtils.saved.size(), "No screenshot should be produced");
+        Assertions.assertEquals(2, pageContents.size());
+        Assertions.assertTrue(pageContents.contains(left));
+        Assertions.assertTrue(pageContents.contains(right));
     }
 
     @Test
