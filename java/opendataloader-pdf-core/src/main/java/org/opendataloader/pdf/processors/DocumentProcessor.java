@@ -42,6 +42,7 @@ import org.opendataloader.pdf.utils.FileUtils;
 import org.opendataloader.pdf.utils.ImagesUtils;
 import org.opendataloader.pdf.utils.ProcessingDeadline;
 import org.opendataloader.pdf.utils.TextNodeUtils;
+import org.opendataloader.pdf.utils.ToUnicodeRepair;
 import org.verapdf.as.ASAtom;
 import org.verapdf.containers.StaticCoreContainers;
 import org.verapdf.cos.COSDictionary;
@@ -132,6 +133,14 @@ public class DocumentProcessor {
     private static File repairedPdfTempFile;
 
     /**
+     * Tracks the temp file produced by {@link #repairBrokenToUnicodeIfNeeded}
+     * when a document's fonts carry a malformed ToUnicode CMap. Deleted by
+     * {@link #closePdfResources} (and by {@code File#deleteOnExit} as a net for
+     * JVMs that crash before cleanup), mirroring {@link #repairedPdfTempFile}.
+     */
+    private static File toUnicodeRepairedTempFile;
+
+    /**
      * Releases PDF resources to prevent file locks and memory leaks.
      * - Closes PDDocument to free OS file handles (required for file deletion)
      * - Clears static containers to remove lingering references
@@ -150,6 +159,7 @@ public class DocumentProcessor {
         // future invocation does not try to delete a file the current
         // shutdown already removed (or that belongs to a different run).
         clearCleanupStep("RepairedPdfTempFile", DocumentProcessor::deleteRepairedPdfTempFile);
+        clearCleanupStep("ToUnicodeRepairedPdfTempFile", DocumentProcessor::deleteToUnicodeRepairedTempFile);
         clearCleanupStep("ImagesUtils", StaticContainers::closeImagesUtils);
 
         clearCleanupStep("StaticResources", StaticResources::clear);
@@ -1127,9 +1137,15 @@ public class DocumentProcessor {
         validateTempDirWritable();
         validatePdfMagicNumber(pdfName);
         updateStaticContainers(config);
+        // Repair malformed ToUnicode CMaps before veraPDF decodes any text. A
+        // producer defect can map a printable code to a C0 control character
+        // (e.g. digits "1"/"2" -> U+0018), which readers faithfully extract and
+        // renderers then show as tofu boxes. When a repair is needed this writes
+        // a corrected copy to a temp file; otherwise the original path is kept.
+        String sourcePdfName = repairBrokenToUnicodeIfNeeded(pdfName);
         PDDocument pdDocument;
         try {
-            pdDocument = new PDDocument(pdfName);
+            pdDocument = new PDDocument(sourcePdfName);
         } catch (InvalidPasswordException pw) {
             // Encrypted PDFs are not a content-validity failure — let the
             // password-handling branch in callers (e.g. CLIMain) take over.
@@ -1146,7 +1162,7 @@ public class DocumentProcessor {
             // body, malformed header, encryption wrong, ...) cannot be fixed
             // this way, so we surface a friendly message instead of letting
             // the raw veraPDF exception leak as a stack trace.
-            File repaired = tryRepairPdfWithPdfBox(pdfName, cause);
+            File repaired = tryRepairPdfWithPdfBox(sourcePdfName, cause);
             if (repaired != null) {
                 try {
                     pdDocument = new PDDocument(repaired.getAbsolutePath());
@@ -1306,6 +1322,97 @@ public class DocumentProcessor {
             Files.deleteIfExists(toDelete.toPath());
         } catch (IOException e) {
             LOGGER.log(Level.WARNING, "Failed to delete repaired-PDF temp file: " + toDelete, e);
+        }
+    }
+
+    /**
+     * Repairs malformed {@code /ToUnicode} CMaps before veraPDF parses the
+     * document, working around producer defects that map a printable ASCII code
+     * to a C0 control character (e.g. the digits {@code 1}/{@code 2} to
+     * {@code U+0018}). Such a mapping is faithfully extracted by veraPDF and
+     * PDFBox, then rendered as an undrawable "tofu" box (a rectangle with a
+     * diagonal line) in Markdown / HTML output.
+     *
+     * <p>The document is loaded through PDFBox and handed to
+     * {@link ToUnicodeRepair#repairBrokenToUnicode(org.apache.pdfbox.pdmodel.PDDocument)}, which rewrites
+     * only the offending destinations and leaves every other mapping untouched.
+     * When nothing was broken the original path is returned unchanged, so normal
+     * documents incur no temp file and no behavior change. When a repair happens
+     * the corrected copy is written to a temp file that
+     * {@link #closePdfResources} deletes after processing (mirroring
+     * {@link #tryRepairPdfWithPdfBox}).</p>
+     *
+     * <p>Best-effort by design: if PDFBox cannot load or re-save the file, the
+     * original path is returned and processing continues exactly as before, so
+     * this never turns a recoverable run into a hard failure.</p>
+     *
+     * @param pdfName the original PDF path
+     * @return a repaired temp-file path when any CMap was fixed, otherwise
+     *         {@code pdfName} unchanged
+     */
+    private static String repairBrokenToUnicodeIfNeeded(String pdfName) {
+        org.apache.pdfbox.pdmodel.PDDocument boxDoc = null;
+        try {
+            boxDoc = Loader.loadPDF(new File(pdfName));
+            int repairedCount = ToUnicodeRepair.repairBrokenToUnicode(boxDoc);
+            if (repairedCount <= 0) {
+                return pdfName;
+            }
+            Path repairedPath = Files.createTempFile("opendataloader-pdf-tu-", ".pdf");
+            File repaired = repairedPath.toFile();
+            repaired.deleteOnExit();
+            try {
+                boxDoc.save(repaired);
+            } catch (IOException saveFailure) {
+                try {
+                    Files.deleteIfExists(repairedPath);
+                } catch (IOException deleteFailure) {
+                    LOGGER.log(Level.WARNING,
+                        "Failed to delete unused ToUnicode-repair tmp file: " + repairedPath, deleteFailure);
+                }
+                LOGGER.log(Level.WARNING,
+                    "Failed to save ToUnicode-repaired copy of '" + displayName(pdfName) + "': "
+                        + saveFailure.getMessage());
+                return pdfName;
+            }
+            toUnicodeRepairedTempFile = repaired;
+            LOGGER.log(Level.WARNING,
+                "Repaired malformed ToUnicode CMaps in " + repairedCount + " font(s) of '" + displayName(pdfName)
+                    + "' (printable codes mapped to control characters); "
+                    + "processing continues from the corrected copy at '" + repaired.getAbsolutePath() + "'.");
+            return repaired.getAbsolutePath();
+        } catch (IOException | RuntimeException loadFailure) {
+            LOGGER.log(Level.FINE,
+                "ToUnicode repair skipped for '" + displayName(pdfName) + "'", loadFailure);
+            return pdfName;
+        } finally {
+            if (boxDoc != null) {
+                try {
+                    boxDoc.close();
+                } catch (IOException ignored) {
+                    // best-effort close; ignore
+                }
+            }
+        }
+    }
+
+    /**
+     * Deletes the ToUnicode-repaired temp file produced by
+     * {@link #repairBrokenToUnicodeIfNeeded} on a previous call to
+     * {@link #preprocessing}, if any, and clears the static reference so the
+     * next run starts clean. Idempotent; errors are logged but never propagate,
+     * mirroring {@link #deleteRepairedPdfTempFile}.
+     */
+    private static void deleteToUnicodeRepairedTempFile() {
+        File toDelete = toUnicodeRepairedTempFile;
+        toUnicodeRepairedTempFile = null;
+        if (toDelete == null) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(toDelete.toPath());
+        } catch (IOException e) {
+            LOGGER.log(Level.WARNING, "Failed to delete ToUnicode-repaired temp file: " + toDelete, e);
         }
     }
 
