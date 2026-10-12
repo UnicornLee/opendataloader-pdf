@@ -17,6 +17,7 @@ package org.opendataloader.pdf.processors;
 
 import org.opendataloader.pdf.api.Config;
 import org.opendataloader.pdf.containers.StaticLayoutContainers;
+import org.opendataloader.pdf.utils.SymbolFontMapper;
 import org.verapdf.wcag.algorithms.entities.IObject;
 import org.verapdf.wcag.algorithms.entities.content.IChunk;
 import org.verapdf.wcag.algorithms.entities.content.LineArtChunk;
@@ -64,6 +65,11 @@ public class ContentFilterProcessor {
     public static List<IObject> getFilteredContents(String inputPdfName, List<IChunk> contents, int pageNumber,
                                                     Config config) throws IOException {
         List<IObject> pageContents = new ArrayList<>(contents);
+        // Rewrite the private-use-area glyphs of the symbol fonts (Wingdings / Webdings /
+        // Symbol / Zapf Dingbats) into browser-safe Unicode before any dedup / list detection,
+        // so the tofu boxes (a rectangle with a diagonal) become the intended square / bullet.
+        // Substitution is 1:1, so per-symbol geometry (getSymbolEnds) stays valid.
+        SymbolFontMapper.normalizeSymbolFontText(pageContents);
         // Drop text the PDF painted several times on top of itself (fake-bold overprint). Runs
         // before removeSameTextChunks because it works on the per-symbol geometry, which the
         // value-equality based passes cannot use once the copies were re-chunked differently.
