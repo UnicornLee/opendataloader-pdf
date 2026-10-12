@@ -24,26 +24,50 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Merges runs of consecutive {@link ImageChunk}s that are stacked closely
- * together on the page. The combined bounding box of each run is rendered as
- * a single screenshot and replaces the original chunks, so content that the
- * PDF engine split into several adjacent image fragments (for example a
- * figure stored as a sequence of tiles) is preserved as one image instead of
- * a column of broken images.
+ * Merges runs of consecutive {@link ImageChunk}s that belong to one figure.
+ * The combined bounding box of each run is rendered as a single screenshot and
+ * replaces the original chunks, so content that the PDF engine split into several
+ * adjacent image fragments (for example a figure stored as a sequence of tiles) is
+ * preserved as one image instead of a column of broken images.
  *
  * <p>Runs are collected in {@code pageContents} order (the caller sorts the
- * list top-to-bottom beforehand) and are broken by any non-image element and
- * by any vertical gap larger than a fixed ratio of the smaller neighbour's
- * height.
+ * list top-to-bottom beforehand) and are broken by any non-image element, by a
+ * vertical gap larger than a fixed ratio of the smaller neighbour's height and
+ * by a horizontal gap larger than {@link #MAX_HORIZONTAL_GAP_RATIO} times the
+ * smaller neighbour's short side. Both gaps are measured against the union of the
+ * run collected so far, not against its last fragment.
  */
 public final class ConsecutiveImageProcessor {
 
     /**
      * Maximum vertical gap, as a ratio of the smaller of the two neighbours'
      * heights, for two consecutive images to be considered part of the same
-     * run. Images overlapping vertically (e.g. side by side) always merge.
+     * run. Images overlapping vertically (e.g. side by side) still have to be
+     * horizontally adjacent; see {@link #MAX_HORIZONTAL_GAP_RATIO}.
      */
     private static final double MAX_VERTICAL_GAP_RATIO = 0.5;
+
+    /**
+     * Floor for the horizontal gap tolerance (pt), so that fragments of one
+     * figure still merge when the boxes are too small for
+     * {@link #MAX_HORIZONTAL_GAP_RATIO} to say anything useful.
+     */
+    private static final double MIN_HORIZONTAL_GAP = 5.0;
+
+    /**
+     * Horizontal gap tolerance as a multiple of the smaller neighbour's short side.
+     * <p>
+     * The vertical check alone cannot separate side-by-side figures: two boxes next
+     * to each other always have a negative vertical gap, so they always look stacked.
+     * Measured, that let the "前標誌 / 新標誌" pair of an announcement (a 77.6 pt
+     * gutter) and, worse, the two 14.1 pt crop marks at opposite ends of a 550 pt
+     * print line (a 521.6 pt gutter) merge into a single screenshot each. An absolute
+     * threshold cannot tell those apart either, because both gutters are "large";
+     * scaled by the neighbour's own size they are not: 77.6 pt is 1.5 short sides
+     * while 521.6 pt is 37. Anything up to two short sides is read as one figure
+     * drawn in parts — including a logo lockup laid out as a mark beside a wordmark.
+     */
+    private static final double MAX_HORIZONTAL_GAP_RATIO = 2.0;
 
     private ConsecutiveImageProcessor() {
     }
@@ -73,14 +97,16 @@ public final class ConsecutiveImageProcessor {
 
             List<IObject> run = new ArrayList<>();
             run.add(current);
+            BoundingBox runBox = current.getBoundingBox() == null ? null
+                : new BoundingBox(current.getBoundingBox());
             int j = i + 1;
             while (j < pageContents.size() && pageContents.get(j) instanceof ImageChunk) {
-                ImageChunk previous = (ImageChunk) run.get(run.size() - 1);
                 ImageChunk next = (ImageChunk) pageContents.get(j);
-                if (!areClose(previous.getBoundingBox(), next.getBoundingBox())) {
+                if (!areClose(runBox, next.getBoundingBox())) {
                     break;
                 }
                 run.add(next);
+                runBox.union(next.getBoundingBox());
                 j++;
             }
 
@@ -102,17 +128,44 @@ public final class ConsecutiveImageProcessor {
     }
 
     /**
-     * Returns true when {@code upper} and {@code lower} are close enough to
-     * be merged. {@code upper} is expected to appear before {@code lower} in
-     * reading order (pageContents is sorted top-to-bottom), so a negative gap
-     * means the two images overlap vertically (side-by-side fragments).
+     * Returns true when {@code next} belongs to the figure collected so far.
+     * {@code runBox} is the union of the run up to this point and is expected to
+     * appear before {@code next} in reading order (pageContents is sorted
+     * top-to-bottom), so a negative vertical gap means the two overlap vertically
+     * (side-by-side fragments).
+     *
+     * <p>Measuring against the whole run rather than its last element matters: a
+     * figure stored as tiles ends in a narrow tile, and judging the next fragment
+     * from that tile alone understates how far it still belongs to the figure. On the
+     * measured logo comparison the second tile of the right-hand logo is only 31.3 pt
+     * wide, which shrank the gap tolerance to 62.6 pt against a 201.9 pt distance and
+     * split the pair.</p>
      */
-    private static boolean areClose(BoundingBox upper, BoundingBox lower) {
-        if (upper == null || lower == null || upper.isEmpty() || lower.isEmpty()) {
+    private static boolean areClose(BoundingBox runBox, BoundingBox next) {
+        if (runBox == null || next == null || runBox.isEmpty() || next.isEmpty()) {
             return false;
         }
-        double gap = upper.getBottomY() - lower.getTopY();
-        double maxGap = Math.min(upper.getHeight(), lower.getHeight()) * MAX_VERTICAL_GAP_RATIO;
-        return gap <= maxGap;
+        double gap = runBox.getBottomY() - next.getTopY();
+        double maxGap = Math.min(runBox.getHeight(), next.getHeight()) * MAX_VERTICAL_GAP_RATIO;
+        if (gap > maxGap) {
+            return false;
+        }
+        return areHorizontallyAdjacent(runBox, next);
+    }
+
+    /**
+     * Returns true when the two boxes share horizontal extent or are separated by at
+     * most the fragment tolerance below. Negative gaps are the norm for tiles of one
+     * figure, which touch or slightly overlap.
+     */
+    private static boolean areHorizontallyAdjacent(BoundingBox a, BoundingBox b) {
+        double horizontalGap = Math.max(a.getLeftX() - b.getRightX(), b.getLeftX() - a.getRightX());
+        double tolerance = Math.max(MIN_HORIZONTAL_GAP, MAX_HORIZONTAL_GAP_RATIO
+            * Math.min(shortSide(a), shortSide(b)));
+        return horizontalGap <= tolerance;
+    }
+
+    private static double shortSide(BoundingBox box) {
+        return Math.min(box.getWidth(), box.getHeight());
     }
 }
