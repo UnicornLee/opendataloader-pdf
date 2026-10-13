@@ -1293,20 +1293,31 @@ public class JsonWriter {
                         cellMap.put(JsonName.Y0, height - cell.getTopY());
                         cellMap.put(JsonName.Y1, height - cell.getBottomY());
                         double[] backgroundColor = cell.getBackgroundColor();
-                        if (backgroundColor != null && backgroundColor.length == 3) {
-                            // convert normalized RGB [0,1] to 0-255 integers, then to hex
-                            int r = Math.max(0, Math.min(255, (int) Math.round(backgroundColor[0] * 255)));
-                            int g = Math.max(0, Math.min(255, (int) Math.round(backgroundColor[1] * 255)));
-                            int b = Math.max(0, Math.min(255, (int) Math.round(backgroundColor[2] * 255)));
-                            cellMap.put(JsonName.BACKGROUND_COLOR, String.format("#%02x%02x%02x", r, g, b));
+                        boolean hasBackground = backgroundColor != null && backgroundColor.length == 3;
+                        if (hasBackground) {
+                            cellMap.put(JsonName.BACKGROUND_COLOR, toHexColor(backgroundColor));
                         }
                         List<String> cellTextLines = new ArrayList<>();
-                        for (int n = cell.getRowNumber(); n < cell.getRowNumber() + cell.getRowSpan(); n++) {
-                            for (int k = cell.getColNumber(); k < cell.getColNumber() + cell.getColSpan(); k++) {
+                        // Flattened contents of every slot this cell occupies,
+                        // reused to sample the dominant font color below.
+                        List<IObject> cellFlatContents = new ArrayList<>();
+                        // Walk the grid slots this cell was emitted at, anchored on the CURRENT
+                        // grid position (m, i) rather than cell.getRowNumber()/getColNumber().
+                        // For a well-formed cell the two coincide (a merged cell is only emitted
+                        // at its owner slot; covered slots are skipped above), so this is a no-op.
+                        // It matters for misplaced placeholder cells: the recognizer sometimes parks
+                        // an empty cell object in a grid slot while pointing its owner row at a
+                        // different row (e.g. a blank column-0 slot in the header rows whose
+                        // rowNumber still reads the footnote row). Anchoring on the owner would then
+                        // pull that other row's text into here (the duplicate "(5)" on page 25); the
+                        // grid anchor makes the placeholder read only its own (empty) contents.
+                        for (int n = m; n < m + cell.getRowSpan(); n++) {
+                            for (int k = i; k < i + cell.getColSpan(); k++) {
                                 if (n < tableBorder.getRows().length && k < tableBorder.getRows()[n].getCells().length) {
                                     List<String> currentCellTextLines = new ArrayList<>();
                                     TableBorderCell cellItem = tableBorder.getRows()[n].getCells()[k];
                                     List<IObject> cellItemContents = flattenCellContents(cellItem.getContents(), url, pageNumber);
+                                    cellFlatContents.addAll(cellItemContents);
                                     if (!cellItemContents.isEmpty()) {
                                         // Keep the flattened stream order (each paragraph line is already
                                         // in the reading order the processors produced). Grouping lines by
@@ -1373,6 +1384,13 @@ public class JsonWriter {
                             }
                         }
                         cellMap.put(JsonName.TEXT, cellTextLines);
+                        // Same text color rules as embedded nested-table cells
+                        // (see shouldEmitFontColor): dominant chunk color, near-
+                        // black dropped, near-white only on top of a background.
+                        double[] fontColor = getDominantFontColor(cellFlatContents);
+                        if (shouldEmitFontColor(fontColor, hasBackground)) {
+                            cellMap.put(JsonName.TEXT_COLOR_HEX, toHexColor(fontColor));
+                        }
                         cellMap.put(JsonName.CELL_TYPE, "text");
                         oneRowList.add(cellMap);
                     }
@@ -1783,7 +1801,20 @@ public class JsonWriter {
         }
         StringBuilder sb = new StringBuilder();
         sb.append("<tr>");
-        for (TableBorderCell cell : row.getCells()) {
+        TableBorderCell[] cells = row.getCells();
+        for (int colNumber = 0; colNumber < cells.length; colNumber++) {
+            TableBorderCell cell = cells[colNumber];
+            if (cell == null) {
+                continue;
+            }
+            // A spanning cell repeats its own reference in every slot it covers
+            // (and rowspan cells from earlier rows also appear in later rows).
+            // Emit the cell only at its origin position, like HtmlGenerator and
+            // MarkdownHTMLGenerator do; otherwise a colspan header cell would be
+            // written once per covered column and the row grows extra cells.
+            if (cell.getRowNumber() != row.getRowNumber() || cell.getColNumber() != colNumber) {
+                continue;
+            }
             sb.append(renderTableCellToHtml(cell, depth, url, pageNumber));
         }
         sb.append("</tr>");
@@ -1799,18 +1830,48 @@ public class JsonWriter {
         if (cell.getRowSpan() > 1) {
             sb.append(" rowspan=\"").append(cell.getRowSpan()).append('"');
         }
-        sb.append('>');
 
         List<IObject> contents = cell.getContents();
+        // Render sub-tables up to MAX_NESTED_TABLE_DEPTH as inline HTML, then assemble
+        // remaining text/image content via the standard line grouping path. The two
+        // passes use disjoint subsets of contents to avoid double-rendering.
+        List<IObject> flat = contents == null || contents.isEmpty()
+            ? new ArrayList<>()
+            : flattenCellContentsSkipTable(contents, url, pageNumber);
+        // Colored header rows of embedded sub-tables (e.g. the "公司資料" cards)
+        // carry a background assigned from the page's rectangle shapes; emit it
+        // as an inline style so the HTML string renders with the same colors as
+        // the bg_color field of the outer table grid. The dominant chunk font
+        // color rides along (white header text on the dark cards), skipping
+        // near-black which browsers render by default. Near-white text is only
+        // emitted on top of a background: when the background assignment missed
+        // (shape below the overlap threshold, OCR content, …) white-on-white
+        // text would be invisible, so black is the safer default there.
+        double[] backgroundColor = cell.getBackgroundColor();
+        boolean hasBackground = backgroundColor != null && backgroundColor.length == 3;
+        double[] fontColor = getDominantFontColor(flat);
+        boolean emitFontColor = shouldEmitFontColor(fontColor, hasBackground);
+        if (hasBackground || emitFontColor) {
+            sb.append(" style=\"");
+            if (hasBackground) {
+                sb.append("background-color:").append(toHexColor(backgroundColor));
+            }
+            if (emitFontColor) {
+                if (hasBackground) {
+                    sb.append("; ");
+                }
+                sb.append("color:").append(toHexColor(fontColor));
+            }
+            sb.append('"');
+        }
+        sb.append('>');
+
         if (contents == null || contents.isEmpty()) {
             sb.append("&nbsp;");
             sb.append("</td>");
             return sb.toString();
         }
 
-        // Render sub-tables up to MAX_NESTED_TABLE_DEPTH as inline HTML, then assemble
-        // remaining text/image content via the standard line grouping path. The two
-        // passes use disjoint subsets of contents to avoid double-rendering.
         StringBuilder body = new StringBuilder();
         for (IObject obj : contents) {
             if (obj instanceof TableBorder) {
@@ -1826,7 +1887,6 @@ public class JsonWriter {
                 }
             }
         }
-        List<IObject> flat = flattenCellContentsSkipTable(contents, url, pageNumber);
         boolean hasAnyText = false;
         if (!flat.isEmpty()) {
             flat.sort(Comparator.comparingDouble(IObject::getTopY).reversed());
@@ -1852,6 +1912,80 @@ public class JsonWriter {
 
         sb.append("</td>");
         return sb.toString();
+    }
+
+    /**
+     * Converts a normalized RGB triple (components in {@code [0,1]}) to a
+     * {@code #rrggbb} hex string. Shared by the outer table grid's
+     * {@code bg_color} field and the background style of embedded nested-table
+     * HTML so both use the same color representation.
+     */
+    private static String toHexColor(double[] color) {
+        int r = Math.max(0, Math.min(255, (int) Math.round(color[0] * 255)));
+        int g = Math.max(0, Math.min(255, (int) Math.round(color[1] * 255)));
+        int b = Math.max(0, Math.min(255, (int) Math.round(color[2] * 255)));
+        return String.format("#%02x%02x%02x", r, g, b);
+    }
+
+    /**
+     * Most common non-null {@link TextChunk} font color among the given flattened
+     * cell contents, quantized through {@link #toHexColor} so chunks of the same
+     * device color group together. Returns {@code null} when no chunk carries a
+     * color (for example hybrid/OCR content).
+     */
+    private static double[] getDominantFontColor(List<IObject> flat) {
+        Map<String, double[]> countsByHex = new HashMap<>();
+        Map<String, Integer> counts = new HashMap<>();
+        String bestKey = null;
+        int bestCount = 0;
+        for (IObject cellContent : flat) {
+            if (!(cellContent instanceof TextChunk)) {
+                continue;
+            }
+            double[] fontColor = ((TextChunk) cellContent).getFontColor();
+            if (fontColor == null || fontColor.length != 3) {
+                continue;
+            }
+            String key = toHexColor(fontColor);
+            int count = counts.merge(key, 1, Integer::sum);
+            countsByHex.put(key, fontColor);
+            if (count > bestCount) {
+                bestCount = count;
+                bestKey = key;
+            }
+        }
+        return bestKey == null ? null : countsByHex.get(bestKey);
+    }
+
+    /**
+     * Whether a normalized RGB color is visually black (all components below a
+     * small tolerance). Black is the browsers' default text color, so emitting
+     * it as an explicit style would add noise without changing the rendering.
+     */
+    private static boolean isNearBlack(double[] color) {
+        return color[0] < 0.02 && color[1] < 0.02 && color[2] < 0.02;
+    }
+
+    /**
+     * Whether a normalized RGB color is visually white (all components above a
+     * small tolerance). White text is only legible on an explicit background;
+     * without one it would vanish into the page, so it is not emitted.
+     */
+    private static boolean isNearWhite(double[] color) {
+        return color[0] > 0.95 && color[1] > 0.95 && color[2] > 0.95;
+    }
+
+    /**
+     * Shared text color emission rule for table cells (outer grid and embedded
+     * nested tables): a color is only emitted when it is visible, i.e. not
+     * near-black (browsers render text black by default) and, for near-white
+     * text, only when the cell actually carries a background color — if the
+     * background assignment missed (shape below the overlap threshold, OCR
+     * content, …) white text would vanish into the white page.
+     */
+    private static boolean shouldEmitFontColor(double[] fontColor, boolean hasBackground) {
+        return fontColor != null && !isNearBlack(fontColor)
+            && (hasBackground || !isNearWhite(fontColor));
     }
 
     private static boolean isChineseAdjacent(TextChunk prev, TextChunk curr) {

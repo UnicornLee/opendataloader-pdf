@@ -66,7 +66,7 @@
                         <td v-for="(td, _td) in table" :key="'td' + _table + item.page_index + _idx + _td"
                             :colspan="td.column_len"
                             :rowspan="td.row_len"
-                            :style="{background: td.bg_color}"
+                            :style="{background: td.bg_color, color: td.text_color}"
                             :width="td.width * 1.2"
                         >
                           <template v-if="td.cell_type === 'image'">

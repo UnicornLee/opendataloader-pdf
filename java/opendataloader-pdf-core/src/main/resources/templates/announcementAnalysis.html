@@ -75,7 +75,7 @@
                         <td v-for="(td, _td) in table" :key="'td' + _table + item.page_index + _idx + _td"
                             :colspan="td.column_len"
                             :rowspan="td.row_len"
-                            :style="{background: td.bg_color}"
+                            :style="{background: td.bg_color, color: td.text_color}"
                             :width="td.cell_radio * 100 + '%'"
                             :class="td.split_type?td.split_type === 'backslash' ? 'table_td_split_backslash':'table_td_split':''"
                         >

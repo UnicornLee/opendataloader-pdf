@@ -136,6 +136,9 @@ public class TableBorderProcessor {
                     newContents.set(index, normalizedTables.get(content));
                 }
             }
+            if (depth == 0) {
+                assignBackgroundColorsToNestedTables(contents, newContents);
+            }
             return newContents;
         } finally {
             // Reset depth when exiting this level (clean up ThreadLocal)
@@ -206,6 +209,46 @@ public class TableBorderProcessor {
         assignBackgroundColorsFromRectangleShapes(rawPageContents, normalizedTable);
         processTableBorderContents(normalizedTable, pageNumber, imagesDirectory);
         return normalizedTable;
+    }
+
+    /**
+     * Assigns background colors to nested sub-tables once the page's tables are
+     * fully processed.
+     *
+     * <p>{@link #normalizeAndProcessTableBorder} matches cell backgrounds against
+     * the rectangle shapes available at its own contents level, but ShapeChunks
+     * never enter a cell's content list (see {@link #addContentToTableBorder}),
+     * so a sub-table normalized inside a cell has no shapes to match and its
+     * colored header cells end up colorless. After the page level is done, walk
+     * every table's cells for nested tables and match them against the page's
+     * own rectangle shapes.</p>
+     */
+    private static void assignBackgroundColorsToNestedTables(List<IObject> rawPageContents, List<IObject> pageContents) {
+        for (IObject content : pageContents) {
+            if (content instanceof TableBorder) {
+                assignBackgroundColorsToNestedTables((TableBorder) content, rawPageContents);
+            }
+        }
+    }
+
+    private static void assignBackgroundColorsToNestedTables(TableBorder tableBorder, List<IObject> rawPageContents) {
+        for (int rowNumber = 0; rowNumber < tableBorder.getNumberOfRows(); rowNumber++) {
+            TableBorderRow row = tableBorder.getRow(rowNumber);
+            for (int colNumber = 0; colNumber < tableBorder.getNumberOfColumns(); colNumber++) {
+                TableBorderCell cell = row.getCell(colNumber);
+                if (cell == null || cell.getRowNumber() != rowNumber || cell.getColNumber() != colNumber
+                        || cell.getContents() == null) {
+                    continue;
+                }
+                for (IObject cellContent : cell.getContents()) {
+                    if (cellContent instanceof TableBorder) {
+                        TableBorder nestedTable = (TableBorder) cellContent;
+                        assignBackgroundColorsFromRectangleShapes(rawPageContents, nestedTable);
+                        assignBackgroundColorsToNestedTables(nestedTable, rawPageContents);
+                    }
+                }
+            }
+        }
     }
 
     /**
