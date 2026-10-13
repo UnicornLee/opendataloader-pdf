@@ -66,7 +66,7 @@ class JsonWriterNestedTableHtmlTest {
         bodyRow.getCells()[1] = value;
         table.getRows()[1] = bodyRow;
 
-        assertEquals("<table><tr><td colspan=\"2\">\u516C\u53F8\u8CC7\u6599</td></tr>"
+        assertEquals("<table style=\"margin:5px 2%; width:96%; table-layout:fixed\"><tr><td colspan=\"2\">\u516C\u53F8\u8CC7\u6599</td></tr>"
                 + "<tr><td>\u80A1\u4EFD\u4EE3\u865F</td><td>09976</td></tr></table>",
             render(table));
     }
@@ -94,7 +94,7 @@ class JsonWriterNestedTableHtmlTest {
         table.getRows()[0] = row0;
         table.getRows()[1] = row1;
 
-        assertEquals("<table><tr><td rowspan=\"2\">A</td><td>B</td></tr>"
+        assertEquals("<table style=\"margin:5px 2%; width:96%; table-layout:fixed\"><tr><td rowspan=\"2\">A</td><td>B</td></tr>"
                 + "<tr><td>C</td></tr></table>", render(table));
     }
 
@@ -118,7 +118,7 @@ class JsonWriterNestedTableHtmlTest {
         row.getCells()[0] = cell;
         table.getRows()[0] = row;
 
-        assertEquals("<table><tr><td style=\"background-color:#000059; color:#ffffff\">X</td></tr></table>",
+        assertEquals("<table style=\"margin:5px 2%; width:96%; table-layout:fixed\"><tr><td style=\"background-color:#000059; color:#ffffff\">X</td></tr></table>",
             render(table));
     }
 
@@ -143,7 +143,7 @@ class JsonWriterNestedTableHtmlTest {
         row.getCells()[1] = noColorCell;
         table.getRows()[0] = row;
 
-        assertEquals("<table><tr><td style=\"background-color:#000059\">A</td>"
+        assertEquals("<table style=\"margin:5px 2%; width:96%; table-layout:fixed\"><tr><td style=\"background-color:#000059\">A</td>"
                 + "<td style=\"background-color:#000059\">B</td></tr></table>", render(table));
     }
 
@@ -174,7 +174,28 @@ class JsonWriterNestedTableHtmlTest {
         row.getCells()[1] = redNoBg;
         table.getRows()[0] = row;
 
-        assertEquals("<table><tr><td>X</td><td style=\"color:#ff0000\">Z</td></tr></table>",
+        assertEquals("<table style=\"margin:5px 2%; width:96%; table-layout:fixed\"><tr><td>X</td><td style=\"color:#ff0000\">Z</td></tr></table>",
+            render(table));
+    }
+
+    /**
+     * Superscript/subscript (角标) markup that TextLineProcessor injects into a
+     * chunk value must survive into the nested-table HTML untouched, so the
+     * browser renders it as a real superscript rather than literal
+     * "&lt;sup&gt;" text (the reported "所得款項總額<sup>（附註）</sup>" case). Other
+     * HTML-significant characters in the same value are still escaped.
+     */
+    @Test
+    void superscriptMarkupInCellTextIsPreservedWhileOtherTagsAreEscaped() throws Exception {
+        TableBorder table = new TableBorder(1, 1);
+        TableBorderRow row = new TableBorderRow(0, 1, null);
+        TableBorderCell cell = new TableBorderCell(0, 0, 1, 1, null);
+        cell.setBoundingBox(new BoundingBox(0, 0, 280, 200, 300));
+        cell.addContentObject(textChunk("A<sup>1</sup><b>x</b>", 0, 280, 200, 300));
+        row.getCells()[0] = cell;
+        table.getRows()[0] = row;
+
+        assertEquals("<table style=\"margin:5px 2%; width:96%; table-layout:fixed\"><tr><td>A<sup>1</sup>&lt;b&gt;x&lt;/b&gt;</td></tr></table>",
             render(table));
     }
 
