@@ -32,6 +32,10 @@ public class CapturingImagesUtils extends ImagesUtils {
 
     @Override
     public void saveImageChunk(ImageChunk chunk) {
+        // Real saves assign an index (ImagesUtils#writeImage); callers such as the
+        // inline-mark pass of GraphicRegionProcessor key off it to tell a rendered
+        // screenshot from one that was skipped, so the fixture has to mirror that.
+        chunk.setIndex(saved.size() + 1);
         saved.add(chunk);
     }
 }

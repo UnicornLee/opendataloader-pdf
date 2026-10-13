@@ -15,6 +15,9 @@
  */
 package org.opendataloader.pdf.processors;
 
+import org.opendataloader.pdf.containers.StaticLayoutContainers;
+import org.opendataloader.pdf.custom.entities.CustomSemanticParagraph;
+import org.opendataloader.pdf.custom.utils.CustomChunksMergeUtils;
 import org.opendataloader.pdf.entities.content.ShapeChunk;
 import org.opendataloader.pdf.utils.ImagesUtils;
 import org.verapdf.wcag.algorithms.entities.IObject;
@@ -22,8 +25,14 @@ import org.verapdf.wcag.algorithms.entities.SemanticTextNode;
 import org.verapdf.wcag.algorithms.entities.content.ImageChunk;
 import org.verapdf.wcag.algorithms.entities.content.LineArtChunk;
 import org.verapdf.wcag.algorithms.entities.content.LineChunk;
+import org.verapdf.wcag.algorithms.entities.content.TextBlock;
 import org.verapdf.wcag.algorithms.entities.content.TextChunk;
+import org.verapdf.wcag.algorithms.entities.content.TextColumn;
+import org.verapdf.wcag.algorithms.entities.content.TextLine;
 import org.verapdf.wcag.algorithms.entities.geometry.BoundingBox;
+import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorder;
+import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorderCell;
+import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorderRow;
 import org.verapdf.wcag.algorithms.semanticalgorithms.containers.StaticContainers;
 
 import java.util.ArrayList;
@@ -88,8 +97,14 @@ import java.util.logging.Logger;
  *       header rules, section dividers and table borders out: those are one or
  *       two strokes.</li>
  *   <li><b>No full-span stroke</b> — no raw line or non-group shape may span
- *       {@link #FULL_SPAN_RULE_RATIO} of the region. A graphic is a cluster of
- *       short strokes; a table grid is one long rule.</li>
+ *       {@link #FULL_SPAN_RULE_RATIO} of the region <em>while staying thin</em>
+ *       ({@link #RULE_MAX_THICKNESS_RATIO}). A graphic is a cluster of short
+ *       strokes; a table grid is one long rule. The thinness half of the test
+ *       matters: a pictorial mark is enclosed by one outline path whose box is
+ *       the mark itself, and that box is by construction square-ish, so a rule
+ *       measured only by length would veto every house / shield / roundel logo
+ *       (measured: the 51.2 x 48.3 pt 屋 house mark of a 2007 announcement, whose
+ *       51.03 x 47.67 pt outline spans 99.6 % of its own region).</li>
  *   <li><b>No text</b> — a text block intersecting the box vetoes the capture.
  *       The text layer is never emptied here, so cropping a region that still
  *       holds text would render that text twice; and a vector-graphic region is
@@ -114,6 +129,19 @@ import java.util.logging.Logger;
  * ({@link #clusterFragments}); the envelope is judged first and, when it is
  * vetoed, the members fall back to being judged individually, so a region that
  * is captured today is never lost by the clustering.</p>
+ *
+ * <h2>Inline marks</h2>
+ * <p>The gates above size regions in <em>paragraph</em> terms, so the small vector
+ * mark set in front of a company name — measured: a 23.21 x 23.77 pt pictorial
+ * signature ahead of “新百利有限公司” — is rejected by {@link #MIN_REGION_WIDTH}
+ * and by the density gate at once and disappears without trace. Such a mark is not
+ * a region of its own right: it belongs to the text line it is set into. A
+ * separate pass therefore claims a box that is small, dense, mark-shaped and
+ * directly adjacent to one text line, screenshots it, and injects the result as an
+ * inline {@code <img>} chunk of that line — the same shape
+ * {@link TextLineProcessor} already produces for raster figures on a text line
+ * ({@link #captureInlineMark}). It runs before the clustering so a consumed mark
+ * cannot also be captured as a region.</p>
  *
  * <h2>Position in the pipeline</h2>
  * <p>Runs at the end of Loop 4, after the chart and flowchart passes (which
@@ -159,6 +187,17 @@ public final class GraphicRegionProcessor {
      */
     private static final double FULL_SPAN_RULE_RATIO = 0.80;
     /**
+     * Largest short/long side ratio a stroke may have and still count as a rule.
+     * <p>
+     * {@link #FULL_SPAN_RULE_RATIO} alone asks only "how long is it relative to the
+     * region", which cannot tell a table rule from the outline of a pictorial mark:
+     * both are the widest thing in the box. It can tell them apart by thickness — a
+     * rule is a line, so its box is long and narrow (measured row bands: 506 x 141 pt
+     * and 506 x 242 pt, ratios 0.28 and 0.48), while an enclosing outline has a box as
+     * tall as it is wide (the 屋 house mark: 51.03 x 47.67 pt, ratio 0.93).
+     */
+    private static final double RULE_MAX_THICKNESS_RATIO = 0.60;
+    /**
      * Smallest share of the smaller of the two boxes that the intersection between
      * the region and a text block must cover before the text vetoes the capture.
      * <p>
@@ -191,6 +230,33 @@ public final class GraphicRegionProcessor {
      * have grown over a raster image rather than around vector art.
      */
     private static final double IMAGE_VETO_MIN_OVERLAP_SHARE = 0.05;
+
+    /**
+     * Smallest side (pt) of an inline mark. Below this the box is a bullet, a
+     * dagger or a punctuation glyph drawn as line art, not a company mark.
+     */
+    private static final double INLINE_MARK_MIN_SIZE = 8.0;
+    /**
+     * Largest side (pt) of an inline mark. The mark is set into a text line, so it
+     * stays within a few times the line height; the 屋 house logo (51.2 x 48.3 pt)
+     * is a region in its own right and must go through the regular gates instead.
+     */
+    private static final double INLINE_MARK_MAX_SIZE = 40.0;
+    /** Aspect ratio beyond which the box is a rule or a bar rather than a mark. */
+    private static final double INLINE_MARK_MAX_ASPECT_RATIO = 4.0;
+    /**
+     * Largest horizontal distance (pt) between the mark and the text line it may be
+     * set into. Measured on the 新百利有限公司 lockup: 4.38 pt. Anything further
+     * away is a separate object on the page, not an initial of that line.
+     */
+    private static final double INLINE_MARK_MAX_GAP = 12.0;
+    /**
+     * Strokes (raw lines or shape components) required inside an inline mark.
+     * Lower than {@link #MIN_RAW_LINE_COUNT} because a mark is a fraction of the
+     * size of a lockup: measured 7 lines and 5 shape components for the
+     * 新百利有限公司 signature, against a region gate of 8 for both.
+     */
+    private static final int INLINE_MARK_MIN_STROKES = 4;
 
     private GraphicRegionProcessor() {
     }
@@ -231,7 +297,22 @@ public final class GraphicRegionProcessor {
         // Top-to-bottom so a page with several graphics reports and captures them
         // in reading order.
         candidates.sort(Comparator.comparingDouble(IObject::getTopY).reversed());
-        List<List<LineArtChunk>> clusters = clusterFragments(candidates, pageWidth, pageHeight);
+
+        // Marks that belong to a text line are claimed first: they are too small for
+        // the region gates below, and once inlined they must not be judged again.
+        List<LineArtChunk> regions = new ArrayList<>();
+        for (LineArtChunk candidate : candidates) {
+            if (!pageContents.contains(candidate)) {
+                continue;
+            }
+            if (!captureInlineMark(candidate, pageContents, imagesUtils, rawLines, pageNumber)) {
+                regions.add(candidate);
+            }
+        }
+        if (regions.isEmpty()) {
+            return;
+        }
+        List<List<LineArtChunk>> clusters = clusterFragments(regions, pageWidth, pageHeight);
 
         List<String> skipped = new ArrayList<>();
         for (List<LineArtChunk> cluster : clusters) {
@@ -505,7 +586,12 @@ public final class GraphicRegionProcessor {
         if (candidate == null || candidate.isEmpty() || !box.overlaps(candidate)) {
             return false;
         }
-        return Math.max(candidate.getWidth(), candidate.getHeight()) / boxSpan >= FULL_SPAN_RULE_RATIO;
+        double longSide = Math.max(candidate.getWidth(), candidate.getHeight());
+        double shortSide = Math.min(candidate.getWidth(), candidate.getHeight());
+        if (longSide / boxSpan < FULL_SPAN_RULE_RATIO) {
+            return false;
+        }
+        return shortSide / longSide <= RULE_MAX_THICKNESS_RATIO;
     }
 
     /**
@@ -604,15 +690,24 @@ public final class GraphicRegionProcessor {
     private static boolean isTextContent(IObject content) {
         return content instanceof TextChunk
             || content instanceof SemanticTextNode
-            || content instanceof org.opendataloader.pdf.custom.entities.CustomSemanticParagraph
-            || content instanceof org.verapdf.wcag.algorithms.entities.content.TextLine;
+            || content instanceof CustomSemanticParagraph
+            || content instanceof TextLine;
     }
 
     /**
      * Screenshots the region and swaps it for the resulting {@link ImageChunk}: every
-     * {@link LineArtChunk} of the region and every {@link ShapeChunk} the crop fully
-     * covers are removed (neither reaches the JSON otherwise), then the image is
-     * inserted in top-to-bottom order.
+     * {@link LineArtChunk} of the region, every {@link ShapeChunk} the crop fully
+     * covers and every content-free {@link TableBorder} it fully covers are removed
+     * (the first two never reach the JSON anyway), then the image is inserted in
+     * top-to-bottom order.
+     *
+     * <p>The table clause exists because the line preprocessing reads the strokes of
+     * a pictorial mark as rules: on the measured announcement the 屋 character inside
+     * the house logo became a 2 x 2 table whose four cells held nothing but the lines
+     * that drew them. Leaving that behind would report a blank table where the crop now
+     * shows the graphic, so a table with no text, image or nested content of its own is
+     * dropped together with the strokes it was made of. A table holding anything
+     * readable survives: the crop is never allowed to swallow real content.</p>
      */
     private static void captureRegion(List<IObject> pageContents, List<LineArtChunk> lineArt,
                                       BoundingBox box, ImagesUtils imagesUtils, int pageNumber) {
@@ -620,17 +715,273 @@ public final class GraphicRegionProcessor {
         imagesUtils.saveImageChunk(imageChunk);
 
         pageContents.removeAll(lineArt);
-        pageContents.removeIf(content -> {
-            if (!(content instanceof ShapeChunk)) {
-                return false;
-            }
-            BoundingBox shapeBox = content.getBoundingBox();
-            return shapeBox != null && !shapeBox.isEmpty() && box.contains(shapeBox);
-        });
+        pageContents.removeIf(content -> isCoveredBy(box, content) && isRemovableWithRegion(content));
 
         addInOrder(pageContents, imageChunk);
         LOGGER.log(Level.INFO, "Page {0}: captured vector graphic region {1} as image #{2}",
             new Object[]{pageNumber + 1, describe(box), imageChunk.getIndex()});
+    }
+
+    /**
+     * True for the page objects a region crop subsumes: the vector carriers it renders
+     * itself, plus tables that only restate its rules. Text, images and content-carrying
+     * tables are never removed.
+     */
+    private static boolean isRemovableWithRegion(IObject content) {
+        if (content instanceof ShapeChunk || content instanceof LineArtChunk) {
+            return true;
+        }
+        return content instanceof TableBorder && isContentFreeTable((TableBorder) content);
+    }
+
+    /** True when {@code box} fully covers {@code content}'s own bounding box. */
+    private static boolean isCoveredBy(BoundingBox box, IObject content) {
+        BoundingBox contentBox = content.getBoundingBox();
+        return contentBox != null && !contentBox.isEmpty() && box.contains(contentBox);
+    }
+
+    /**
+     * True when no cell of {@code table} holds anything a reader could see — text, an
+     * image, or a nested table that itself holds something. Line and shape content is
+     * ignored: those are the rules the table was inferred from.
+     */
+    private static boolean isContentFreeTable(TableBorder table) {
+        TableBorderRow[] rows = table.getRows();
+        if (rows == null) {
+            return true;
+        }
+        for (TableBorderRow row : rows) {
+            TableBorderCell[] cells = row == null ? null : row.getCells();
+            if (cells == null) {
+                continue;
+            }
+            for (TableBorderCell cell : cells) {
+                List<IObject> cellContents = cell == null ? null : cell.getContents();
+                if (cellContents == null) {
+                    continue;
+                }
+                for (IObject content : cellContents) {
+                    if (content != null && carriesReadableContent(content)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    private static boolean carriesReadableContent(IObject content) {
+        if (content instanceof ImageChunk) {
+            return true;
+        }
+        if (content instanceof TableBorder) {
+            return !isContentFreeTable((TableBorder) content);
+        }
+        if (content instanceof TextChunk) {
+            return !((TextChunk) content).isEmpty();
+        }
+        if (content instanceof SemanticTextNode) {
+            SemanticTextNode node = (SemanticTextNode) content;
+            if (!node.isEmpty()) {
+                return true;
+            }
+            String value = node.getValue();
+            return value != null && !value.trim().isEmpty();
+        }
+        return false;
+    }
+
+    /**
+     * Screenshots a small vector mark that is set into a text line — a company signature
+     * in front of the company name — and injects the result as an inline
+     * {@code <img>} chunk of that line instead of emitting a standalone image.
+     *
+     * <p>The mark never reaches the regular gates: at 23.2 x 23.8 pt it is under
+     * {@link #MIN_REGION_WIDTH} and, with 7 strokes, under {@link #MIN_RAW_LINE_COUNT},
+     * so before this pass it produced no output at all. Being smaller than a region is
+     * not a weakness here but the point: a mark this size has no meaning apart from the
+     * words beside it, so it is reported beside them.</p>
+     *
+     * @return true when the mark was claimed and {@code candidate} left the page
+     */
+    private static boolean captureInlineMark(LineArtChunk candidate, List<IObject> pageContents,
+                                            ImagesUtils imagesUtils, List<IObject> rawLines,
+                                            int pageNumber) {
+        BoundingBox box = candidate.getBoundingBox();
+        if (box == null || box.isEmpty()) {
+            return false;
+        }
+        double width = box.getWidth();
+        double height = box.getHeight();
+        if (width < INLINE_MARK_MIN_SIZE || height < INLINE_MARK_MIN_SIZE
+            || width > INLINE_MARK_MAX_SIZE || height > INLINE_MARK_MAX_SIZE) {
+            return false;
+        }
+        if (Math.max(width / height, height / width) > INLINE_MARK_MAX_ASPECT_RATIO) {
+            return false;
+        }
+        if (countLinesInside(box, rawLines) < INLINE_MARK_MIN_STROKES
+            && countShapeComponentsInside(box, pageContents) < INLINE_MARK_MIN_STROKES) {
+            return false;
+        }
+        if (overlapsTable(box) || hasVetoingText(box, pageContents)) {
+            return false;
+        }
+        TextLineHost host = findInlineMarkHost(box, pageContents);
+        if (host == null) {
+            return false;
+        }
+
+        ImageChunk imageChunk = new ImageChunk(new BoundingBox(box));
+        imagesUtils.saveImageChunk(imageChunk);
+        if (imageChunk.getIndex() == null) {
+            // Nothing was rendered (no raster available); keep the mark for the
+            // region gates rather than inject a dangling <img> reference.
+            return false;
+        }
+        TextChunk inline = CustomChunksMergeUtils.convertImageChunkToTextChunk(imageChunk,
+            host.line.getFontSize(), host.line.getBaseLine(), StaticLayoutContainers.getImagesDirectory());
+        String hostText = host.line.getValue();
+        insertInReadingOrder(host.line.getTextChunks(), inline);
+        growTo(host.line, box);
+        for (IObject ancestor : host.ancestors) {
+            growTo(ancestor, box);
+        }
+
+        pageContents.remove(candidate);
+        pageContents.removeIf(content -> isCoveredBy(box, content) && isRemovableWithRegion(content));
+        LOGGER.log(Level.INFO,
+            "Page {0}: captured inline vector mark {1} as image #{2} of the text line {3}",
+            new Object[]{pageNumber + 1, describe(box), imageChunk.getIndex(), hostText});
+        return true;
+    }
+
+    /**
+     * The text line the mark is set into, or {@code null} when it is not inline with
+     * any. A line qualifies when it vertically shares the mark's row and the mark sits
+     * directly to its left or right — the measured signature is 4.38 pt from the name.
+     * The closest candidate wins so a mark between two columns joins the one it touches.
+     */
+    private static TextLineHost findInlineMarkHost(BoundingBox box, List<IObject> pageContents) {
+        TextLineHost best = null;
+        double bestGap = Double.MAX_VALUE;
+        for (TextLineHost host : collectTextLineHosts(pageContents)) {
+            BoundingBox lineBox = host.line.getBoundingBox();
+            if (lineBox == null || lineBox.isEmpty() || host.line.getTextChunks().isEmpty()) {
+                continue;
+            }
+            if (!sharesTextLine(box, lineBox)) {
+                continue;
+            }
+            double gap = horizontalGap(box, lineBox);
+            if (gap < 0 || gap > INLINE_MARK_MAX_GAP || gap >= bestGap) {
+                continue;
+            }
+            best = host;
+            bestGap = gap;
+        }
+        return best;
+    }
+
+    /**
+     * True when the mark is on the line's reading row: either centre falls inside the
+     * other's vertical extent. A mark is usually taller than the glyphs beside it, so
+     * testing the mark's centre against the line alone would miss it.
+     */
+    private static boolean sharesTextLine(BoundingBox mark, BoundingBox line) {
+        return (mark.getCenterY() >= line.getBottomY() && mark.getCenterY() <= line.getTopY())
+            || (line.getCenterY() >= mark.getBottomY() && line.getCenterY() <= mark.getTopY());
+    }
+
+    /** Distance between two boxes along x, or -1 when they already overlap. */
+    private static double horizontalGap(BoundingBox a, BoundingBox b) {
+        if (a.getRightX() <= b.getLeftX()) {
+            return b.getLeftX() - a.getRightX();
+        }
+        if (b.getRightX() <= a.getLeftX()) {
+            return a.getLeftX() - b.getRightX();
+        }
+        return -1;
+    }
+
+    /**
+     * Walks the page's text carriers down to their lines, keeping the enclosing objects
+     * so a line that gains an inline image can widen the paragraph / heading around it.
+     */
+    private static List<TextLineHost> collectTextLineHosts(List<IObject> pageContents) {
+        List<TextLineHost> hosts = new ArrayList<>();
+        for (IObject content : pageContents) {
+            if (content instanceof TextLine) {
+                hosts.add(new TextLineHost((TextLine) content, Collections.<IObject>emptyList()));
+            } else if (content instanceof CustomSemanticParagraph) {
+                List<IObject> ancestors = new ArrayList<>(1);
+                ancestors.add(content);
+                for (TextLine line : nullSafe(((CustomSemanticParagraph) content).getTextLines())) {
+                    if (line != null) {
+                        hosts.add(new TextLineHost(line, ancestors));
+                    }
+                }
+            } else if (content instanceof SemanticTextNode) {
+                List<IObject> nodeAncestors = new ArrayList<>(1);
+                nodeAncestors.add(content);
+                for (TextColumn column : nullSafe(((SemanticTextNode) content).getColumns())) {
+                    if (column == null) {
+                        continue;
+                    }
+                    List<IObject> columnAncestors = new ArrayList<>(nodeAncestors);
+                    columnAncestors.add(column);
+                    for (TextBlock block : nullSafe(column.getBlocks())) {
+                        if (block == null) {
+                            continue;
+                        }
+                        List<IObject> blockAncestors = new ArrayList<>(columnAncestors);
+                        blockAncestors.add(block);
+                        for (TextLine line : nullSafe(block.getLines())) {
+                            if (line != null) {
+                                hosts.add(new TextLineHost(line, blockAncestors));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return hosts;
+    }
+
+    /** Keeps the walk above total: a half-built semantic node must not stop the page. */
+    private static <T> List<T> nullSafe(List<T> list) {
+        return list == null ? Collections.<T>emptyList() : list;
+    }
+
+    /** Inserts {@code chunk} so that {@code chunks} stays ordered by left edge. */
+    private static void insertInReadingOrder(List<TextChunk> chunks, TextChunk chunk) {
+        int index = 0;
+        while (index < chunks.size() && chunks.get(index).getLeftX() <= chunk.getLeftX()) {
+            index++;
+        }
+        chunks.add(index, chunk);
+    }
+
+    /** Enlarges {@code content}'s bounding box so that it covers {@code box}. */
+    private static void growTo(IObject content, BoundingBox box) {
+        BoundingBox current = content.getBoundingBox();
+        if (current == null) {
+            content.setBoundingBox(new BoundingBox(box));
+            return;
+        }
+        content.setBoundingBox(new BoundingBox(current).union(box));
+    }
+
+    /** A text line together with the objects enclosing it, outermost first. */
+    private static final class TextLineHost {
+
+        private final TextLine line;
+        private final List<IObject> ancestors;
+
+        private TextLineHost(TextLine line, List<IObject> ancestors) {
+            this.line = line;
+            this.ancestors = ancestors;
+        }
     }
 
     /** Inserts {@code item} so that {@code pageContents} stays sorted by descending topY. */
