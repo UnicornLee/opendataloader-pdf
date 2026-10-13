@@ -35,15 +35,27 @@ public class StaticLayoutContainers {
     private static final ThreadLocal<Long> currentContentId = new ThreadLocal<>();
     private static final ThreadLocal<List<SemanticHeading>> headings = new ThreadLocal<>();
     /**
-     * Global image-file index, unique across ALL threads. Must not be a
-     * ThreadLocal: image extraction now also runs on ForkJoinPool workers
-     * (chart/formula loop in DocumentProcessor), and per-thread counters would
-     * both NPE on first use (no initial value on workers) and produce duplicate
-     * imageFileN.png names across workers, silently overwriting each other's
-     * files. An AtomicInteger keeps names unique regardless of which thread
-     * stamps the next chunk.
+     * Image-file index, unique across ALL worker threads of ONE document.
+     * Must not be a plain ThreadLocal holding an int: image extraction runs on
+     * ForkJoinPool workers (chart/formula loop in DocumentProcessor), and
+     * per-thread int counters would both NPE on first use (no initial value on
+     * workers) and produce duplicate imageFileN.png names across workers,
+     * silently overwriting each other's files. Sharing one mutable AtomicInteger
+     * instance (by reference, propagated through DocumentProcessor.propagateState)
+     * keeps names unique across a document's worker threads.
+     *
+     * <p>It is deliberately a {@code ThreadLocal<AtomicInteger>} rather than a
+     * process-global {@code AtomicInteger}: the production server parses many
+     * documents concurrently in the same JVM, and every document start
+     * ({@link #clearContainers()}) / JSON output ({@code resetImageIndex}) resets
+     * the counter. A process-global counter let one document's reset rewind
+     * another document mid-extraction, so its later pages reused low indices and
+     * overwrote earlier pages' imageFileN.png. Scoping the counter to the
+     * requesting thread (with the instance shared to that run's workers) keeps the
+     * reset per-document while preserving within-document cross-worker uniqueness.
      */
-    private static final AtomicInteger imageIndex = new AtomicInteger(1);
+    private static final ThreadLocal<AtomicInteger> imageIndex =
+        ThreadLocal.withInitial(() -> new AtomicInteger(1));
     private static final ThreadLocal<Boolean> isUseStructTree = new ThreadLocal<>();
     private static final ThreadLocal<String> imagesDirectory = new ThreadLocal<>();
     private static final ThreadLocal<Boolean> embedImages = new ThreadLocal<>();
@@ -58,7 +70,10 @@ public class StaticLayoutContainers {
     public static void clearContainers() {
         currentContentId.set(1L);
         headings.set(Collections.synchronizedList(new LinkedList<>()));
-        imageIndex.set(1);
+        // Fresh counter instance per document/run so a reset here (called at the
+        // start of every preprocessing) cannot rewind a concurrently-processing
+        // document that shares this thread-pool's worker threads.
+        imageIndex.set(new AtomicInteger(1));
         isUseStructTree.set(false);
         imagesDirectory.set("");
         embedImages.set(false);
@@ -178,11 +193,27 @@ public class StaticLayoutContainers {
     }
 
     public static int incrementImageIndex() {
-        return imageIndex.getAndIncrement();
+        return imageIndex.get().getAndIncrement();
     }
 
     public static void resetImageIndex() {
-        imageIndex.set(1);
+        imageIndex.get().set(1);
+    }
+
+    /**
+     * Returns this thread's live image-index counter instance. DocumentProcessor
+     * captures it on the main request thread and re-installs it on each worker via
+     * {@code propagateState} (see {@link #setImageIndex}), so every worker of one
+     * document increments the same AtomicInteger while other documents keep their
+     * own — the pattern already used for the embedded-image and replacement-ratio
+     * maps.
+     */
+    public static AtomicInteger getImageIndex() {
+        return imageIndex.get();
+    }
+
+    public static void setImageIndex(AtomicInteger index) {
+        imageIndex.set(index);
     }
 
     public static boolean isEmbedImages() {
