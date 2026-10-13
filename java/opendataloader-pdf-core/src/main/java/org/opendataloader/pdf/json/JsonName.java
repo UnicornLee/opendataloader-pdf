@@ -98,6 +98,7 @@ public class JsonName {
     public static final String CELL_RADIO = "cell_radio";
     public static final String CELL_TYPE = "cell_type";
     public static final String BACKGROUND_COLOR = "bg_color";
+    public static final String TEXT_COLOR_HEX = "text_color";
     public static final String TEXT = "text";
     public static final String IMAGE_FORMAT = "format";
     public static final String FORMULA_TYPE = "formula";
