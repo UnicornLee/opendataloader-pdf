@@ -116,6 +116,19 @@ public class ImagesUtils {
         String imageFormat = StaticLayoutContainers.getImageFormat();
         String fileName = String.format(MarkdownSyntax.IMAGE_FILE_NAME_FORMAT, StaticLayoutContainers.getImagesDirectory(),
             File.separator, currentImageIndex, imageFormat);
+        // Image indices are unique per document/run by construction, so a target that
+        // already exists means two chunks were stamped with the SAME index — the
+        // cross-document reset bug that let one page's screenshot overwrite another's.
+        // Kept as a warning so it is caught in production logs rather than silently
+        // corrupting output; should never fire once the counter is properly scoped.
+        if (!StaticLayoutContainers.isEmbedImages() && new File(fileName).exists()) {
+            LOGGER.log(Level.WARNING,
+                "Image index collision: {0} already exists before writing page {1} image (index {2}); a previous "
+                    + "screenshot is about to be overwritten. This indicates the image-index counter was reset by a "
+                    + "concurrently-processed document.",
+                new Object[]{fileName, chunk.getBoundingBox() != null ? chunk.getBoundingBox().getPageNumber() : -1,
+                    currentImageIndex});
+        }
         chunk.setIndex(currentImageIndex);
         StreamInfo streamInfo = chunk.getStreamInfos() != null && !chunk.getStreamInfos().isEmpty() ? chunk.getStreamInfos().get(0) : null;
         createImageFile(chunk.getBoundingBox(), fileName, imageFormat, streamInfo != null ? streamInfo.getXImageObjectKey() : null);

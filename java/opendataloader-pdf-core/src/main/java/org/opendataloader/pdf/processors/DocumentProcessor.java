@@ -476,6 +476,12 @@ public class DocumentProcessor {
         final boolean useStructTree = StaticLayoutContainers.isUseStructTree();
         final var embeddedImageBytesMap = StaticLayoutContainers.getEmbeddedImageBytesMap();
         final var replacementCharRatiosMap = StaticLayoutContainers.getReplacementCharRatiosMap();
+        // Share the main thread's image-index counter instance with workers by reference
+        // (like the maps above). Image writing runs both on this thread
+        // (ImagesUtils#write) and on ForkJoinPool workers (chart/formula loop), so they
+        // must stamp from one AtomicInteger; scoping it per-thread keeps concurrent
+        // documents from resetting each other's counter mid-extraction.
+        final var imageIndexAtomic = StaticLayoutContainers.getImageIndex();
         // Bookmark ThreadLocals added by catalog/page-bookmark feature (commits 9fe705b / fceeb31).
         // Without propagation, worker threads would see null/0 and either NPE or behave as if no
         // bookmark range was set — see CLAUDE.md "StaticLayoutContainers ThreadLocal" gotcha.
@@ -507,6 +513,7 @@ public class DocumentProcessor {
             StaticLayoutContainers.setIsUseStructTree(useStructTree);
             StaticLayoutContainers.setEmbeddedImageBytesMap(embeddedImageBytesMap);
             StaticLayoutContainers.setReplacementCharRatiosMap(replacementCharRatiosMap);
+            StaticLayoutContainers.setImageIndex(imageIndexAtomic);
             // *Map variants share the main-thread list reference (see CLAUDE.md gotcha); the
             // plain setCatalogBookmarks / setPageBookmarks APIs do clear+addAll copy semantics
             // and would leave each worker seeing its own ThreadLocal-initial LinkedList instead
