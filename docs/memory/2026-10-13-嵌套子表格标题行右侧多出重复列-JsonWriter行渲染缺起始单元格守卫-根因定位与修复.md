@@ -107,6 +107,34 @@
 - **修复**：文本遍历起点改用**当前网格坐标** `m/i`（`for n = m; n < m+rowSpan; for k = i; k < i+colSpan;`）。规范单元格 `m==rowNumber && i==colNumber`，行为完全不变；畸形占位 cell 则只读自身（空）内容。保留占位 cell 输出（仅清空 text）而非跳过，以维持每行 `cell_radio` 求和为 1 的列宽对齐。
 - **验证**：重跑 DebugSample1，第 25 页表格 `empty text cells: 2`（第 2/3 行第 1 列）、`"(5)" occurrences: 1`（第 4 行第 1 列 `x0=42.77, y0=366.113`）；相关表格测试 33 个全部通过（BUILD SUCCESS）。
 
+## 再跟进：子表格内联 HTML 增加外边距样式
+
+用户需求：子表格拼装时加样式——上下 margin 5px，左右 margin 为该列宽度的 2%。
+
+- **实现**：`JsonWriter.renderTableBorderToHtml` 输出 `<table>` 标签时统一加盖 `style="margin:5px 2%"`（常量 `NESTED_TABLE_STYLE`），覆盖所有嵌套层级（递归路径 `renderTableCellToHtml` 体内的子子表同样生效）。
+- **关键取舍**：左右 margin 保持 CSS 百分比写法而非解析期算 px——table 的百分比 margin 按 containing block（即容纳它的单元格/列宽）解析，浏览器端天然就是“该列宽度的 2%”，且逐层嵌套自适应，无需在 `flattenCellContents`/`renderTableBorderToHtml` 调用链上穿透列宽，也没有 PDF pt→px 单位换算问题。
+- **验证**：`JsonWriterNestedTableHtmlTest` 5 处精确字符串断言同步更新后表格相关测试 33 个全部通过；重跑 DebugSample1，输出 JSON 内嵌子表格 `<table style="margin:5px 2%">` 全部命中、无残留裸 `<table>`。
+- **踩坑（右侧溢出父表格）**：用户反馈加 margin 后子表格右边跑到了父表格外。根因在预览样式表 `templates/index.css` 的全局规则 `table { border-collapse:collapse; box-sizing:border-box; width:100% }`——它命中所有层级的 table，包括内联进单元格的子表；而 margin 不在 box-sizing 计算范围内，于是 100% 本体 + 左右各 2% margin = 104% 必然溢出。修复：`NESTED_TABLE_STYLE` 改为 `"margin:5px 2%; width:96%"`，内联 width 优先级高于样式表，96% + 2% + 2% = 恰好 100% 填满列宽且两侧各留 2%（百分比 width/margin 都相对同一 containing block，恒等式成立，逐层嵌套自适应）。验证：重编译+重跑后输出内嵌子表全部为 `<table style="margin:5px 2%; width:96%">`，测试断言同步更新后 33 个全部通过。教训：给内联 HTML 片段加样式时，必须先看预览模板的全局 CSS 是否命中同类元素（这里全局 `table{width:100%}` 与外层 margin 叠加），不能只验证“字符串正确写入”。
+
+### 再跟进：`width:96%` 仍溢出——auto 表格布局不遵守指定宽度
+
+用户反馈：改成 `margin:5px 2%; width:96%` 后，子表格右侧**仍然**跑到父表格外。
+
+- **真正的根因（比 104% 叠加更深一层）**：`<table>` 默认是 **auto 布局**，其 used width = `max(指定 width, min-content width)`——表格永远不肯缩到内容所需最小宽度以下。所以 `width:96%` 只是个**下限**：当子表格的列数/文本使 min-content 超过父单元格的 96% 时，表格实际宽度撑到 min-content（>96%），再叠加 `margin-left:2%`，右边界 = 2% + min-content 直接越过父单元格右边。`box-sizing:border-box` 只把 padding/border 计入 width，同样管不住 min-content 撑宽。
+- **修复**：`NESTED_TABLE_STYLE` 再加 `table-layout:fixed`。固定布局下有 used width 强制等于指定的 `96%`（内容在单元格内换行/裁切，而非把表壳撑宽），于是 `2% + 96% + 2% = 100%` 真正成立，右边界落在父单元格内容右沿内，任意嵌套层自适应。
+- **验证**：`JsonWriterNestedTableHtmlTest` 5 处断言更新为 `<table style="margin:5px 2%; width:96%; table-layout:fixed">`，33 个测试通过（BUILD SUCCESS）；`.agents\check_nested_style.ps1` 同步正则后重跑 DebugSample1，当前解析文件内嵌子表格 4/4 命中新样式、无裸 `<table>`。
+- **教训**：用 `width` 约束 `<table>` 宽度时，auto 布局不保证遵守——必须配 `table-layout:fixed` 才能让显式 width 生效；仅靠调小百分比 + box-sizing 不足以压住 min-content 撑宽。
+
+## 再跟进：子表格上角标 `<sup>` 被转义成字面文本（未渲染为上标）
+
+用户反馈：`docs/pdf/202609041788519783769009333.pdf` 第 3 页表格第 1 列第 2 行内最后一个子表格，其第 1 列第 2 行文本 `所得款項總額<sup>（附註）</sup>` 的上角标标签没渲染出来（显示成字面 `<sup>（附註）</sup>`）。
+
+- **定位**：`TmpCellChunkProbe` 无关；直接对输出 JSON 统计（`.agents\check_sup.ps1`）——子表格内联 HTML 串里该处是 `所得款項總額&lt;sup&gt;（附註）&lt;/sup&gt;`（`&lt;`/`&gt;` 各 2、`&lt;sup&gt;` 1 处），而主表格外层网格里同样的角标则是原始 `<sup>`（`raw_sup` 48）。两者渲染差异直接指向嵌套表序列化路径。
+- **根因**：`renderTableCellToHtml` 组装子表格单元格文本时，先经 `assembleGroupText`（其值由 `TextLineProcessor` 注入的 `<sup>/<sub>` 角标标记原样透传，见 `renderTextChunkValue`），随后 `body.append(escapeHtml(lineText))` 把 `<`/`>` 一律转义 → 角标标记变成字面 `&lt;sup&gt;`，浏览器就照字面显示。外层网格不受影响，是因为它的 `text` 数组原样写入 JSON，模板用 `v-html` 渲染，`<sup>` 得以生效。
+- **修复**：新增 `escapeHtmlPreservingSupSub(s)` = `escapeHtml(s)` 后把 `&lt;sup&gt;/&lt;/sup&gt;/&lt;sub&gt;/&lt;/sub&gt;` 四个 token 还原为原始标签；`renderTableCellToHtml` 的文本追加改用它。只放行这四个精确 token，其他 HTML 字符仍转义（即使 PDF 文本里字面出现 `&lt;sup&gt;` 也会先变 `&amp;lt;sup&amp;gt;` 不匹配还原），不会注入任意标签。
+- **验证**：新增用例 `superscriptMarkupInCellTextIsPreservedWhileOtherTagsAreEscaped`（`A<sup>1</sup><b>x</b>` → `A<sup>1</sup>&lt;b&gt;x&lt;/b&gt;`）；表格相关测试 34 个全通过。重跑 DebugSample1（当前解析 20260904），子表格单元格恢复为 `所得款項總額<sup>（附註）</sup>`，`&lt;`/`&gt;`/`&lt;sup&gt;` 均归 0，`raw_sup` 48→49。
+- **教训**：向“会被前端 `v-html` 渲染的 HTML 片段”里转义文本时，要区分“用户数据里的尖括号”（必须转义）与“管线自己注入的布局标记”（如 `<sup>/<sub>`，应保留）；两者共用 `escapeHtml` 会把后者一并误伤。外层网格与嵌套子表两条文本路径的转义策略需保持一致。
+
 ## 关联记忆
 
 - common_pitfalls_experience：`TableBorderRow.getCells()` 槽位重复引用导致嵌套表格 HTML 单元格重复输出

@@ -1781,12 +1781,39 @@ public class JsonWriter {
     }
 
     /**
+     * Inline style stamped on every nested {@code <table>} the JSON path embeds
+     * in a cell: 5px top/bottom margin and a 2% left/right margin. The left/right
+     * value stays a CSS percentage on purpose — a table's percentage margins
+     * resolve against its containing block, which is the cell (column) that
+     * hosts it, so "2% of that column's width" holds at every nesting level
+     * without plumbing column widths or converting pt to px.
+     * The explicit {@code width:96%} is not optional: the preview stylesheet
+     * (templates/index.css) sets {@code table { width:100% }} for EVERY table,
+     * margins not subtracted — 100% body + 2% + 2% margins would push the
+     * sub-table's right edge out of the parent cell. Inline width overrides
+     * the rule, and margins are excluded from the box-sizing: border-box
+     * calculation, so 96% + 4% spans exactly the cell width.
+     * {@code table-layout: fixed} is what actually keeps the right edge inside:
+     * under the default {@code auto} layout a table never shrinks below its
+     * min-content width, so {@code width:96%} is only a lower bound — a sub-table
+     * whose columns/text need more than 96% of the cell grows past it and, with
+     * the 2% left margin, overflows the parent cell on the right. Fixed layout
+     * forces the used width to exactly 96% (content wraps/clips inside cells
+     * instead), so 2% + 96% + 2% = 100% holds and the sub-table stays within the
+     * hosting column at every nesting level.
+     */
+    private static final String NESTED_TABLE_STYLE = "margin:5px 2%; width:96%; table-layout:fixed";
+
+    /**
      * Renders a {@link TableBorder} (and any nested sub-tables up to
      * {@link #MAX_NESTED_TABLE_DEPTH}) as an HTML {@code <table>} string.
      *
-     * <p>The structure is intentionally minimal: no border or style attributes, only
-     * {@code colspan}/{@code rowspan} when larger than 1. Cell text is escaped via
-     * {@link #escapeHtml}. Empty cells get {@code &nbsp;} so the table keeps a
+     * <p>The structure is intentionally minimal: the only style is the
+     * {@link #NESTED_TABLE_STYLE} margin stamped on the {@code <table>} tag,
+     * besides {@code colspan}/{@code rowspan} when larger than 1 and the
+     * per-cell background/color styles. Cell text is escaped via
+     * {@link #escapeHtmlPreservingSupSub} (which keeps {@code <sup>}/{@code <sub>}
+     * 角标 markup). Empty cells get {@code &nbsp;} so the table keeps a
      * visible grid when rendered.</p>
      *
      * @param tableBorder the table to render
@@ -1810,7 +1837,7 @@ public class JsonWriter {
                 + " (rows=" + rows.length
                 + ", cols=" + tableBorder.getNumberOfColumns() + ").");
         StringBuilder sb = new StringBuilder();
-        sb.append("<table>");
+        sb.append("<table style=\"").append(NESTED_TABLE_STYLE).append("\">");
         for (TableBorderRow row : rows) {
             sb.append(renderTableRowToHtml(row, depth, url, pageNumber));
         }
@@ -1917,7 +1944,7 @@ public class JsonWriter {
             for (List<IObject> group : groups) {
                 String lineText = assembleGroupText(group, url, pageNumber);
                 if (!lineText.isEmpty()) {
-                    body.append(escapeHtml(lineText));
+                    body.append(escapeHtmlPreservingSupSub(lineText));
                     hasAnyText = true;
                 }
             }
@@ -2104,6 +2131,30 @@ public class JsonWriter {
             }
         }
         return out.toString();
+    }
+
+    /**
+     * Escapes cell text for embedding inside the nested-table HTML produced by
+     * {@link #renderTableBorderToHtml}, but keeps the superscript/subscript
+     * (角标) markup that {@link org.opendataloader.pdf.processors.TextLineProcessor}
+     * injects — {@code <sup>}/{@code </sup>}/{@code <sub>}/{@code </sub>} — so the
+     * browser renders footnote markers as real superscripts (e.g. the "（附註）"
+     * after "所得款項總額") instead of literal escaped text. This mirrors the outer
+     * table grid, whose {@code text} values reach the template with the tags intact
+     * and are rendered via {@code v-html}. Every other HTML-significant character is
+     * still escaped, so a literal {@code &lt;sup&gt;} appearing as plain text in the
+     * PDF stays escaped (it becomes {@code &amp;lt;sup&amp;gt;} and does not match
+     * any restore token) and cannot smuggle arbitrary markup into the cell.
+     */
+    private static String escapeHtmlPreservingSupSub(String s) {
+        if (s == null || s.isEmpty()) {
+            return "";
+        }
+        return escapeHtml(s)
+            .replace("&lt;sup&gt;", "<sup>")
+            .replace("&lt;/sup&gt;", "</sup>")
+            .replace("&lt;sub&gt;", "<sub>")
+            .replace("&lt;/sub&gt;", "</sub>");
     }
 
     /**
