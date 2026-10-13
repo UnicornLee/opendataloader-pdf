@@ -123,7 +123,7 @@ import java.util.logging.Logger;
  *   <li>a 23.5 x 23.9 pt glyph outline (below {@link #MIN_REGION_WIDTH}), and</li>
  *   <li>a 124.3 x 44.7 pt wordmark (6 raw lines, 1 shape component),</li>
  * </ul>
- * and each fragment was vetoed on its own while the whole lockup — 170.6 x 50.2 pt
+ * <p>and each fragment was vetoed on its own while the whole lockup — 170.6 x 50.2 pt
  * with 10 raw lines inside — passes every gate. Closely placed boxes are
  * therefore agglomerated into one region before the gates are applied
  * ({@link #clusterFragments}); the envelope is judged first and, when it is
