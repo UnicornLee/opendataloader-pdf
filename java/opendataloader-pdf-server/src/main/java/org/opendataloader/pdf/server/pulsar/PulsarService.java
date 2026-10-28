@@ -614,10 +614,17 @@ public class PulsarService {
         if (abandoned.get()) {
             // The watchdog already published the failure result and acknowledged the
             // message; publishing/acking again for an abandoned item would double-report
-            // it downstream. Only the local temp cleanup below is still worth doing.
+            // it downstream. Only the local temp cleanup is still worth doing.
             log.warn("message was abandoned by the watchdog, skip result publish and ack, businessId={}",
                     businessId);
         } else {
+            // Ack FIRST, before the (blocking) result publish and temp cleanup: under heap
+            // exhaustion the producer send stalls on its timeout and a crash before the
+            // ack resurrects the unacked message (ack_timeout is 0, so redelivery happens
+            // on reconnect) — the same oversized document is then re-downloaded and
+            // re-OOMs the instance in a loop. acknowledgeQuietly swallows a failed ack,
+            // so ordering it first is what keeps the redelivery storm from repeating.
+            acknowledgeQuietly(consumer, pulsarMsg, businessId);
             boolean sendResult = !basicProperties.completeDisplay() || ocrJsonBytes.length == 0;
             if (sendResult) {
                 sendResultMessage(jsonUrl, businessId, extend);
@@ -627,16 +634,12 @@ public class PulsarService {
             }
         }
 
-        // Local cleanup runs AFTER downstream messages have been published
+        // Local cleanup runs after the result publish
         if (outputDir != null) {
             deleteRecursively(outputDir);
         }
         if (inputDir != null) {
             deleteRecursively(inputDir);
-        }
-
-        if (!abandoned.get()) {
-            acknowledgeQuietly(consumer, pulsarMsg, businessId);
         }
     }
 
@@ -729,16 +732,16 @@ public class PulsarService {
             log.warn("ocr message was abandoned by the watchdog, skip result publish and ack, businessId={}",
                     businessId);
         } else {
+            // Ack before the blocking result publish (see handleReceiveMessage): a crash
+            // that lands between the two would otherwise redeliver this message and
+            // re-trigger the same failure on every restart.
+            acknowledgeQuietly(consumer, pulsarMsg, businessId);
             sendResultMessage(jsonUrl, businessId, extend);
         }
 
-        // Local cleanup runs AFTER downstream messages have been published
+        // Local cleanup runs after the result publish
         if (inputDir != null) {
             deleteRecursively(inputDir);
-        }
-
-        if (!abandoned.get()) {
-            acknowledgeQuietly(consumer, pulsarMsg, businessId);
         }
     }
 
