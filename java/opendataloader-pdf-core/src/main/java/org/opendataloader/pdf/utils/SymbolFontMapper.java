@@ -22,8 +22,8 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * Rewrites the glyphs of the common PDF symbol fonts (Wingdings / Webdings /
- * Symbol / Zapf Dingbats) into browser-safe Unicode.
+ * Rewrites the glyphs of the common PDF symbol fonts (Wingdings / Wingdings 2 /
+ * Wingdings 3 / Webdings / Symbol / Zapf Dingbats) into browser-safe Unicode.
  *
  * <p>Those fonts render their pictures through private-use-area (PUA) code
  * points in the {@code U+F020–U+F0FF} block (the source byte plus {@code 0xF000}).
@@ -45,6 +45,11 @@ import java.util.Locale;
  * {@code U+25A0 ■}. Any PUA character without a table entry falls back to a generic
  * bullet {@code U+2022} so that no tofu reaches the output.</p>
  *
+ * <p>Wingdings 2 and Wingdings 3 are separate typefaces with their own byte to
+ * glyph tables, so they must not be folded into the Wingdings table: the same
+ * source byte means a different symbol in each family (Wingdings {@code 0x52} is
+ * a sun, Wingdings 2 {@code 0x52} is a checked ballot box {@code U+2611}).</p>
+ *
  * <p>Substitution is strictly 1:1 (one input character becomes exactly one output
  * character), which keeps {@link TextChunk#getSymbolEnds()} and every downstream
  * geometric coordinate valid.</p>
@@ -54,6 +59,8 @@ public final class SymbolFontMapper {
     /** Font families with a dedicated glyph mapping table. */
     private enum SymbolFont {
         WINGDINGS,
+        WINGDINGS_2,
+        WINGDINGS_3,
         WEBDINGS,
         SYMBOL,
         ZAPF_DINGBATS
@@ -142,6 +149,67 @@ public final class SymbolFontMapper {
         put(SymbolFont.WINGDINGS, 0xF2, 0x21E9); // ò -> ⇩
         put(SymbolFont.WINGDINGS, 0xF4, 0x21F3); // ô -> ⇳
         put(SymbolFont.WINGDINGS, 0xFC, 0x2713); // ü -> ✓
+
+        // --- Wingdings 2 (browser-safe subset, 44 entries) ---
+        put(SymbolFont.WINGDINGS_2, 0x25, 0x2704); // % -> ✄
+        put(SymbolFont.WINGDINGS_2, 0x26, 0x2700); // & -> ✀
+        put(SymbolFont.WINGDINGS_2, 0x52, 0x2611); // R -> ☑
+        put(SymbolFont.WINGDINGS_2, 0x54, 0x2612); // T -> ☒
+        put(SymbolFont.WINGDINGS_2, 0x69, 0x24EA); // i -> ⓪
+        put(SymbolFont.WINGDINGS_2, 0x6A, 0x2460); // j -> ①
+        put(SymbolFont.WINGDINGS_2, 0x6B, 0x2461); // k -> ②
+        put(SymbolFont.WINGDINGS_2, 0x6C, 0x2462); // l -> ③
+        put(SymbolFont.WINGDINGS_2, 0x6D, 0x2463); // m -> ④
+        put(SymbolFont.WINGDINGS_2, 0x6E, 0x2464); // n -> ⑤
+        put(SymbolFont.WINGDINGS_2, 0x6F, 0x2465); // o -> ⑥
+        put(SymbolFont.WINGDINGS_2, 0x70, 0x2466); // p -> ⑦
+        put(SymbolFont.WINGDINGS_2, 0x71, 0x2467); // q -> ⑧
+        put(SymbolFont.WINGDINGS_2, 0x72, 0x2468); // r -> ⑨
+        put(SymbolFont.WINGDINGS_2, 0x73, 0x2469); // s -> ⑩
+        put(SymbolFont.WINGDINGS_2, 0x74, 0x24FF); // t -> ⓿
+        put(SymbolFont.WINGDINGS_2, 0x75, 0x2776); // u -> ❶
+        put(SymbolFont.WINGDINGS_2, 0x76, 0x2777); // v -> ❷
+        put(SymbolFont.WINGDINGS_2, 0x77, 0x2778); // w -> ❸
+        put(SymbolFont.WINGDINGS_2, 0x78, 0x2779); // x -> ❹
+        put(SymbolFont.WINGDINGS_2, 0x79, 0x277A); // y -> ❺
+        put(SymbolFont.WINGDINGS_2, 0x7A, 0x277B); // z -> ❻
+        put(SymbolFont.WINGDINGS_2, 0x7B, 0x277C); // { -> ❼
+        put(SymbolFont.WINGDINGS_2, 0x7C, 0x277D); // | -> ❽
+        put(SymbolFont.WINGDINGS_2, 0x7D, 0x277E); // } -> ❾
+        put(SymbolFont.WINGDINGS_2, 0x7E, 0x277F); // ~ -> ❿
+        put(SymbolFont.WINGDINGS_2, 0x80, 0x2609); //  -> ☉
+        put(SymbolFont.WINGDINGS_2, 0x82, 0x263D); //  -> ☽
+        put(SymbolFont.WINGDINGS_2, 0x83, 0x263E); //  -> ☾
+        put(SymbolFont.WINGDINGS_2, 0x85, 0x271D); //  -> ✝
+        put(SymbolFont.WINGDINGS_2, 0x98, 0x25CF); //  -> ●
+        put(SymbolFont.WINGDINGS_2, 0x99, 0x25CB); //  -> ○
+        put(SymbolFont.WINGDINGS_2, 0xA1, 0x25A0); //  -> ■
+        put(SymbolFont.WINGDINGS_2, 0xA2, 0x25A0); //  -> ■
+        put(SymbolFont.WINGDINGS_2, 0xA3, 0x25A1); //  -> □
+        put(SymbolFont.WINGDINGS_2, 0xA8, 0x25A3); //  -> ▣
+        put(SymbolFont.WINGDINGS_2, 0xAF, 0x25C7); //  -> ◇
+        put(SymbolFont.WINGDINGS_2, 0xB1, 0x25C8); //  -> ◈
+        put(SymbolFont.WINGDINGS_2, 0xB8, 0x25CA); //  -> ◊
+        put(SymbolFont.WINGDINGS_2, 0xBA, 0x25D6); //  -> ◖
+        put(SymbolFont.WINGDINGS_2, 0xBB, 0x25D7); //  -> ◗
+        put(SymbolFont.WINGDINGS_2, 0xEB, 0x2736); //  -> ✶
+        put(SymbolFont.WINGDINGS_2, 0xF0, 0x2739); //  -> ✹
+        put(SymbolFont.WINGDINGS_2, 0xF3, 0x272F); //  -> ✯
+
+        // --- Wingdings 3 (browser-safe subset, 13 entries) ---
+        put(SymbolFont.WINGDINGS_3, 0x58, 0x21EA); // X -> ⇪
+        put(SymbolFont.WINGDINGS_3, 0x70, 0x25B2); // p -> ▲
+        put(SymbolFont.WINGDINGS_3, 0x71, 0x25BC); // q -> ▼
+        put(SymbolFont.WINGDINGS_3, 0x72, 0x25B3); // r -> △
+        put(SymbolFont.WINGDINGS_3, 0x73, 0x25BD); // s -> ▽
+        put(SymbolFont.WINGDINGS_3, 0x74, 0x25C0); // t -> ◀
+        put(SymbolFont.WINGDINGS_3, 0x75, 0x25B6); // u -> ▶
+        put(SymbolFont.WINGDINGS_3, 0x76, 0x25C1); // v -> ◁
+        put(SymbolFont.WINGDINGS_3, 0x77, 0x25B7); // w -> ▷
+        put(SymbolFont.WINGDINGS_3, 0x78, 0x25E3); // x -> ◣
+        put(SymbolFont.WINGDINGS_3, 0x79, 0x25E2); // y -> ◢
+        put(SymbolFont.WINGDINGS_3, 0x7A, 0x25E4); // z -> ◤
+        put(SymbolFont.WINGDINGS_3, 0x7B, 0x25E5); // { -> ◥
 
         // --- Webdings (browser-safe subset) ---
         put(SymbolFont.WEBDINGS, 0x61, 0x2714); // a -> ✔
@@ -239,7 +307,13 @@ public final class SymbolFontMapper {
         if (fontName == null || fontName.isEmpty()) {
             return null;
         }
-        String name = fontName.toLowerCase(Locale.ROOT);
+        String name = fontName.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
+        if (name.contains("wingdings3")) {
+            return SymbolFont.WINGDINGS_3;
+        }
+        if (name.contains("wingdings2")) {
+            return SymbolFont.WINGDINGS_2;
+        }
         if (name.contains("wingdings")) {
             return SymbolFont.WINGDINGS;
         }
