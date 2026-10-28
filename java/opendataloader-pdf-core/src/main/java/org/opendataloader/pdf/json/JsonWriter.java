@@ -1290,25 +1290,38 @@ public class JsonWriter {
                         }
 
                         TableBorderCell cell = row.getCells()[i];
-                        if (m < cumulativeRowSpans[i]) {
+                        // A malformed cell can carry a non-positive span: the table recognizer
+                        // sometimes emits colSpan/rowSpan of 0 or a negative value for a
+                        // placeholder slot (TableBorderCell reads them straight from the node's
+                        // attributes dictionary). Every span covers at least one slot, so clamp
+                        // to a minimum of 1. An unclamped negative colSpan drove
+                        // cumulativeColSpans below zero and the column loop then indexed
+                        // cellRadios[-1], throwing ArrayIndexOutOfBoundsException that the caller
+                        // swallowed as an empty page (this was page 187 of the sample PDF).
+                        int colSpan = Math.max(1, cell.getColSpan());
+                        int rowSpan = Math.max(1, cell.getRowSpan());
+                        if (i < cumulativeRowSpans.length && m < cumulativeRowSpans[i]) {
                             if (i >= cumulativeColSpans) {
-                                cumulativeColSpans += cell.getColSpan();
+                                cumulativeColSpans += colSpan;
                             }
                             continue;
                         }
                         Map<String, Object> cellMap = new HashMap<>();
                         float cellRadio = 0;
-                        for (int j = cumulativeColSpans; j < cumulativeColSpans + cell.getColSpan(); j++) {
+                        for (int j = cumulativeColSpans; j < cumulativeColSpans + colSpan; j++) {
+                            if (j < 0) {
+                                continue;
+                            }
                             if (j >= cellRadios.length) {
                                 break;
                             }
                             cellRadio += cellRadios[j];
-                            cumulativeRowSpans[j] += cell.getRowSpan();
+                            cumulativeRowSpans[j] += rowSpan;
                         }
                         cellMap.put(JsonName.CELL_RADIO, cellRadio);
-                        cumulativeColSpans += cell.getColSpan();
-                        cellMap.put(JsonName.ROW_LENGTH, cell.getRowSpan());
-                        cellMap.put(JsonName.COLUMN_LENGTH, cell.getColSpan());
+                        cumulativeColSpans += colSpan;
+                        cellMap.put(JsonName.ROW_LENGTH, rowSpan);
+                        cellMap.put(JsonName.COLUMN_LENGTH, colSpan);
                         cellMap.put(JsonName.HEIGHT, cell.getHeight());
                         cellMap.put(JsonName.WIDTH, cell.getWidth());
                         cellMap.put(JsonName.X0, cell.getLeftX());
@@ -1334,8 +1347,8 @@ public class JsonWriter {
                         // rowNumber still reads the footnote row). Anchoring on the owner would then
                         // pull that other row's text into here (the duplicate "(5)" on page 25); the
                         // grid anchor makes the placeholder read only its own (empty) contents.
-                        for (int n = m; n < m + cell.getRowSpan(); n++) {
-                            for (int k = i; k < i + cell.getColSpan(); k++) {
+                        for (int n = m; n < m + rowSpan; n++) {
+                            for (int k = i; k < i + colSpan; k++) {
                                 if (n < tableBorder.getRows().length && k < tableBorder.getRows()[n].getCells().length) {
                                     List<String> currentCellTextLines = new ArrayList<>();
                                     TableBorderCell cellItem = tableBorder.getRows()[n].getCells()[k];
