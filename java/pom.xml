@@ -63,7 +63,7 @@
              the local repository. The -valueonline suffix keeps these private
              builds from colliding with the identically-versioned upstream
              releases on vera-dev, so Maven can only resolve them from the fork. -->
-        <verapdf.version>1.31.99-valueonline</verapdf.version>
+        <verapdf.version>1.31.100-valueonline</verapdf.version>
         <verapdf.wcag.algs.version>1.31.33-valueonline</verapdf.wcag.algs.version>
         <!-- The fork's released validation pom still references parser, pdf-model,
              core and verapdf-xmp-core as the range [1.31.0,1.32.0-RC) (it does not
