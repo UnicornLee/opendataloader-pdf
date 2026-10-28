@@ -57,7 +57,7 @@ paddle:
 
 pdf:
     # Per-message worker-thread cap for the parse pipeline (see PdfProperties.threads)
-    threads: 4
+    threads: 2
     temp:
         path: /tmp/pdf_parse
     output:
