@@ -1,10 +1,10 @@
 [project]
 name = "opendataloader-pdf"
-version = "2.5.13.dev0"
+version = "2.5.17.dev0"
 description = "A Python wrapper for the opendataloader-pdf Java CLI."
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [
     { name = "opendataloader-project", email = "open.dataloader@hancom.com" }
 ]
@@ -17,6 +17,7 @@ dependencies = []
 [project.optional-dependencies]
 hybrid = [
     "docling[easyocr]>=2.126.0,<3",
+    "docling-parse>=7.22.2,<8",
     "fastapi>=0.141.1,<0.142",
     "uvicorn>=0.52.4,<0.53",
     "python-multipart>=0.0.32,<0.1",
@@ -71,7 +72,7 @@ line-length = 100
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 exclude = ["dist", "build"]
 
 [tool.ruff.lint]

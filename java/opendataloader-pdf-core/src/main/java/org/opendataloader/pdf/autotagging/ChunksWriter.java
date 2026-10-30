@@ -31,9 +31,21 @@ public class ChunksWriter {
     private final PDResourcesHandler resourceHandler;
     private final GraphicsState graphicsState;
 
+    /**
+     * The forms that this writer is inside. A form can draw itself, directly or through
+     * another form, and entering it again each time would not end.
+     */
+    private final Set<COSKey> enteredForms;
+
     public ChunksWriter(GraphicsState inheritedGraphicState, PDResourcesHandler resourceHandler) {
+        this(inheritedGraphicState, resourceHandler, new HashSet<>());
+    }
+
+    private ChunksWriter(GraphicsState inheritedGraphicState, PDResourcesHandler resourceHandler,
+                         Set<COSKey> enteredForms) {
         this.graphicsState = inheritedGraphicState.clone();
         this.resourceHandler = resourceHandler;
+        this.enteredForms = enteredForms;
     }
 
     public static List<Object> getTokens(PDContentStream pdContentStream) {
@@ -70,6 +82,15 @@ public class ChunksWriter {
      */
     private final List<Object> pendingPath = new ArrayList<>();
 
+    /**
+     * MCID of the span closed by the last EMC in the output, and that EMC's index. When the
+     * next paint operator carries the same MCID, the EMC is dropped so both share one span.
+     * {@code AutoTaggingProcessor} only hands out a shared MCID to operators with nothing
+     * painted between them, so no check is needed here.
+     */
+    private Integer lastMcid;
+    private int lastEmcIndex;
+
     public List<Object> processTokens(List<Object> processTokens, OperatorStreamKey operatorStreamKey) throws IOException {
         Map<Integer, Set<StreamInfo>> operatorIndexesToStreamInfosMap = AutoTaggingProcessor.getOperatorIndexesToStreamInfosMap().get(operatorStreamKey);
         if (operatorIndexesToStreamInfosMap == null) {
@@ -101,22 +122,41 @@ public class ChunksWriter {
             case Operators.DO:
                 OperatorStreamKey xObjectOperatorStreamKey = new OperatorStreamKey(operatorStreamKey.getPageNumber(), arguments.get(0).getString());
                 Integer xObjectStructParent = AutoTaggingProcessor.getStructParentsIntegers().get(xObjectOperatorStreamKey);
-                if (AutoTaggingProcessor.getOperatorIndexesToStreamInfosMap().containsKey(xObjectOperatorStreamKey)
-                        && xObjectStructParent != null) {
-                    COSName xObjectName = getLastCOSName(arguments);
-                    PDXObject pdxObject = resourceHandler.getXObject(xObjectName);
-                    if (pdxObject == null) {
+                boolean ownContent = AutoTaggingProcessor.getOperatorIndexesToStreamInfosMap().containsKey(xObjectOperatorStreamKey)
+                        && xObjectStructParent != null;
+                COSName drawnName = getLastCOSName(arguments);
+                PDXObject drawn = ownContent || drawnName == null ? null : resourceHandler.getXObject(drawnName);
+                // A form with nothing of its own to tag is still entered when a form it draws has.
+                boolean innerContent = !ownContent && drawn instanceof PDXForm
+                        && AutoTaggingProcessor.holdsTaggedForm((PDXForm) drawn, operatorStreamKey.getPageNumber(), 0);
+                if (ownContent || innerContent) {
+                    PDXObject pdxObject = drawn != null ? drawn : resourceHandler.getXObject(drawnName);
+                    // A form drawn from inside itself is not entered again; a cycle needs an
+                    // indirect object, so a form without a key cannot be one.
+                    COSKey formKey = pdxObject instanceof PDXForm ? pdxObject.getObject().getKey() : null;
+                    if (!(pdxObject instanceof PDXForm) || formKey != null && enteredForms.contains(formKey)) {
                         processContentOperator(result, rawOperator, arguments, operatorIndex, operatorIndexesToStreamInfosMap, operatorName, operatorStreamKey);
                         break;
                     }
-                    pdxObject.setKey(ASAtom.STRUCT_PARENTS,
-                        COSInteger.construct(xObjectStructParent));
+                    if (ownContent) {
+                        pdxObject.setKey(ASAtom.STRUCT_PARENTS,
+                            COSInteger.construct(xObjectStructParent));
+                    }
                     StaticResources.getDocument().getDocument().addChangedObject(pdxObject.getObject());
                     PDXForm pdxForm = (PDXForm)pdxObject;
                     GraphicsState xFormGraphicsState = graphicsState.clone();
-                    AutoTaggingProcessor.setUpContents(pdxForm.getObject(), new ChunksWriter(xFormGraphicsState,
-                        resourceHandler.getExtendedResources(pdxForm.getResources())).processTokens(
-                            ChunksWriter.getTokens(pdxForm), xObjectOperatorStreamKey));
+                    if (formKey != null) {
+                        enteredForms.add(formKey);
+                    }
+                    try {
+                        AutoTaggingProcessor.setUpContents(pdxForm.getObject(), new ChunksWriter(xFormGraphicsState,
+                            resourceHandler.getExtendedResources(pdxForm.getResources()), enteredForms).processTokens(
+                                ChunksWriter.getTokens(pdxForm), xObjectOperatorStreamKey));
+                    } finally {
+                        if (formKey != null) {
+                            enteredForms.remove(formKey);
+                        }
+                    }
                     // Preserve the Do operator in the parent stream so the XObject is still invoked
                     result.addAll(arguments);
                     result.add(rawOperator);
@@ -238,7 +278,10 @@ public class ChunksWriter {
 
     private void writeMarkedContent(List<Object> result, List<COSBase> arguments, Operator token,
                                            String operatorName, Integer mcid, OperatorStreamKey operatorStreamKey) {
-        if (mcid == null) {
+        boolean continuesSpan = mcid != null && mcid.equals(lastMcid);
+        if (continuesSpan) {
+            result.remove(lastEmcIndex);
+        } else if (mcid == null) {
             result.add(COSName.construct(TaggedPDFConstants.ARTIFACT).getDirectBase());
             result.add(Operator.getOperator(Operators.BMC));
         } else {
@@ -262,6 +305,8 @@ public class ChunksWriter {
         result.addAll(arguments);
         result.add(token);
         result.add(Operator.getOperator(Operators.EMC));
+        lastMcid = mcid;
+        lastEmcIndex = result.size() - 1;
     }
 
     private Map<StreamInfo, COSObject> getArguments(COSBase object, List<StreamInfo> streamInfos) {

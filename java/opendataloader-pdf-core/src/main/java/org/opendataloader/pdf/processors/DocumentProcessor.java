@@ -69,6 +69,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ForkJoinPool;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -110,6 +111,85 @@ public class DocumentProcessor {
     }
 
     /**
+     * Releases the PDF resources of one extraction (see {@link ExtractionResult#close()}).
+     *
+     * <p>While the static containers hold another document, a later extraction owns them. Then
+     * this method only closes the document, on a new thread, and does not clear the static
+     * containers. veraPDF {@code PDDocument.close()} also clears {@code StaticResources}, so
+     * closing the earlier document on this thread would break the later one.
+     *
+     * @param document the document of the extraction; a second close does not close the file again
+     */
+    static void closePdfResources(PDDocument document) {
+        if (anotherDocumentIsCurrent(document)) {
+            if (document != null) {
+                closeOnNewThread(document);
+            }
+            return;
+        }
+        if (document != null) {
+            clearCleanupStep("PDDocument", document::close);
+        }
+        closePdfResources();
+    }
+
+    /**
+     * Closes the document of a tagging result. This method is internal: it is public only so that
+     * {@link org.opendataloader.pdf.api.TaggingResult#close()} can call it, and callers close a
+     * tagging result with that method instead.
+     *
+     * <p>If another document is current on this thread, the document is closed on a new thread,
+     * so the current document keeps its {@code StaticResources}. A failure of that close is logged
+     * with its exception. Otherwise the document is closed on this thread, a failure reaches the
+     * caller, and veraPDF {@code PDDocument.close()} also clears the {@code StaticResources} of
+     * this thread. In both cases the other static containers, such as {@code StaticContainers},
+     * are not cleared.
+     *
+     * @param document the document to close; {@code null} does nothing, and a second close does
+     *                 not close the file again
+     */
+    public static void closeDocument(PDDocument document) {
+        if (document == null) {
+            return;
+        }
+        if (anotherDocumentIsCurrent(document)) {
+            closeOnNewThread(document);
+        } else {
+            document.close();
+        }
+    }
+
+    private static boolean anotherDocumentIsCurrent(PDDocument document) {
+        PDDocument current = StaticResources.getDocument();
+        return current != null && current != document;
+    }
+
+    /**
+     * Closes the document on a new thread and waits until it is closed. {@code StaticResources}
+     * is thread-local, so the {@code StaticResources.clear()} of veraPDF {@code PDDocument.close()}
+     * clears the empty containers of the new thread, not the containers of the calling thread.
+     *
+     * <p>An interrupt does not stop the wait, so the close has finished when this method returns.
+     * The interrupt status of the calling thread is then set again.
+     */
+    private static void closeOnNewThread(PDDocument document) {
+        Thread closer = new Thread(() -> clearCleanupStep("PDDocument", document::close),
+            "opendataloader-pdf-close");
+        closer.start();
+        boolean interrupted = false;
+        while (closer.isAlive()) {
+            try {
+                closer.join();
+            } catch (InterruptedException e) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
      * Executes a cleanup step safely without interrupting subsequent steps.
      *
      * Each cleanup action is isolated so that a failure in one step
@@ -120,7 +200,7 @@ public class DocumentProcessor {
         try {
             cleanup.run();
         } catch (Exception e) {
-            LOGGER.log(Level.WARNING, "Error clearing " + name);
+            LOGGER.log(Level.WARNING, "Error clearing " + name, e);
         }
     }
 
@@ -172,11 +252,30 @@ public class DocumentProcessor {
      * <p>Structured processing (headings, lists, tables, captions) is always enabled
      * because auto-tagging and all structured output formats depend on it.
      *
+     * <p>The returned result keeps the PDF document open. Close it after its last use,
+     * for example with try-with-resources. If this method throws after it opened the document,
+     * it releases the document itself, because the caller gets no result to close.
+     *
      * @param inputPdfName path to the input PDF file
      * @param config       configuration
      * @return extraction result with contents and timing metadata
      */
     public static ExtractionResult extractContents(String inputPdfName, Config config) throws IOException {
+        PDDocument previous = StaticResources.getDocument();
+        try {
+            return extract(inputPdfName, config);
+        } catch (Throwable failure) {
+            // Release only the document of this call. If the input fails before preprocessing
+            // opens it, the static containers still hold the document of an earlier extraction.
+            PDDocument opened = StaticResources.getDocument();
+            if (opened != null && opened != previous) {
+                closePdfResources(opened);
+            }
+            throw failure;
+        }
+    }
+
+    private static ExtractionResult extract(String inputPdfName, Config config) throws IOException {
         long t0 = System.nanoTime();
         preprocessing(inputPdfName, config);
         calculateDocumentInfo();
@@ -212,7 +311,7 @@ public class DocumentProcessor {
         Map<Long, ElementMetadata> remappedMetadata = remapMetadataToContents(rawMetadata, contents);
 
         return new ExtractionResult(contents, extractionNs, HybridDocumentProcessor.getLastHybridTimings(),
-            remappedMetadata);
+            remappedMetadata, StaticResources.getDocument());
     }
 
     /**
@@ -319,7 +418,10 @@ public class DocumentProcessor {
         LOGGER.log(Level.INFO, "Processing {0} pages with {1} threads", new Object[]{pagesToProcessCount, parallelism});
 
         try {
-            // Loop 1: ContentFilter per-page (largest bottleneck)
+            // Loop 1: ContentFilter per-page (largest bottleneck).
+            // Drop unused text/images from veraPDF artifacts by identity, to free memory.
+            // Reused non-lines stay. LineChunks are dropped after loop 2.
+            // Skipped --pages: null live contents drops non-lines, keeps LineChunks.
             pool.submit(() ->
                 IntStream.range(0, totalPages).parallel().forEach(pageNumber -> {
                     try {
@@ -328,8 +430,10 @@ public class DocumentProcessor {
                             List<IObject> pageContents = ContentFilterProcessor.getFilteredContents(inputPdfName,
                                 (List) pageArtifacts[pageNumber], pageNumber, config);
                             contents.set(pageNumber, pageContents);
+                            pruneArtifactsToLiveChunks(pageArtifacts[pageNumber], pageContents, pageNumber);
                         } else {
                             contents.set(pageNumber, new ArrayList<>());
+                            pruneArtifactsToLiveChunks(pageArtifacts[pageNumber], null, pageNumber);
                         }
                     } catch (IOException e) {
                         throw new UncheckedIOException(e);
@@ -344,6 +448,7 @@ public class DocumentProcessor {
                     if (shouldProcessPage(pageNumber, pagesToProcess)) {
                         List<IObject> pageContents = HiddenTextProcessor.findHiddenText(contents.get(pageNumber), true);
                         contents.set(pageNumber, pageContents);
+                        pruneArtifactsToLiveChunks(pageArtifacts[pageNumber], pageContents, pageNumber);
                     }
                 }
             }
@@ -375,6 +480,12 @@ public class DocumentProcessor {
                     contents.set(pageNumber, pageContents);
                 })
             ).get();
+
+            // Drop the LineChunks from the artifact lists of all pages, also the skipped
+            // ones, to free memory. No reader needs them: preprocessing() already filled
+            // the LinesCollection of every page (LinesPreprocessingConsumer.findTableBorders),
+            // and loop 2 reads only that collection.
+            pruneLineChunksFromArtifacts(pageArtifacts, totalPages);
 
             if (structured) {
                 // Cross-page operations (must be sequential)
@@ -433,7 +544,7 @@ public class DocumentProcessor {
                 HeadingProcessor.detectHeadingsLevels();
                 LevelProcessor.detectLevels(contents);
             }
-        } catch (Exception e) {
+        } catch (InterruptedException | ExecutionException | RuntimeException e) {
             throw new IOException("Parallel page processing failed", e);
         } finally {
             pool.shutdown();
@@ -536,6 +647,70 @@ public class DocumentProcessor {
 
     private static boolean shouldProcessPage(int pageNumber, Set<Integer> pagesToProcess) {
         return pagesToProcess == null || pagesToProcess.contains(pageNumber);
+    }
+
+    /**
+     * After content-filter: drop veraPDF artifact entries that are not still
+     * referenced from {@code liveContents}, except {@link LineChunk}s. Identity
+     * ({@code ==}), not {@code equals}. Unused text/images leave artifacts;
+     * reused non-lines stay. Merged/split {@code TextChunk}s are not copied into
+     * veraPDF. {@code LineChunk}s are dropped later, by
+     * {@link #pruneLineChunksFromArtifacts} after loop 2. This method is only used
+     * from the local {@code processDocument} path.
+     *
+     * @param liveContents filtered page contents, or {@code null} for a skipped
+     *                     {@code --pages} page (drop every non-{@link LineChunk})
+     */
+    @SuppressWarnings("unchecked")
+    static void pruneArtifactsToLiveChunks(List<?> artifacts, List<IObject> liveContents,
+                                           int pageNumber) {
+        if (artifacts == null) {
+            return;
+        }
+        try {
+            if (liveContents == null || liveContents.isEmpty()) {
+                ((List<Object>) artifacts).removeIf(chunk -> !(chunk instanceof LineChunk));
+                return;
+            }
+            Set<Object> live = Collections.newSetFromMap(new IdentityHashMap<>());
+            for (IObject object : liveContents) {
+                if (object != null) {
+                    live.add(object);
+                }
+            }
+            ((List<Object>) artifacts).removeIf(chunk ->
+                !(chunk instanceof LineChunk) && !live.contains(chunk));
+        } catch (UnsupportedOperationException e) {
+            LOGGER.log(Level.WARNING,
+                "Could not prune veraPDF artifacts on page {0}: unmodifiable list",
+                pageNumber + 1);
+        }
+    }
+
+    /**
+     * After loop 2 strikethrough: drop every {@link LineChunk} from per-page
+     * artifact lists, including skipped pages. Call on the main thread after the
+     * parallel loop finishes. {@code LinesCollection} keeps the line rules: it was
+     * filled for all pages in {@code preprocessing()}.
+     */
+    @SuppressWarnings("unchecked")
+    static void pruneLineChunksFromArtifacts(List<?>[] pageArtifacts, int totalPages) {
+        if (pageArtifacts == null) {
+            return;
+        }
+        for (int pageNumber = 0; pageNumber < totalPages; pageNumber++) {
+            List<?> artifacts = pageArtifacts[pageNumber];
+            if (artifacts == null) {
+                continue;
+            }
+            try {
+                ((List<Object>) artifacts).removeIf(chunk -> chunk instanceof LineChunk);
+            } catch (UnsupportedOperationException e) {
+                LOGGER.log(Level.WARNING,
+                    "Could not prune veraPDF line artifacts on page {0}: unmodifiable list",
+                    pageNumber + 1);
+            }
+        }
     }
 
     /**
@@ -749,8 +924,9 @@ public class DocumentProcessor {
             throw new TempDirectoryNotWritableException(
                 "Cannot use the temporary directory '" + tempDir + "'."
                 + " PDF processing needs it to read font metrics and decode content streams."
-                + " Point java.io.tmpdir or the TMPDIR environment variable at a writable"
-                + " directory, or grant write access to this one.", e);
+                + " Start Java with -Djava.io.tmpdir=<writable directory>, or grant write"
+                + " access to this one. If the Python or Node package starts Java, add that"
+                + " option to the JAVA_TOOL_OPTIONS environment variable.", e);
         }
     }
 
