@@ -63,15 +63,19 @@
              the local repository. The -valueonline suffix keeps these private
              builds from colliding with the identically-versioned upstream
              releases on vera-dev, so Maven can only resolve them from the fork. -->
-        <verapdf.version>1.31.100-valueonline</verapdf.version>
-        <verapdf.wcag.algs.version>1.31.33-valueonline</verapdf.wcag.algs.version>
+        <verapdf.version>1.31.101-valueonline</verapdf.version>
+        <verapdf.wcag.algs.version>1.31.101-valueonline</verapdf.wcag.algs.version>
         <!-- The fork's released validation pom still references parser, pdf-model,
              core and verapdf-xmp-core as the range [1.31.0,1.32.0-RC) (it does not
-             substitute fixed versions), which ban-dynamic-versions rejects. These
-             are the concrete versions the fork resolved against; the direct
-             dependencyManagement entries below pin them so the imported BOM's
-             ranges are overridden (a direct entry beats an imported one). -->
-        <verapdf.parser.version>1.31.62</verapdf.parser.version>
+             substitute fixed versions), which ban-dynamic-versions rejects. The
+             direct dependencyManagement entries below pin them so the imported
+             BOM's ranges are overridden (a direct entry beats an imported one).
+             Parser has to move together with verapdf.version: the 1.31.100 fork
+             calls PDNameTreeNode.getObject(COSString), which exists only from
+             parser 1.31.68 on, while 1.31.99 called getObject(String), which that
+             release drops. Raising one without the other turns a compile-time
+             mismatch into a NoSuchMethodError on string named destinations. -->
+        <verapdf.parser.version>1.31.68</verapdf.parser.version>
         <verapdf.pdfmodel.version>1.31.14</verapdf.pdfmodel.version>
         <verapdf.library.version>1.31.45</verapdf.library.version>
         <!-- Bump only on a wcag-algorithms bump: vera classes require the
