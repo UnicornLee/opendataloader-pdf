@@ -25,6 +25,7 @@ import org.opendataloader.pdf.server.config.OssProperties;
 import org.opendataloader.pdf.server.config.PaddleProperties;
 import org.opendataloader.pdf.server.config.PdfProperties;
 import org.opendataloader.pdf.server.config.PulsarProperties;
+import org.opendataloader.pdf.server.workspace.TempWorkspaces;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -38,7 +39,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -87,12 +87,15 @@ public class PdfProcessService {
         log.info("processing pdf, url={}, businessId={}, extend={}, env={}, outputPath={}",
                 url, businessId, extend, basicProperties.env(), pdfProperties.output().path());
 
-        Path inputBase = resolveBaseDir(pdfProperties.temp() == null ? "" : pdfProperties.temp().path(),
-                "pdf.temp.path (input staging)");
-        Path outputBase = resolveBaseDir(pdfProperties.output() == null ? "" : pdfProperties.output().path(), "output.path");
-        Path inputDir = Files.createTempDirectory(inputBase, "in-");
-        Path outputDir = Files.createTempDirectory(outputBase, "out-");
+        Path inputBase = inputBaseDir();
+        Path outputBase = outputBaseDir();
+        Path inputDir = null;
+        Path outputDir = null;
         try {
+            // Created inside the try: if the second createTempDirectory fails
+            // (ENOSPC, permission, max-dirs) the first one must still be released.
+            inputDir = TempWorkspaces.create(inputBase, TempWorkspaces.INPUT_PREFIX);
+            outputDir = TempWorkspaces.create(outputBase, TempWorkspaces.OUTPUT_PREFIX);
             Path inputPdf = inputDir.resolve(INPUT_NAME + ".pdf");
             if (url.toLowerCase(Locale.ROOT).startsWith("http://")
                     || url.toLowerCase(Locale.ROOT).startsWith("https://")) {
@@ -135,8 +138,8 @@ public class PdfProcessService {
             return new ProcessedResult(Files.readAllBytes(output), output.getFileName().toString(),
                     outputSpec.mediaType);
         } finally {
-            deleteRecursively(inputDir);
-            deleteRecursively(outputDir);
+            TempWorkspaces.release(outputDir);
+            TempWorkspaces.release(inputDir);
         }
     }
 
@@ -175,8 +178,8 @@ public class PdfProcessService {
      */
     public PulsarProcessResult processForPulsar(String inputPdf, Object businessId, String fileUrl,
                                                 Map<String, Object> extend) throws IOException {
-        Path outputBase = resolveBaseDir(pdfProperties.output() == null ? "" : pdfProperties.output().path(), "output.path");
-        Path outputDir = Files.createTempDirectory(outputBase, "out-");
+        Path outputBase = outputBaseDir();
+        Path outputDir = TempWorkspaces.create(outputBase, TempWorkspaces.OUTPUT_PREFIX);
         boolean succeeded = false;
         try {
             Config config = new Config();
@@ -198,7 +201,7 @@ public class PdfProcessService {
             return new PulsarProcessResult(jsonUrlOrPath, ocrJsonBytes, outputDir);
         } finally {
             if (!succeeded) {
-                deleteRecursively(outputDir);
+                TempWorkspaces.release(outputDir);
             }
         }
     }
@@ -261,6 +264,25 @@ public class PdfProcessService {
         return customOptions;
     }
 
+    /**
+     * @return the directory that stages input PDFs ({@code pdf.temp.path}, or
+     *         the JVM temp directory when it is not configured). Also used by
+     *         {@code TempWorkspaceSweeper} to find stale {@code in-*} directories.
+     */
+    public Path inputBaseDir() {
+        return resolveBaseDir(pdfProperties.temp() == null ? "" : pdfProperties.temp().path(),
+                "pdf.temp.path (input staging)");
+    }
+
+    /**
+     * @return the directory that holds generated output ({@code pdf.output.path},
+     *         or the JVM temp directory when it is not configured). Also used by
+     *         {@code TempWorkspaceSweeper} to find stale {@code out-*} directories.
+     */
+    public Path outputBaseDir() {
+        return resolveBaseDir(pdfProperties.output() == null ? "" : pdfProperties.output().path(), "output.path");
+    }
+
     private static Path resolveBaseDir(String configured, String label) {
         if (configured == null || configured.isBlank()) {
             log.debug("{} not configured; falling back to system temp directory", label);
@@ -289,20 +311,6 @@ public class PdfProcessService {
         HttpResponse<Path> response = client.send(request, HttpResponse.BodyHandlers.ofFile(target));
         if (response.statusCode() != 200) {
             throw new IOException("download failed, http status " + response.statusCode() + " for " + url);
-        }
-    }
-
-    private static void deleteRecursively(Path dir) {
-        try (Stream<Path> paths = Files.walk(dir)) {
-            paths.sorted(Comparator.reverseOrder()).forEach(path -> {
-                try {
-                    Files.deleteIfExists(path);
-                } catch (IOException ignored) {
-                    // best-effort cleanup of the temp working directory
-                }
-            });
-        } catch (IOException ignored) {
-            // best-effort cleanup of the temp working directory
         }
     }
 

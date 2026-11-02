@@ -34,6 +34,7 @@ import org.opendataloader.pdf.server.config.OssProperties;
 import org.opendataloader.pdf.server.config.PdfProperties;
 import org.opendataloader.pdf.server.config.PulsarProperties;
 import org.opendataloader.pdf.server.constant.Global;
+import org.opendataloader.pdf.server.workspace.TempWorkspaces;
 import org.opendataloader.pdf.utils.ProcessingDeadline;
 import org.springframework.core.env.Environment;
 import org.springframework.core.env.Profiles;
@@ -54,7 +55,6 @@ import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -68,7 +68,6 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Stream;
 
 /**
  * Bridges the Pulsar message queue with {@link PdfProcessService}.
@@ -358,7 +357,12 @@ public class PulsarService {
             return;
         }
 
-        ExecutorService worker = newWorkerExecutor(consumer.getConsumerName());
+        // The thread reference exists only so onMessageTimeout() can hand the
+        // directories it created to TempWorkspaces: the worker that owns them is
+        // the only code path that would delete them, and it is exactly the code
+        // path the watchdog just gave up on.
+        AtomicReference<Thread> workerThreadRef = new AtomicReference<>();
+        ExecutorService worker = newWorkerExecutor(consumer.getConsumerName(), workerThreadRef);
         try {
             Future<?> future = worker.submit(() -> {
                 ProcessingDeadline.start(timeoutMillis);
@@ -385,7 +389,7 @@ public class PulsarService {
             });
             future.get(timeoutMillis, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
-            onMessageTimeout(consumer, msg, businessIdRef, extendRef, worker);
+            onMessageTimeout(consumer, msg, businessIdRef, extendRef, worker, workerThreadRef.get());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             log.warn("interrupted while waiting for message processing, businessId={}", businessIdRef.get());
@@ -410,7 +414,7 @@ public class PulsarService {
     private void onMessageTimeout(Consumer<byte[]> consumer, Message<byte[]> msg,
                                   AtomicReference<Object> businessIdRef,
                                   AtomicReference<Map<String, Object>> extendRef,
-                                  ExecutorService worker) {
+                                  ExecutorService worker, Thread workerThread) {
         int abandoned = abandonedWorkers.incrementAndGet();
         Object businessId = businessIdRef.get();
         Map<String, Object> extend = extendRef.get();
@@ -435,6 +439,16 @@ public class PulsarService {
         // stops a runaway document; a worker that ignores interrupts stays until it
         // finishes, hence the escalation below.
         worker.shutdownNow();
+        // This message is already reported as failed and acked, so its in-/out-
+        // directories are garbage from now on - but the worker holding them may
+        // never come back to delete them. Hand them to TempWorkspaces; the
+        // periodic sweeper deletes them once the orphan grace period expires, and
+        // the worker's own finally block is still the fast path if it does return.
+        int orphaned = TempWorkspaces.orphanOwnedBy(workerThread);
+        if (orphaned > 0) {
+            log.warn("handed {} temp directories of the abandoned worker to the sweeper, businessId={}",
+                    orphaned, businessId);
+        }
         escalateIfTooManyAbandoned(abandoned);
     }
 
@@ -476,11 +490,12 @@ public class PulsarService {
         }
     }
 
-    private ExecutorService newWorkerExecutor(String consumerName) {
-        ExecutorService worker = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, WORKER_THREAD_PREFIX + consumerName);
-            t.setDaemon(true);
-            return t;
+    private ExecutorService newWorkerExecutor(String consumerName, AtomicReference<Thread> threadRef) {
+        ExecutorService worker = Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, WORKER_THREAD_PREFIX + consumerName);
+            thread.setDaemon(true);
+            threadRef.set(thread);
+            return thread;
         });
         workerExecutors.add(worker);
         return worker;
@@ -588,7 +603,7 @@ public class PulsarService {
                 if (baseName == null) {
                     log.warn("file is not a PDF, fileUrl={}, businessId={}", fileUrl, businessId);
                 } else {
-                    inputDir = Files.createTempDirectory(resolveTempBase(), "in-");
+                    inputDir = TempWorkspaces.create(resolveTempBase(), TempWorkspaces.INPUT_PREFIX);
                     Path inputPdf = inputDir.resolve(baseName + ".pdf");
                     download(fileUrl, inputPdf);
                     log.info("download pdf success, businessId={}, file={}", businessId, inputPdf);
@@ -611,35 +626,36 @@ public class PulsarService {
             log.error("handleReceiveMessage failed, businessId={}: {}", businessId, e.getMessage(), e);
         }
 
-        if (abandoned.get()) {
-            // The watchdog already published the failure result and acknowledged the
-            // message; publishing/acking again for an abandoned item would double-report
-            // it downstream. Only the local temp cleanup is still worth doing.
-            log.warn("message was abandoned by the watchdog, skip result publish and ack, businessId={}",
-                    businessId);
-        } else {
-            // Ack FIRST, before the (blocking) result publish and temp cleanup: under heap
-            // exhaustion the producer send stalls on its timeout and a crash before the
-            // ack resurrects the unacked message (ack_timeout is 0, so redelivery happens
-            // on reconnect) — the same oversized document is then re-downloaded and
-            // re-OOMs the instance in a loop. acknowledgeQuietly swallows a failed ack,
-            // so ordering it first is what keeps the redelivery storm from repeating.
-            acknowledgeQuietly(consumer, pulsarMsg, businessId);
-            boolean sendResult = !basicProperties.completeDisplay() || ocrJsonBytes.length == 0;
-            if (sendResult) {
-                sendResultMessage(jsonUrl, businessId, extend);
-            } else {
-                log.info("complete_display=true and ocr json present, skip send_topic_name, businessId={}",
+        try {
+            if (abandoned.get()) {
+                // The watchdog already published the failure result and acknowledged the
+                // message; publishing/acking again for an abandoned item would double-report
+                // it downstream. Only the local temp cleanup is still worth doing.
+                log.warn("message was abandoned by the watchdog, skip result publish and ack, businessId={}",
                         businessId);
+            } else {
+                // Ack FIRST, before the (blocking) result publish and temp cleanup: under heap
+                // exhaustion the producer send stalls on its timeout and a crash before the
+                // ack resurrects the unacked message (ack_timeout is 0, so redelivery happens
+                // on reconnect) — the same oversized document is then re-downloaded and
+                // re-OOMs the instance in a loop. acknowledgeQuietly swallows a failed ack,
+                // so ordering it first is what keeps the redelivery storm from repeating.
+                acknowledgeQuietly(consumer, pulsarMsg, businessId);
+                boolean sendResult = !basicProperties.completeDisplay() || ocrJsonBytes.length == 0;
+                if (sendResult) {
+                    sendResultMessage(jsonUrl, businessId, extend);
+                } else {
+                    log.info("complete_display=true and ocr json present, skip send_topic_name, businessId={}",
+                            businessId);
+                }
             }
-        }
-
-        // Local cleanup runs after the result publish
-        if (outputDir != null) {
-            deleteRecursively(outputDir);
-        }
-        if (inputDir != null) {
-            deleteRecursively(inputDir);
+        } finally {
+            // Local cleanup runs after the result publish, and must survive anything the
+            // publish throws (an Error escaping here used to skip the deletion entirely).
+            // TempWorkspaces retries internally and hands an undeletable directory to the
+            // periodic sweeper instead of dropping it silently.
+            TempWorkspaces.release(outputDir);
+            TempWorkspaces.release(inputDir);
         }
     }
 
@@ -713,7 +729,7 @@ public class PulsarService {
                 log.warn("OCR message jsonUrl is empty, businessId={}", businessId);
             } else {
                 String safeName = sanitizeFileName(businessId);
-                inputDir = Files.createTempDirectory(resolveTempBase(), "ocr-");
+                inputDir = TempWorkspaces.create(resolveTempBase(), TempWorkspaces.OCR_PREFIX);
                 Path jsonPath = inputDir.resolve(safeName + ".json");
                 download(jsonUrl, jsonPath);
                 log.info("download ocr json success, businessId={}, path={}", businessId, jsonPath);
@@ -728,20 +744,20 @@ public class PulsarService {
 
         // Per task step 3 the OCR consumer always publishes to send_topic_name
         // (no complete_display branch). On any failure jsonUrl stays "".
-        if (abandoned.get()) {
-            log.warn("ocr message was abandoned by the watchdog, skip result publish and ack, businessId={}",
-                    businessId);
-        } else {
-            // Ack before the blocking result publish (see handleReceiveMessage): a crash
-            // that lands between the two would otherwise redeliver this message and
-            // re-trigger the same failure on every restart.
-            acknowledgeQuietly(consumer, pulsarMsg, businessId);
-            sendResultMessage(jsonUrl, businessId, extend);
-        }
-
-        // Local cleanup runs after the result publish
-        if (inputDir != null) {
-            deleteRecursively(inputDir);
+        try {
+            if (abandoned.get()) {
+                log.warn("ocr message was abandoned by the watchdog, skip result publish and ack, businessId={}",
+                        businessId);
+            } else {
+                // Ack before the blocking result publish (see handleReceiveMessage): a crash
+                // that lands between the two would otherwise redeliver this message and
+                // re-trigger the same failure on every restart.
+                acknowledgeQuietly(consumer, pulsarMsg, businessId);
+                sendResultMessage(jsonUrl, businessId, extend);
+            }
+        } finally {
+            // Local cleanup runs after the result publish (see handleReceiveMessage)
+            TempWorkspaces.release(inputDir);
         }
     }
 
@@ -936,20 +952,6 @@ public class PulsarService {
             }
         }
         throw new IOException("download failed after " + DOWNLOAD_MAX_ATTEMPTS + " attempts: " + url, last);
-    }
-
-    private static void deleteRecursively(Path dir) {
-        try (Stream<Path> paths = Files.walk(dir)) {
-            paths.sorted(Comparator.reverseOrder()).forEach(path -> {
-                try {
-                    Files.deleteIfExists(path);
-                } catch (IOException ignored) {
-                    // best-effort cleanup
-                }
-            });
-        } catch (IOException ignored) {
-            // best-effort cleanup
-        }
     }
 
     private Thread startThread(String name, Runnable runnable) {
