@@ -2,7 +2,7 @@ server:
     port: 8089
 
 log:
-    level: INFO
+    level: WARN
     appender: stash
     home:
     stash:
