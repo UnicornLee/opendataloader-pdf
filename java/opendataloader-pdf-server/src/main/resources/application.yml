@@ -29,9 +29,10 @@ spring:
                   enabled: true
               acl-token: ${consul.acl-token}
 
-logging:
-  level:
-    org.opendataloader.pdf.server: DEBUG
+# NOTE: do not pin org.opendataloader.pdf.server here. Spring Boot applies
+# logging.level.* AFTER logback-spring.xml, so an entry in this base file would
+# win over every profile's log.level (it used to force DEBUG in production).
+# Per-profile overrides live in application-<profile>.yml.
 
 http:
     rest-template:

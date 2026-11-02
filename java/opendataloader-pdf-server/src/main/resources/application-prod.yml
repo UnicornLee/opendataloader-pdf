@@ -8,6 +8,16 @@ log:
     stash:
         addresses: node01.public.logstash.prod:9999
 
+# log.level above drives logback's <root> level (logback-spring.xml). Spring Boot
+# applies logging.level.* afterwards, so the service's own package needs its own
+# entry here - otherwise it inherits the base application.yml value. Both are set
+# to WARN on purpose: production only ships warnings/errors (message timeouts,
+# abandoned workers, temp-workspace sweeps); the per-message INFO trace of
+# successful parses is intentionally dropped.
+logging:
+    level:
+        org.opendataloader.pdf.server: WARN
+
 consul:
     # 替换 172.16.20.98
     host: 192.168.0.126
