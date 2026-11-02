@@ -256,21 +256,29 @@
       "default": null,
       "description": "Set the ratio used to calculate the automatic space-insertion threshold (threshold = space-ratio * font size). If the horizontal gap between two adjacent symbols exceeds this threshold, an extra space is inserted to text value. Accepts decimals (e.g., 0.17). Default: 0.17"
     },
-      {
-          "name": "catalog-bookmark-min-lines",
-          "shortName": null,
-          "type": "string",
-          "required": false,
-          "default": "3",
-          "description": "Minimum number of TOC-like lines per page for catalog bookmark detection. Default: 3"
-      },
-      {
-          "name": "catalog-bookmark-min-ratio",
-          "shortName": null,
-          "type": "string",
-          "required": false,
-          "default": "0.4",
-          "description": "Minimum ratio of TOC-like lines to non-empty text lines per page for catalog bookmark detection. Default: 0.4"
-      }
+    {
+      "name": "sanitize-rules",
+      "shortName": null,
+      "type": "string",
+      "required": false,
+      "default": null,
+      "description": "Path to a JSON file of sanitization rules. Only the rules of the file run, in place of the built-in rules. Turns on --sanitize"
+    },
+    {
+      "name": "catalog-bookmark-min-lines",
+      "shortName": null,
+      "type": "string",
+      "required": false,
+      "default": "3",
+      "description": "Minimum number of TOC-like lines per page for catalog bookmark detection. Default: 3"
+    },
+    {
+      "name": "catalog-bookmark-min-ratio",
+      "shortName": null,
+      "type": "string",
+      "required": false,
+      "default": "0.4",
+      "description": "Minimum ratio of TOC-like lines to non-empty text lines per page for catalog bookmark detection. Default: 0.4"
+    }
   ]
 }

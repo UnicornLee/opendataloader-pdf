@@ -2,6 +2,8 @@ package org.opendataloader.pdf.processors;
 
 import org.opendataloader.pdf.autotagging.ChunksWriter;
 import org.opendataloader.pdf.autotagging.OperatorStreamKey;
+import org.verapdf.operator.Operator;
+import org.verapdf.parser.Operators;
 import org.opendataloader.pdf.entities.EnrichedImageChunk;
 import org.opendataloader.pdf.entities.SemanticFootnote;
 import org.opendataloader.pdf.entities.SemanticFormula;
@@ -17,6 +19,8 @@ import org.verapdf.pd.actions.PDAction;
 import org.verapdf.pd.form.PDAcroForm;
 import org.verapdf.pd.form.PDFormField;
 import org.verapdf.pd.images.PDXObject;
+import org.verapdf.pd.images.PDXForm;
+import org.verapdf.pd.PDResources;
 import org.verapdf.tools.StaticResources;
 import org.verapdf.tools.TaggedPDFConstants;
 import org.verapdf.wcag.algorithms.entities.*;
@@ -31,6 +35,7 @@ import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorder;
 import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorderCell;
 import org.verapdf.wcag.algorithms.entities.tables.tableBorders.TableBorderRow;
 import org.verapdf.wcag.algorithms.semanticalgorithms.utils.StreamInfo;
+import org.opendataloader.pdf.utils.ContentSanitizer;
 import org.opendataloader.pdf.utils.FileUtils;
 import org.verapdf.wcag.algorithms.semanticalgorithms.utils.TextChunkUtils;
 
@@ -39,6 +44,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.zip.DeflaterOutputStream;
 
 public class AutoTaggingProcessor {
 
@@ -97,11 +103,13 @@ public class AutoTaggingProcessor {
         isPDF2_0 = pdfVersion != null ? pdfVersion == 2.0F : document.getVersion() == 2.0F;
         COSDocument cosDocument = document.getDocument();
         PDCatalog catalog = document.getCatalog();
+        setMarkInfo(catalog, cosDocument);
         COSObject structTreeRoot = createStructTreeRoot(catalog, cosDocument, document);
         createStructureTreeElements(document, contents, structTreeRoot, cosDocument);
         if (isPDF2_0) {
             updateDestinationsToStructureDestinations(document, catalog, cosDocument);
         }
+        mergeAdjacentTextShows(document);
         updatePages(document, cosDocument);
         createParentTree(cosDocument, structTreeRoot);
         cosDocument.getTrailer().removeKey(ASAtom.ENCRYPT);
@@ -165,6 +173,16 @@ public class AutoTaggingProcessor {
         }
     }
 
+    private static void setMarkInfo(PDCatalog catalog, COSDocument cosDocument) {
+        COSObject markInfo = catalog.getKey(ASAtom.MARK_INFO);
+        if (markInfo  == null || markInfo.empty()) {
+            markInfo = COSDictionary.construct();
+            catalog.setKey(ASAtom.MARK_INFO, markInfo);
+        }
+        markInfo.setKey(ASAtom.MARKED, COSBoolean.construct(true));
+        cosDocument.addChangedObject(catalog.getObject());
+    }
+
     private static COSObject createContentsIndirect(COSDocument cosDocument, List<Object> tokens) throws IOException {
         COSObject streamObj = COSIndirect.construct(COSStream.construct(), cosDocument);
         setUpContents(streamObj, tokens);
@@ -174,12 +192,18 @@ public class AutoTaggingProcessor {
 
     public static void setUpContents(COSObject contentsObj, List<Object> tokens) throws IOException {
         byte[] res = new PDFStreamWriter().write(tokens);
-        try (InputStream inStream = new ByteArrayInputStream(res)) {
-            contentsObj.setData(new ASMemoryInStream(inStream));
+        // Compress in memory and store the result as raw data. veraPDF's COSStream.setFilters, and
+        // the one-argument COSStream.setData on a stream that has a filter, write the encoded data
+        // to a temporary file (tmp_pdf_file*.pdf) that PDDocument.close() does not delete.
+        ByteArrayOutputStream compressed = new ByteArrayOutputStream();
+        try (DeflaterOutputStream deflater = new DeflaterOutputStream(compressed)) {
+            deflater.write(res);
         }
+        byte[] data = compressed.toByteArray();
+        // Remove /Filter, then add it again below, so the key order and the output bytes stay as before.
         contentsObj.setKey(ASAtom.FILTER, new COSObject());
-        COSStream newStream = (COSStream) contentsObj.getDirectBase();
-        newStream.setFilters(new COSFilters(COSName.construct(ASAtom.FLATE_DECODE)));
+        contentsObj.setData(new ASMemoryInStream(data, data.length, false), COSStream.FilterFlags.RAW_DATA);
+        contentsObj.setKey(ASAtom.FILTER, COSName.construct(ASAtom.FLATE_DECODE));
     }
 
     private static COSObject createStructTreeRoot(PDCatalog catalog, COSDocument cosDocument, PDDocument document) {
@@ -382,6 +406,12 @@ public class AutoTaggingProcessor {
     /**
      * Determines if the caption should be the first child (above/before) or last child
      * (below/after) of its parent struct element.
+     *
+     * <p>A caption level with its parent is placed by side: left first, right
+     * last. One inside the parent's box goes by height instead: a table's title
+     * often lies inside the table's box, because the layout region the box
+     * comes from takes the title in, and a centred title was read after the
+     * table it names.
      */
     private static boolean isCaptionFirstChild(BoundingBox caption, BoundingBox parent) {
         if (caption == null || parent == null) return true;
@@ -389,6 +419,8 @@ public class AutoTaggingProcessor {
             return true;
         } else if (caption.getCenterY() < parent.getBottomY()) {
             return false;
+        } else if (caption.getCenterX() >= parent.getLeftX() && caption.getCenterX() <= parent.getRightX()) {
+            return caption.getCenterY() >= parent.getCenterY();
         } else {
             return caption.getCenterX() < parent.getCenterX();
         }
@@ -1093,14 +1125,8 @@ public class AutoTaggingProcessor {
                 String cellTag = cell.isHeaderCell() ? TaggedPDFConstants.TH : TaggedPDFConstants.TD;
                 COSObject cellObject = addStructElement(rowObject, cosDocument, cellTag, cell.getPageNumber());
                 if (cell.isHeaderCell()) {
-                    String scope = "Both";
-                    if (rowNumber == 0 && colNumber != 0) {
-                        scope = "Column";
-                    } else if (rowNumber != 0 && colNumber == 0) {
-                        scope = "Row";
-                    }
                     addAttributeToStructElem(cellObject, ASAtom.TABLE,
-                        ASAtom.SCOPE, COSName.construct(ASAtom.getASAtom(scope)));
+                        ASAtom.SCOPE, COSName.construct(ASAtom.getASAtom(headerScope(table, rowNumber, colNumber))));
                 }
                 if (cell.getColSpan() != 1) {
                     addAttributeToStructElem(cellObject, ASAtom.TABLE, ASAtom.COL_SPAN, COSInteger.construct(cell.getColSpan()));
@@ -1111,6 +1137,40 @@ public class AutoTaggingProcessor {
                 addKids(cell.getContents(), cellObject, cosDocument);
             }
         }
+    }
+
+    /**
+     * The Scope of a header cell: Column in a row of headers, Row for a row's
+     * first cell among data, Both otherwise. The first cell of a first row of
+     * headers is Both.
+     *
+     * <p>A table can carry two or three heading rows over its amounts. Placing
+     * Scope by row index alone gave the second heading row Row on its first
+     * cell and Both on the rest, as if those headings named rows.
+     *
+     * <p>A table can also have no heading row, so that its first row is data:
+     * a summary of revenues that starts at "Property Tax | 5,663,100". Its
+     * first cell names that row only. As Both, it was also the heading of the
+     * names under it.
+     */
+    static String headerScope(TableBorder table, int rowNumber, int colNumber) {
+        if (isHeaderRow(table, rowNumber)) {
+            return rowNumber == 0 && colNumber == 0 ? "Both" : "Column";
+        }
+        return colNumber == 0 ? "Row" : "Both";
+    }
+
+    /** Every cell that starts in this row is a header cell. */
+    private static boolean isHeaderRow(TableBorder table, int rowNumber) {
+        TableBorderRow row = table.getRow(rowNumber);
+        for (int colNumber = 0; colNumber < table.getNumberOfColumns(); colNumber++) {
+            TableBorderCell cell = row.getCell(colNumber);
+            if (cell != null && cell.getRowNumber() == rowNumber && cell.getColNumber() == colNumber
+                    && !cell.isHeaderCell()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static void createStructElemForTextBlock(TableBorder table, COSObject parent, COSDocument cosDocument) {
@@ -1292,8 +1352,138 @@ public class AutoTaggingProcessor {
         }
     }
 
+    /** Operators that may sit between two text-showing operators without painting or ending the text object. */
+    private static final Set<String> NON_PAINTING_OPERATORS = new HashSet<>(Arrays.asList(
+        "Td", "TD", "Tm", "T*", "Tc", "Tw", "Tz", "TL", "Tf", "Ts", "Tr",
+        "g", "G", "rg", "RG", "k", "K", "cs", "CS", "sc", "SC", "scn", "SCN"));
+
+    /**
+     * Gives adjacent {@code Tj}/{@code TJ} operators of one structure element a single MCID.
+     *
+     * <p>Producers such as Skia (Google Docs, Chrome) draw one glyph per {@code Tj}, and every
+     * operator used to get its own MCID: a paragraph ended up with one marked-content
+     * sequence per letter. Only operators with nothing painted between them are merged, so
+     * {@code ChunksWriter} can emit them as one span. The dropped MCIDs are removed from the
+     * element's {@code /K} and the later ones renumbered.
+     */
+    private static void mergeAdjacentTextShows(PDDocument document) {
+        Map<COSObject, Integer> pagesPerParent = new IdentityHashMap<>();
+        for (List<COSObject> parents : structParents.values()) {
+            for (COSObject parent : identitySet(parents)) {
+                pagesPerParent.merge(parent, 1, Integer::sum);
+            }
+        }
+        for (Map.Entry<OperatorStreamKey, List<COSObject>> entry : structParents.entrySet()) {
+            OperatorStreamKey key = entry.getKey();
+            Map<Integer, Set<StreamInfo>> operators = operatorIndexesToStreamInfosMap.get(key);
+            List<COSObject> parents = entry.getValue();
+            // Integers in /K are relative to one page, so skip elements that span pages.
+            if (key.getXObjectName() != null || operators == null
+                || identitySet(parents).stream().anyMatch(p -> pagesPerParent.get(p) > 1)) {
+                continue;
+            }
+            List<Object> tokens = ChunksWriter.getTokens(document.getPage(key.getPageNumber()).getContent());
+            // getTokens returns an empty list when the stream cannot be read; keep the
+            // unmerged MCIDs rather than fail the whole document.
+            if (Collections.max(operators.keySet()) >= tokens.size()) {
+                continue;
+            }
+            int[] anchor = new int[parents.size()];
+            boolean[] merged = new boolean[parents.size()];
+            Integer previousOperator = null;
+            Integer previousMcid = null;
+            for (int operator : new TreeSet<>(operators.keySet())) {
+                Set<StreamInfo> streamInfos = operators.get(operator);
+                // veraPDF gives -1 to a space that it inserts between the strings of one TJ.
+                // The space is not in the stream, so it is no text-show operator to merge.
+                if (operator < 0 || streamInfos.size() != 1 || !isTextShow(tokens, operator)) {
+                    previousOperator = null;
+                    continue;
+                }
+                int mcid = streamInfos.iterator().next().getMcid();
+                anchor[mcid] = mcid;
+                if (previousOperator != null && parents.get(mcid) == parents.get(previousMcid)
+                    && onlyNonPainting(tokens, previousOperator, operator)) {
+                    anchor[mcid] = previousMcid;
+                    merged[mcid] = true;
+                } else {
+                    previousMcid = mcid;
+                }
+                previousOperator = operator;
+            }
+            int[] newMcid = new int[parents.size()];
+            List<COSObject> compacted = new ArrayList<>();
+            for (int mcid = 0; mcid < parents.size(); mcid++) {
+                if (!merged[mcid]) {
+                    newMcid[mcid] = compacted.size();
+                    compacted.add(parents.get(mcid));
+                }
+            }
+            if (compacted.size() == parents.size()) {
+                continue;
+            }
+            for (Set<StreamInfo> streamInfos : operators.values()) {
+                for (StreamInfo streamInfo : streamInfos) {
+                    streamInfo.setMcid(newMcid[merged[streamInfo.getMcid()] ? anchor[streamInfo.getMcid()] : streamInfo.getMcid()]);
+                }
+            }
+            for (COSObject parent : identitySet(parents)) {
+                COSObject kids = parent.getKey(ASAtom.K);
+                for (int i = kids.size() - 1; i >= 0; i--) {
+                    COSObject kid = kids.at(i);
+                    if (kid.getType() != COSObjType.COS_INTEGER) {
+                        continue;
+                    }
+                    int mcid = kid.getInteger().intValue();
+                    if (merged[mcid]) {
+                        kids.remove(i);
+                    } else {
+                        kids.set(i, COSInteger.construct(newMcid[mcid]));
+                    }
+                }
+            }
+            parents.clear();
+            parents.addAll(compacted);
+        }
+    }
+
+    private static Set<COSObject> identitySet(List<COSObject> objects) {
+        Set<COSObject> set = Collections.newSetFromMap(new IdentityHashMap<>());
+        set.addAll(objects);
+        return set;
+    }
+
+    private static boolean isTextShow(List<Object> tokens, int index) {
+        Object token = tokens.get(index);
+        return token instanceof Operator
+            && (Operators.TJ_SHOW.equals(((Operator) token).getOperator())
+                || Operators.TJ_SHOW_POS.equals(((Operator) token).getOperator()));
+    }
+
+    private static boolean onlyNonPainting(List<Object> tokens, int from, int to) {
+        for (int i = from + 1; i < to; i++) {
+            Object token = tokens.get(i);
+            if (token instanceof Operator && !NON_PAINTING_OPERATORS.contains(((Operator) token).getOperator())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static void addMcidChildren(List<StreamInfo> streamInfos, Integer pageNumber, COSObject parentStructElement) {
         if (streamInfos.isEmpty()) {
+            return;
+        }
+        // veraPDF gives -1 to a space that it inserts between the strings of one TJ. The space
+        // is in no operator, so ChunksWriter cannot mark it, and an MCID for it would have no
+        // content. Leave it out after the merge, so the merge of the other pieces stays the same.
+        List<StreamInfo> streamInfoList = new ArrayList<>();
+        for (StreamInfo streamInfo : getMergedStreamInfos(streamInfos)) {
+            if (streamInfo.getOperatorIndex() >= 0) {
+                streamInfoList.add(streamInfo);
+            }
+        }
+        if (streamInfoList.isEmpty()) {
             return;
         }
         COSObject kids = parentStructElement.getKey(ASAtom.K);
@@ -1302,32 +1492,157 @@ public class AutoTaggingProcessor {
             parentStructElement.setKey(ASAtom.K, array);
             kids = array;
         }
-        List<StreamInfo> streamInfoList = getMergedStreamInfos(streamInfos);
         for (StreamInfo streamInfo : streamInfoList) {
             OperatorStreamKey operatorStreamKey = new OperatorStreamKey(pageNumber, streamInfo.getXObjectName());
             List<COSObject> list = structParents.computeIfAbsent(operatorStreamKey, x -> new ArrayList<>());
+            Set<StreamInfo> sameOperator = operatorIndexesToStreamInfosMap
+                .computeIfAbsent(operatorStreamKey, x -> new HashMap<>())
+                .computeIfAbsent(streamInfo.getOperatorIndex(), x -> new TreeSet<>());
+            if (widenOverlapping(sameOperator, streamInfo, list, parentStructElement)) {
+                continue;
+            }
             int mcid = list.size();
             COSObject mcidObject = COSInteger.construct(mcid);
             streamInfo.setMcid(mcid);
-            operatorIndexesToStreamInfosMap.computeIfAbsent(operatorStreamKey, x -> new HashMap<>())
-                .computeIfAbsent(streamInfo.getOperatorIndex(), x -> new TreeSet<>()).add(streamInfo);
+            sameOperator.add(streamInfo);
             list.add(parentStructElement);
             if (streamInfo.getXObjectName() != null) {
-                PDXObject pdxObject = StaticResources.getDocument().getPage(pageNumber).getResources()
-                    .getXObject(ASAtom.getASAtom(streamInfo.getXObjectName()));
+                PDXObject pdxObject = findXObject(StaticResources.getDocument().getPage(pageNumber).getResources(),
+                    ASAtom.getASAtom(streamInfo.getXObjectName()), 0);
                 if (pdxObject != null) {
                     COSObject mcrDictionary = COSDictionary.construct();
                     mcrDictionary.setKey(ASAtom.TYPE, COSName.construct(ASAtom.MCR));
                     mcrDictionary.setKey(ASAtom.MCID, mcidObject);
                     mcrDictionary.setKey(ASAtom.STM, pdxObject.getObject());
                     kids.add(mcrDictionary);
-                } else {
-                    kids.add(mcidObject);
                 }
+                // An integer MCID here would name the page's own marked content with this
+                // form's numbering: measured, a signature's Figure took MCID 0, the page's first
+                // paragraph. With no form to point at, the piece gets no reference at all.
             } else {
                 kids.add(mcidObject);
             }
         }
+    }
+
+    /** Deepest form nesting searched for an XObject; a form can draw itself. */
+    private static final int MAX_FORM_DEPTH = 8;
+
+    /**
+     * An XObject by name in these resources, or in a form they hold.
+     *
+     * <p>A piece of content inside a form inside a form names the inner form, which the
+     * page's own resources do not list: a scanned signature placed in a form that a page
+     * form draws.
+     */
+    static PDXObject findXObject(PDResources resources, ASAtom name, int depth) {
+        if (resources == null || name == null || depth > MAX_FORM_DEPTH) {
+            return null;
+        }
+        PDXObject direct = resources.getXObject(name);
+        if (direct != null) {
+            return direct;
+        }
+        for (ASAtom other : resources.getXObjectNames()) {
+            PDXObject xObject = resources.getXObject(other);
+            if (xObject instanceof PDXForm) {
+                PDXObject found = findXObject(((PDXForm) xObject).getResources(), name, depth + 1);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Whether a form, or a form it draws, holds content this page tags. ChunksWriter
+     * rewrites a form's stream only when it enters it, so an outer form with nothing of its
+     * own to tag has to be entered for the inner one to be reached.
+     */
+    public static boolean holdsTaggedForm(PDXForm form, int pageNumber, int depth) {
+        if (form == null || depth > MAX_FORM_DEPTH || form.getResources() == null) {
+            return false;
+        }
+        PDResources resources = form.getResources();
+        for (ASAtom name : resources.getXObjectNames()) {
+            if (operatorIndexesToStreamInfosMap.containsKey(new OperatorStreamKey(pageNumber, name.getValue()))) {
+                return true;
+            }
+            PDXObject xObject = resources.getXObject(name);
+            if (xObject instanceof PDXForm && holdsTaggedForm((PDXForm) xObject, pageNumber, depth + 1)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Folds a piece of a string into the pieces of the same string that this element already
+     * marks, when it overlaps them.
+     *
+     * <p>ChunksWriter writes one marked-content sequence per piece and cannot nest one in
+     * another, so two overlapping pieces got two MCIDs and one sequence: the other MCID pointed
+     * at nothing. Measured on a scan's OCR layer, whose pieces of one string came as [1,2) and
+     * then [0,5), each in its own call: 7 such MCIDs over seven pages. The earlier piece is
+     * widened to cover both, and no MCID is added for the later one.
+     *
+     * <p>A piece can overlap more than one of them: [1,5) over [0,2) and [4,6). Each then reaches
+     * to the start of the next, the first back to the piece's start and the last to its end, so
+     * the element's pieces cover the piece and still do not overlap. A stretch that a piece of
+     * another element holds is left to it.
+     *
+     * @return true when the piece was folded in, and needs no MCID of its own
+     */
+    private static boolean widenOverlapping(Set<StreamInfo> sameOperator, StreamInfo piece,
+                                            List<COSObject> owners, COSObject parentStructElement) {
+        // The set is ordered by start index, so these come in order along the string.
+        List<StreamInfo> own = new ArrayList<>();
+        for (StreamInfo held : sameOperator) {
+            if (overlaps(held, piece.getStartIndex(), piece.getEndIndex())
+                && held.getMcid() != null && held.getMcid() < owners.size()
+                && owners.get(held.getMcid()) == parentStructElement) {
+                own.add(held);
+            }
+        }
+        if (own.isEmpty()) {
+            return false;
+        }
+        for (int index = 0; index < own.size(); index++) {
+            StreamInfo held = own.get(index);
+            int end = index + 1 < own.size() ? own.get(index + 1).getStartIndex()
+                : Math.max(held.getEndIndex(), piece.getEndIndex());
+            if (end > held.getEndIndex() && isUnmarked(sameOperator, held.getEndIndex(), end)) {
+                held.setEndIndex(end);
+            }
+        }
+        StreamInfo first = own.get(0);
+        int start = first.getStartIndex();
+        if (piece.getStartIndex() < start && isUnmarked(sameOperator, piece.getStartIndex(), start)) {
+            // The piece leaves the set while its start, the set's order, changes.
+            sameOperator.remove(first);
+            first.setStartIndex(piece.getStartIndex());
+            if (!sameOperator.add(first)) {
+                first.setStartIndex(start);
+                sameOperator.add(first);
+            }
+        }
+        piece.setMcid(first.getMcid());
+        return true;
+    }
+
+    private static boolean overlaps(StreamInfo held, int start, int end) {
+        return held.getStartIndex() < end && start < held.getEndIndex();
+    }
+
+    /** Whether no piece of the operator covers any character of [start, end). */
+    private static boolean isUnmarked(Set<StreamInfo> sameOperator, int start, int end) {
+        for (StreamInfo held : sameOperator) {
+            if (overlaps(held, start, end)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static List<StreamInfo> getMergedStreamInfos(List<StreamInfo> streamInfos) {
@@ -1337,6 +1652,12 @@ public class AutoTaggingProcessor {
         streamInfoList.add(previousInfo);
         while (streamInfoIterator.hasNext()) {
             StreamInfo currentStreamInfo = streamInfoIterator.next();
+            // The extra characters of a sanitized replacement have no glyph, so they do not stop the merge
+            // of the glyphs before and after them.
+            if (currentStreamInfo.getOperatorIndex() == ContentSanitizer.EXTRA_CHARACTERS_OPERATOR_INDEX) {
+                streamInfoList.add(currentStreamInfo);
+                continue;
+            }
             if (previousInfo.getOperatorIndex() == currentStreamInfo.getOperatorIndex() &&
                 previousInfo.getEndIndex() <= currentStreamInfo.getStartIndex()) {
                 previousInfo.setEndIndex(currentStreamInfo.getEndIndex());

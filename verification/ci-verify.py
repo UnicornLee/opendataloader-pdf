@@ -4,6 +4,7 @@ CI verification script for opendataloader-pdf CLI options.
 Three-level verification: Smoke / Content assertion / Comparison.
 """
 
+import atexit
 import glob
 import json
 import os
@@ -29,12 +30,90 @@ if sys.platform == "win32":
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ---------------------------------------------------------------------------
+# Synthetic fixtures (written at start, removed at exit)
+# ---------------------------------------------------------------------------
+def _write_synthetic_table_pdf(path: str, bordered: bool = True) -> str:
+    """Write a synthetic PDF with one table (4 rows, 3 columns) and return the path.
+
+    The repository does not keep third-party documents for table checks. This sample uses
+    neutral text and the standard Helvetica font, and it is the same on each run.
+
+    With bordered=False the table has no ruling lines, so only --table-method cluster finds it.
+    Cluster detection needs header cells more than about 10 font sizes apart and rows 1.05 to
+    3 font sizes apart. One-word cells ("A1") leave 12.4 font sizes between columns; "Row 1 A"
+    would leave 9.9, and the header would merge into one column.
+    """
+    rows, cols, x0, y0, cell_w, cell_h = 4, 3, 72, 600, 150, 30
+    ops = []
+    if bordered:
+        ops.append("0.5 w")
+        for r in range(rows + 1):
+            y = y0 - r * cell_h
+            ops.append(f"{x0} {y} m {x0 + cols * cell_w} {y} l S")
+        for c in range(cols + 1):
+            x = x0 + c * cell_w
+            ops.append(f"{x} {y0} m {x} {y0 - rows * cell_h} l S")
+    for r in range(rows):
+        for c in range(cols):
+            text = f"Row {r + 1} {'ABC'[c]}" if bordered else f"{'ABC'[c]}{r + 1}"
+            ops.append(f"BT /F1 11 Tf {x0 + c * cell_w + 8} {y0 - (r + 1) * cell_h + 10} Td "
+                       f"({text}) Tj ET")
+    stream = "\n".join(ops).encode("latin-1")
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
+    ]
+    out = bytearray(b"%PDF-1.7\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+    with open(path, "wb") as fh:
+        fh.write(out)
+    return path
+
+
+_FIXTURE_DIR = tempfile.mkdtemp(prefix="ci-verify-fixtures-")
+atexit.register(shutil.rmtree, _FIXTURE_DIR, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
+# Temp folder for child processes (removed at exit)
+#
+# The JVM ignores TMPDIR (java.io.tmpdir is /tmp on Linux and the per-user
+# folder on macOS), so files the CLI leaves in its temp folder would stay in
+# the system temp. The wrapper starts java with this process's environment,
+# so JAVA_TOOL_OPTIONS reaches the JVM; it is appended to, so existing values
+# stay, and the last -Djava.io.tmpdir wins. TMPDIR/TEMP/TMP cover Python
+# children (e.g. torch creates torchinductor_<user> during the hybrid --help
+# check). This process already resolved its own temp dir above, so its
+# TemporaryDirectory() folders are unaffected.
+# ---------------------------------------------------------------------------
+_CHILD_TMP_DIR = tempfile.mkdtemp(prefix="ci-verify-tmp-")
+atexit.register(shutil.rmtree, _CHILD_TMP_DIR, ignore_errors=True)
+os.environ["JAVA_TOOL_OPTIONS"] = " ".join(filter(None, [
+    os.environ.get("JAVA_TOOL_OPTIONS", "").strip(),
+    f'-Djava.io.tmpdir="{_CHILD_TMP_DIR}"',
+]))
+for _name in ("TMPDIR", "TEMP", "TMP"):
+    os.environ[_name] = _CHILD_TMP_DIR
+
+# ---------------------------------------------------------------------------
 # PDF Fixtures
 # ---------------------------------------------------------------------------
 PDF_BASIC      = os.path.join(REPO_ROOT, "samples/pdf/lorem.pdf")
 PDF_MULTIPAGE  = os.path.join(REPO_ROOT, "samples/pdf/2408.02509v1.pdf")
 PDF_IMAGES     = os.path.join(REPO_ROOT, "samples/pdf/pdfua-1-reference-suite-1-1/PDFUA-Ref-2-06_Brochure.pdf")
-PDF_TABLES     = os.path.join(REPO_ROOT, "samples/pdf/issue-336-conto-economico-bialetti.pdf")
+PDF_TABLES     = _write_synthetic_table_pdf(os.path.join(_FIXTURE_DIR, "synthetic-table.pdf"))
+PDF_BORDERLESS = _write_synthetic_table_pdf(
+    os.path.join(_FIXTURE_DIR, "synthetic-borderless-table.pdf"), bordered=False)
 PDF_STRUCTURED = os.path.join(REPO_ROOT, "samples/pdf/pdfua-1-reference-suite-1-1/PDFUA-Ref-2-08_BookChapter.pdf")
 PDF_PASSWORD      = os.path.join(REPO_ROOT, "samples/pdf/password-protected.pdf")
 PDF_STRIKETHROUGH = os.path.join(REPO_ROOT, "samples/pdf/strikethrough.pdf")
@@ -73,7 +152,7 @@ COVERED_OPTIONS = {
     "--format", "--output-dir", "--quiet", "--to-stdout",
     "--password", "--keep-line-breaks", "--replace-invalid-chars",
     "--pages", "--include-header-footer", "--detect-strikethrough",
-    "--sanitize", "--content-safety-off", "--use-struct-tree",
+    "--sanitize", "--sanitize-rules", "--content-safety-off", "--use-struct-tree",
     "--table-method", "--reading-order", "--threads",
     "--image-output", "--image-format", "--image-dir",
     "--markdown-with-html",
@@ -361,6 +440,19 @@ def _find_file_by_ext(directory: str, ext: str) -> str | None:
     pattern = os.path.join(directory, f"*{ext}")
     matches = glob.glob(pattern)
     return matches[0] if matches else None
+
+
+def _markdown_has_table(pdf: str, extra_args: list[str]) -> bool | None:
+    """Convert pdf to markdown and return whether it has a table, or None if the run fails."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = run_cli([pdf, "--format", "markdown", "--output-dir", tmpdir] + extra_args)
+        md_file = _find_file_by_ext(tmpdir, ".md") if result.returncode == 0 else None
+        if md_file is None:
+            print(f"       [table] no markdown output (exit {result.returncode}): "
+                  f"{result.stderr[:200]}")
+            return None
+        with open(md_file, "r", encoding="utf-8", errors="replace") as fh:
+            return "|---|" in fh.read()
 
 
 def _find_image_files(directory: str) -> list[str]:
@@ -672,12 +764,6 @@ def verify_folder_summary() -> None:
 def verify_markdown_with_html() -> None:
     print("\n--- --markdown-with-html ---")
 
-    if not os.path.exists(PDF_TABLES):
-        record("--markdown-with-html [SKIPPED: fixture missing]", None)
-        record("--format markdown-with-html (deprecated) [SKIPPED]", None)
-        record("--format markdown-with-images (deprecated) [SKIPPED]", None)
-        return
-
     # First-class flag: --format markdown + --markdown-with-html.
     with tempfile.TemporaryDirectory() as outdir:
         result = run_cli([
@@ -752,9 +838,10 @@ def verify_markdown_with_html() -> None:
 #
 # Triggers are chosen so each matches exactly one rule (no overlap), and
 # replacements reflect the rule that actually fires. Rules whose regex is
-# fully subsumed by an earlier rule (e.g. 15-digit caught by 10-18 digit,
-# MAC caught by IPv6) are intentionally omitted — they are dead in the
-# current rule order and listing them would falsely claim coverage.
+# fully subsumed by an earlier rule (e.g. 15-digit caught by 10-18 digit)
+# are intentionally omitted — they are dead in the current rule order and
+# listing them would falsely claim coverage. The fixture has no MAC address;
+# ContentSanitizerTest covers the MAC rule.
 # ---------------------------------------------------------------------------
 
 SANITIZATION_SCENARIOS: list[tuple[str, str, str]] = [
@@ -822,6 +909,207 @@ def verify_sanitization_rules() -> None:
                 record(f"--sanitize {label}", False)
                 continue
             record(f"--sanitize {label}", True)
+
+
+# ---------------------------------------------------------------------------
+# --sanitize-rules: only the rules of a JSON file run, in place of the
+# built-in rules. examples/sanitize-rules/default-rules.json has the
+# built-in rules, as a template to copy.
+# ---------------------------------------------------------------------------
+
+SANITIZE_RULES_TEMPLATE = os.path.join(
+    REPO_ROOT, "examples/sanitize-rules/default-rules.json"
+)
+SCENARIO_RULE_IDS = {
+    "email": "email",
+    "international phone": "phone-intl",
+    "license/passport": "passport",
+    "credit card": "card",
+    "10-18 digit string": "long-number",
+    "IPv4": "ipv4",
+    "IPv6": "ipv6",
+    "URL": "url",
+}
+# sanitize-target.pdf has the line "Phone   : 010-1234-5678". No built-in rule matches it.
+KR_MOBILE_TRIGGER = "010-1234-5678"
+KR_MOBILE_RULE = {
+    "id": "kr-mobile",
+    "pattern": r"(?<!\d)01[016789]-\d{3,4}-\d{4}(?!\d)",
+    "replacement": "010-0000-0000",
+}
+
+
+def _template_rules() -> list[dict]:
+    with open(SANITIZE_RULES_TEMPLATE, encoding="utf-8") as fh:
+        return json.load(fh)["rules"]
+
+
+def _write_rules_file(directory: str, name: str, data: dict) -> str:
+    path = os.path.join(directory, name)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+    return path
+
+
+def _text_output(pdf: str, extra_args: list[str]) -> str | None:
+    """Convert pdf to text and return the text, or None if the run fails."""
+    with tempfile.TemporaryDirectory() as outdir:
+        r = run_cli([pdf, "--format", "text", "--output-dir", outdir] + extra_args)
+        txt = _find_file_by_ext(outdir, ".txt")
+        if r.returncode != 0 or not txt:
+            print(
+                f"       [sanitize-rules] no text output (exit {r.returncode}): "
+                f"{((r.stdout or '') + (r.stderr or ''))[:300]!r}"
+            )
+            return None
+        with open(txt, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+
+
+def _rules_file_rejected(label: str, rules_path: str, must_name: str | None) -> bool:
+    """The run must stop before any file is processed, name must_name if given, and not leak a stack trace."""
+    with tempfile.TemporaryDirectory() as outdir:
+        r = run_cli(
+            [
+                PDF_BASIC,
+                "--format",
+                "text",
+                "--sanitize-rules",
+                rules_path,
+                "--output-dir",
+                outdir,
+            ]
+        )
+        combined = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 0:
+            print(f"       [{label}] expected a non-zero exit, got 0")
+            return False
+        if must_name and must_name not in combined:
+            print(
+                f"       [{label}] the error does not name {must_name!r}: {combined[:300]!r}"
+            )
+            return False
+        if os.listdir(outdir):
+            print(f"       [{label}] output was written: {os.listdir(outdir)}")
+            return False
+        if "Exception during processing file" in combined:
+            print(f"       [{label}] a file was processed before the error")
+            return False
+        return _assert_no_leak(label, r.stdout, r.stderr)
+
+
+def verify_sanitize_rules_file() -> None:
+    print("\n--- --sanitize-rules ---")
+
+    with tempfile.TemporaryDirectory() as cfg_dir:
+        label = "--sanitize-rules template + custom rule (kr-mobile)"
+        if not (
+            os.path.exists(PDF_SANITIZE) and os.path.exists(SANITIZE_RULES_TEMPLATE)
+        ):
+            record(f"{label} [SKIPPED: fixture missing]", None)
+        else:
+            path = _write_rules_file(
+                cfg_dir, "kr.json", {"rules": _template_rules() + [KR_MOBILE_RULE]}
+            )
+            base = _text_output(PDF_SANITIZE, ["--sanitize"])
+            # No --sanitize here: the option must turn sanitization on.
+            got = _text_output(PDF_SANITIZE, ["--sanitize-rules", path])
+            if base is None or got is None:
+                record(label, False)
+            elif KR_MOBILE_TRIGGER not in base:
+                print(
+                    f"       [{label}] trigger not in --sanitize output — fixture problem. "
+                    f"trigger={KR_MOBILE_TRIGGER!r}"
+                )
+                record(f"{label} [fixture: trigger missing]", False)
+            else:
+                ok = (
+                    KR_MOBILE_TRIGGER not in got
+                    and "010-0000-0000" in got
+                    and "test@example.com" not in got
+                    and "email@example.com" in got
+                )
+                if not ok:
+                    print(f"       [{label}] unexpected output: {got[:300]!r}")
+                record(label, ok)
+
+        if not (
+            os.path.exists(PDF_SANITIZATION_TARGETS)
+            and os.path.exists(SANITIZE_RULES_TEMPLATE)
+        ):
+            record(
+                "--sanitize-rules template without email and url / custom only "
+                "[SKIPPED: fixture missing]",
+                None,
+            )
+        else:
+            label = "--sanitize-rules template without email and url"
+            removed = {"email", "url"}
+            path = _write_rules_file(
+                cfg_dir,
+                "without.json",
+                {"rules": [r for r in _template_rules() if r["id"] not in removed]},
+            )
+            got = _text_output(PDF_SANITIZATION_TARGETS, ["--sanitize-rules", path])
+            ok = got is not None
+            for scenario, trigger, replacement in SANITIZATION_SCENARIOS if ok else []:
+                if SCENARIO_RULE_IDS[scenario] in removed:
+                    if trigger not in got:
+                        print(f"       [{label}] removed rule still masked {trigger!r}")
+                        ok = False
+                elif trigger in got or replacement not in got:
+                    print(f"       [{label}] template rule did not mask {trigger!r}")
+                    ok = False
+            record(label, ok)
+
+            label = "--sanitize-rules custom rule only"
+            path = _write_rules_file(
+                cfg_dir,
+                "only.json",
+                {
+                    "rules": [
+                        {
+                            "id": "private-ipv4",
+                            "pattern": r"\b192\.168\.\d{1,3}\.\d{1,3}\b",
+                            "replacement": "10.0.0.1",
+                        }
+                    ]
+                },
+            )
+            got = _text_output(PDF_SANITIZATION_TARGETS, ["--sanitize-rules", path])
+            ok = got is not None and "192.168.0.42" not in got and "10.0.0.1" in got
+            for scenario, trigger, _replacement in SANITIZATION_SCENARIOS if ok else []:
+                if scenario != "IPv4" and trigger not in got:
+                    print(
+                        f"       [{label}] a built-in rule ran: {trigger!r} is missing"
+                    )
+                    ok = False
+            record(label, ok)
+
+        bad_regex = _write_rules_file(
+            cfg_dir,
+            "rules-invalid-pattern.json",
+            {
+                "rules": [
+                    {"id": "bad-regex", "pattern": "(unclosed", "replacement": "x"}
+                ]
+            },
+        )
+        record(
+            "--sanitize-rules invalid regex -> error names rule id, no output",
+            _rules_file_rejected("bad-regex", bad_regex, "bad-regex"),
+        )
+        empty = _write_rules_file(cfg_dir, "rules-empty.json", {"rules": []})
+        record(
+            "--sanitize-rules no rules -> error, no output",
+            _rules_file_rejected("empty", empty, "has no rules"),
+        )
+        record(
+            "--sanitize-rules missing file -> error, no leak",
+            _rules_file_rejected(
+                "missing-file", os.path.join(cfg_dir, "missing.json"), "does not exist"
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1194,20 +1482,16 @@ def main() -> None:
     # --table-method
     # ------------------------------------------------------------------
     print("\n--- --table-method ---")
-    with tempfile.TemporaryDirectory() as tmpdir:
-        result = run_cli([
-            PDF_TABLES,
-            "--table-method", "cluster",
-            "--format", "markdown",
-            "--output-dir", tmpdir,
-        ])
-        ok = result.returncode == 0
-        if ok:
-            md_file = _find_file_by_ext(tmpdir, ".md")
-            ok = md_file is not None and assert_content(
-                "--table-method cluster", md_file, must_contain=["|"]
-            )
-        record("--table-method cluster", ok)
+    # The borderless sample has no ruling lines, so only cluster detection finds
+    # its table. The default run is the control: if it finds the table too, the
+    # sample no longer shows what --table-method cluster adds.
+    with_cluster = _markdown_has_table(PDF_BORDERLESS, ["--table-method", "cluster"])
+    with_default = _markdown_has_table(PDF_BORDERLESS, ["--table-method", "default"])
+    if with_cluster is False:
+        print("       [content] no table in the borderless sample with --table-method cluster")
+    if with_default:
+        print("       [content] the default method also finds the borderless table")
+    record("--table-method cluster", with_cluster is True and with_default is False)
 
     # ------------------------------------------------------------------
     # --reading-order
@@ -1511,6 +1795,7 @@ def main() -> None:
     verify_folder_summary()
     verify_markdown_with_html()
     verify_sanitization_rules()
+    verify_sanitize_rules_file()
 
     # ------------------------------------------------------------------
     # Summary
