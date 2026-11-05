@@ -81,6 +81,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.StringWriter;
 import java.io.UncheckedIOException;
 import java.util.zip.CRC32;
 import java.awt.image.BufferedImage;
@@ -628,6 +629,19 @@ public class JsonWriter {
     private static final int FOOTER_MAX_TOTAL_LENGTH = 400;
 
     /**
+     * Maximum character length of the serialized {@code header_and_footer} value: the compact JSON
+     * text of {@code {"header":[...],"footer":[...]}} including key names, quotes, commas and
+     * escapes, but without the indentation of the final document. Quotes and separators cost extra
+     * beyond the text caps above, so the value must stay strictly shorter than this limit.
+     *
+     * <p>Measured in characters, not UTF-8 bytes, because the value is stored in a character
+     * column (MySQL {@code VARCHAR(1000)} / {@code CHAR_LENGTH}). {@link String#length()} counts
+     * UTF-16 code units, so characters outside the BMP cost two and the gate stays conservative
+     * compared to MySQL's code-point count.</p>
+     */
+    private static final int HEADER_AND_FOOTER_MAX_VALUE_LENGTH = 1000;
+
+    /**
      * Matches a whitespace-free line that is just a page number: a digit sequence optionally joined
      * by {@code . / -} ({@code 3}, {@code 3/128}, {@code 1-1-2}), a decorated page label wrapped by
      * punctuation on both ends whose body is digits / roman-numeral letters joined by {@code . / -}
@@ -662,6 +676,10 @@ public class JsonWriter {
      * de-duplicated across the whole document (ignoring whitespace) and capped by total length
      * ({@link #HEADER_MAX_TOTAL_LENGTH} / {@link #FOOTER_MAX_TOTAL_LENGTH}). Footer lines that are
      * only a page number are dropped. The field is omitted entirely when both lists end up empty.</p>
+     *
+     * <p>The serialized value is additionally kept shorter than
+     * {@link #HEADER_AND_FOOTER_MAX_VALUE_LENGTH} characters: whole lines are dropped from the tail
+     * of the footer first, then from the tail of the header, so a line is never cut in half.</p>
      */
     private static void writeHeaderAndFooterField(JsonGenerator jsonGenerator, List<List<IObject>> contents,
                                                   int numberOfPages) throws IOException {
@@ -695,6 +713,10 @@ public class JsonWriter {
         if (header.isEmpty() && footer.isEmpty()) {
             return;
         }
+        trimToMaxValueLength(header, footer);
+        if (header.isEmpty() && footer.isEmpty()) {
+            return;
+        }
         jsonGenerator.writeObjectFieldStart(JsonName.HEADER_AND_FOOTER);
         if (!header.isEmpty()) {
             writeStringArrayField(jsonGenerator, JsonName.HEADER_AND_FOOTER_HEADER, header);
@@ -703,6 +725,47 @@ public class JsonWriter {
             writeStringArrayField(jsonGenerator, JsonName.HEADER_AND_FOOTER_FOOTER, footer);
         }
         jsonGenerator.writeEndObject();
+    }
+
+    /**
+     * Drops whole lines from the tail of the collected lists until the serialized
+     * {@code header_and_footer} value is shorter than {@link #HEADER_AND_FOOTER_MAX_VALUE_LENGTH}
+     * characters. Footer lines go first because the header usually carries the document identity,
+     * and a line is never cut in half. Both lists can end up empty when not even the first line
+     * fits, which makes the caller omit the field entirely.
+     */
+    private static void trimToMaxValueLength(List<String> header, List<String> footer) throws IOException {
+        while (serializedValueLength(header, footer) >= HEADER_AND_FOOTER_MAX_VALUE_LENGTH) {
+            if (!footer.isEmpty()) {
+                footer.remove(footer.size() - 1);
+            } else if (!header.isEmpty()) {
+                header.remove(header.size() - 1);
+            } else {
+                return;
+            }
+        }
+    }
+
+    /**
+     * Length in characters of the compact JSON value written for {@code header_and_footer}:
+     * {@code {"header":[...],"footer":[...]}} with the same character escapes as the final
+     * document and with empty lists omitted. Document indentation is not counted, because the limit
+     * concerns the value itself.
+     */
+    private static int serializedValueLength(List<String> header, List<String> footer) throws IOException {
+        StringWriter writer = new StringWriter();
+        try (JsonGenerator generator = new JsonFactory().createGenerator(writer)) {
+            generator.setCharacterEscapes(JSON_ESCAPES);
+            generator.writeStartObject();
+            if (!header.isEmpty()) {
+                writeStringArrayField(generator, JsonName.HEADER_AND_FOOTER_HEADER, header);
+            }
+            if (!footer.isEmpty()) {
+                writeStringArrayField(generator, JsonName.HEADER_AND_FOOTER_FOOTER, footer);
+            }
+            generator.writeEndObject();
+        }
+        return writer.toString().length();
     }
 
     /**
